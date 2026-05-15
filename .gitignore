@@ -1,0 +1,30 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.kicad_sch.bak
+.kicad_sch-bak
+fp-info-cache
+*.kicad_prl
+
+# Logs
+*.log
+server.err.log
+server.out.log
+
+# Runtime
+ipc_port.txt
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Secrets
+*.key
+

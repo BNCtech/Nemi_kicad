@@ -1,0 +1,37 @@
+{
+  "_comment": "kicad-cli ERC integration config. Wraps the official KiCad ERC engine and normalizes its output into the same issue shape that L1 (basic_checks) and L2 (validator) use, so the fix loop and diagnose see one merged list.",
+
+  "binary": {
+    "_comment": "Where kicad-cli lives. If kicad_cli_path is set, it wins. Otherwise we try $env:KICAD_CLI then walk autodetect_paths in order. First existing file wins. Add new install locations here when KiCad ships a new version or the user installs it elsewhere.",
+    "kicad_cli_path":   null,
+    "env_var":          "KICAD_CLI",
+    "autodetect_paths": [
+      "C:/Program Files/KiCad/9.0/bin/kicad-cli.exe",
+      "C:/Program Files/KiCad/8.0/bin/kicad-cli.exe",
+      "C:/Program Files/KiCad/7.0/bin/kicad-cli.exe",
+      "f:/Ki_CAD/kicad-source-mirror/build/install/msvc-win64-release/bin/kicad-cli.exe",
+      "/usr/bin/kicad-cli",
+      "/usr/local/bin/kicad-cli",
+      "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
+    ]
+  },
+
+  "invoke": {
+    "_comment": "Flags passed to `kicad-cli sch erc`. severity_all = include errors + warnings + exclusions (kicad-cli defaults to errors only, which silently hides 90% of real issues — flip to false only if you want errors-only).",
+    "severity_all":  true,
+    "format":        "json",
+    "units":         "mm",
+    "timeout_sec":   60
+  },
+
+  "ignore": {
+    "_comment": "ERC violation `type` keys to drop before merging into the issue list. Add a type here when you have a project-wide reason to ignore it (e.g. 'footprint_link_issues' on a project that hasn't pulled in footprint libs yet). The list of types comes from KiCad source / .kicad_pro erc.rule_severities.",
+    "violation_types":  [],
+    "_severity_filter": "Map kicad-cli severities (error/warning/exclusion) to our severities (critical/high/medium/low). exclusion = something the user explicitly waived in the project file; we report it as low so it stays visible without blocking.",
+    "severity_map": {
+      "error":     "critical",
+      "warning":   "high",
+      "exclusion": "low"
+    }
+  }
+}

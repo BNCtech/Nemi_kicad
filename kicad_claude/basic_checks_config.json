@@ -1,0 +1,140 @@
+{
+  "_comment": "L1 deterministic-check config. Universal stuff (power-symbol filter, refdes pattern, missing-value sentinels, grid) lives in conventions.json — this file holds only the bits unique to checking.",
+
+  "reference": {
+    "_comment": "Refdes annotation + format severities. The valid format itself comes from conventions.json:refdes.pattern. unannotated_pattern catches symbols KiCad has not yet given a number to (e.g. 'R?', 'U??').",
+    "unannotated_pattern": "^[A-Za-z]+\\?+$",
+    "missing_severity":         "critical",
+    "duplicate_severity":       "critical",
+    "unannotated_severity":     "critical",
+    "invalid_format_severity":  "high"
+  },
+
+  "value": {
+    "_comment": "Severity for blank/placeholder Value fields. The placeholder list itself is conventions.json:missing_value_sentinels.",
+    "missing_severity": "critical"
+  },
+
+  "label": {
+    "_comment": "Net-name rules. KiCad allows wide UTF-8 in labels but most tools (including KiCad ERC) prefer the strict pattern. Adjust if your project uses Unicode net names.",
+    "_valid_pattern_comment": "Allows leading digits (3V3, 12V, 1V8 are universal voltage-rail names) and KiCad bus/group {...} annotations. Disallows whitespace + most punctuation.",
+    "valid_pattern": "^[A-Za-z0-9_~/+\\-{][A-Za-z0-9_~/+.\\-{}]*$",
+    "invalid_format_severity": "medium",
+    "_orphan_comment": "Disabled by default ([] kinds). The simple count is fundamentally noisy: a label appearing once is fine when its wire connects to a component pin, sheet pin, or connector — the second endpoint is the pin, not another label. Proper detection needs net-walking (planned). Re-enable by setting orphan_kinds_to_check to e.g. ['label','global_label'] if you want best-effort flagging.",
+    "orphan_kinds_to_check":     [],
+    "orphan_severity":           "medium",
+    "_special_label_names_comment": "Labels that always appear singly by design and should never be flagged as orphans (used only when orphan_kinds_to_check is non-empty).",
+    "always_allowed_singletons": []
+  },
+
+  "grid": {
+    "_comment": "Off-grid endpoints silently fail to connect in KiCad. Grid step itself is in conventions.json:grid.schematic_mm. Set check_components/check_labels/check_wire_endpoints to false to suppress a category.",
+    "check_components":     true,
+    "check_labels":         true,
+    "check_wire_endpoints": true,
+    "off_grid_severity":    "high"
+  },
+
+  "geometry": {
+    "_comment": "Visual cleanliness checks: no diagonal wires, no wires lying on top of each other, no labels stacked at one point, no symbols crammed on top of each other. Each check has its own severity + on/off toggle. Thresholds are in mm; defaults align with KLC + KiCad library convention.",
+
+    "wire_orthogonality": {
+      "_comment": "Diagonal wire segments (KLC + KiCad convention forbid them). Disable only for special-purpose schematics that legitimately use diagonals.",
+      "enabled":  true,
+      "severity": "high"
+    },
+
+    "wire_overlap": {
+      "_comment": "Two wire segments lying on the same horizontal/vertical line and sharing more than one point. Causes ambiguous junction logic and ERC noise. Tolerance allows for floating-point grid drift.",
+      "enabled":           true,
+      "severity":          "medium",
+      "tolerance_mm":      0.01,
+      "_overlap_min_mm":   "Minimum overlap length to flag (avoids reporting two wires that merely touch at one endpoint).",
+      "overlap_min_mm":    0.5
+    },
+
+    "label_collision": {
+      "_comment": "Two labels at the same coordinate with different net names = ambiguous net binding. Same-name labels at the same point are redundant but harmless (kept off by default; flip flag_redundant to enable).",
+      "enabled":           true,
+      "severity":          "high",
+      "coord_tolerance_mm": 0.05,
+      "flag_redundant":     false
+    },
+
+    "symbol_proximity": {
+      "_comment": "Coarse origin-distance proxy. Superseded by symbol_bbox_overlap (which uses real lib_symbol body bboxes). Kept here for projects with heavy custom libraries where bbox parsing fails — re-enable manually if bbox check returns nothing.",
+      "enabled":             false,
+      "severity":            "high",
+      "min_separation_mm":   1.27,
+      "exclude_power":       true,
+      "exclude_dnp":         true
+    },
+
+    "symbol_bbox_overlap": {
+      "_comment": "Real bbox-vs-bbox intersection between two placed components on the same sheet. Each component's body bbox comes from its lib_symbol primitives (rectangle/polyline/circle/arc, pins excluded per KLC S3.5). Symbols whose lib_id is not in lib_symbols (or has no body primitives) fall back to a square of fallback_size_mm centred on origin so they still get checked. min_overlap_area_mm2 ignores microscopic intersections from floating-point grid drift.",
+      "enabled":              true,
+      "severity":             "high",
+      "fallback_size_mm":     2.54,
+      "min_overlap_area_mm2": 0.05,
+      "exclude_power":        true,
+      "exclude_dnp":          true
+    },
+
+    "wire_through_body": {
+      "_comment": "Per KLC S3.5: pins are placed OUTSIDE the symbol body and wires must NOT need to cross the body to reach a pin. We compute each placed component's body bbox from its lib_symbol primitives (rectangle/polyline/circle/arc, EXCLUDING pin shapes per KLC), then test every wire segment for true interior crossing. interior_margin_mm shrinks the bbox so floating-point grid drift on a boundary-touching wire (= legitimate pin tip) isn't flagged. min_body_dim_mm excludes tiny markers (test points, mounting holes, fiducials) where the body is just a marker around the pin — wires ending at such a pin would falsely look like they enter the body.",
+      "enabled":            true,
+      "severity":           "high",
+      "interior_margin_mm": 0.05,
+      "min_body_dim_mm":    1.5,
+      "exclude_power":      true
+    },
+
+    "net_dangling_label": {
+      "_comment": "Net-aware orphan-label check, powered by the union-find walker in nets.py. A label is dangling when its net has fewer than min_endpoints electrical members (pins + power ports).",
+      "_disabled_default_reason": "DEFAULT-DISABLED ([] kinds_to_check) until cross-sheet hierarchical-label binding ships. Per-sheet, labels that propagate to other sheets via sheet pins (e.g. 'PC-CLOCK-OUT' → parent connector J1 on a different sheet) appear as 0-endpoint nets and false-positive. Re-enable once nets.py walks sheet pins across the hierarchy. Set kinds_to_check to ['label','global_label'] to opt in for flat single-sheet projects.",
+      "enabled":            true,
+      "severity":           "medium",
+      "kinds_to_check":     [],
+      "min_endpoints":      1
+    },
+
+    "junction_missing": {
+      "_comment": "Per KLC CON_003: three or more wires meeting at a point must show an explicit junction dot. Without the junction, KiCad treats them as visually crossing but NOT electrically connected — silent net split. We count distinct wire segments that pass through each candidate point and flag points with >= 3 segments where no (junction) sexp exists.",
+      "enabled":           true,
+      "severity":          "high",
+      "coord_tolerance_mm": 0.05
+    },
+
+    "label_over_wire": {
+      "_comment": "A label's text must not visually overlap a wire it is NOT bound to (the bound wire IS supposed to pass through the anchor — that is the binding mechanism). Text bbox is estimated per KLC S3.2: text height = 1.27 mm (50 mil); char width = 0.6 × height (KiCad stroke font ratio).",
+      "enabled":           true,
+      "severity":          "medium",
+      "text_height_mm":    1.27,
+      "char_width_ratio":  0.6,
+      "_lift_comment":     "Vertical offset between the label anchor (which sits ON the bound wire) and the text bbox above it. KiCad's default label_offset_ratio = 0.15 of text height = ~0.19 mm; we use 0.25 mm as a safe halo that keeps the bound wire out of the bbox.",
+      "lift_mm":           0.25,
+      "_min_overlap_mm":   "Ignore overlaps shorter than this (avoids false flags from text barely touching a wire endpoint).",
+      "min_overlap_mm":    0.25
+    }
+  },
+
+  "functional": {
+    "_comment": "L3 functional checks — uses nets.build_project_nets to reason about electrical topology, not just geometry. Each rule maps to a KLC rule_id where applicable.",
+
+    "missing_decoupling": {
+      "_comment": "KLC POWER_001: every IC power-input pin must have a decoupling capacitor on the SAME net. We walk every net containing an IC power_in pin and check whether any capacitor (refdes prefix in cap_prefixes) is also a member. Excludes power-port-only nets (raw rails like a battery/regulator output before any caps) — those are caught by ERC PWR_FLAG checks instead.",
+      "enabled":          true,
+      "severity":         "high",
+      "_ic_categories":   "Categories from conventions.json:refdes that are checked. 'ic' is the universal one; add transistors/connectors here only if your shop convention requires decoupling on those too.",
+      "ic_categories":    ["ic"],
+      "_cap_prefixes":    "Refdes letter codes that count as a decoupling capacitor. Just C by IEEE 315; some shops add CN/CC for special types.",
+      "cap_prefixes":     ["C"],
+      "_pin_types":       "KiCad pin electrical_type values that need decoupling. power_in covers VCC/VDD/AVDD; bidirectional is excluded (those are signal pins).",
+      "pin_types":        ["power_in"],
+      "_skip_pin_names":  "Pin names that are pure ground and never need their own decoupling. Case-insensitive substring match.",
+      "skip_pin_names":   ["GND", "VSS", "VEE", "AGND", "DGND", "PGND", "EGND"],
+      "_min_pins":        "Skip ICs with fewer than this many pins total — single-pin parts (test points, connectors) often look like ICs by refdes but aren't real ICs.",
+      "min_pins":         3
+    }
+  }
+}

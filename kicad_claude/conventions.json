@@ -1,0 +1,67 @@
+{
+  "_comment": "Universal KiCad / EE conventions shared by every module. NOT circuit-specific. Add new refdes letter codes here and every module picks them up.",
+
+  "power_symbol": {
+    "_comment": "Schematic items that are not physical parts: power-port symbols, PWR_FLAG markers. Excluded from BOM and from basic-checks 'missing footprint' warnings.",
+    "lib_id_prefixes": ["power:"],
+    "reference_prefixes": ["#"]
+  },
+
+  "missing_value_sentinels": {
+    "_comment": "Strings that mean 'no value set' even though the field is non-empty. Case-insensitive.",
+    "values": ["", "?", "TBD", "VAL", "~", "N/A", "NA"]
+  },
+
+  "refdes": {
+    "_comment": "Per IEEE 315 / ANSI Y32.2. priority = sort order in BOM (lower = earlier). category = used by checks that key off part type.",
+    "pattern": "^[A-Z]+[0-9]+$",
+    "prefixes": {
+      "U":   { "priority":  1, "category": "ic" },
+      "IC":  { "priority":  1, "category": "ic" },
+      "Q":   { "priority":  2, "category": "ic" },
+      "T":   { "priority":  2, "category": "ic" },
+      "D":   { "priority":  3, "category": "diode" },
+      "DZ":  { "priority":  3, "category": "diode" },
+      "LED": { "priority":  3, "category": "diode" },
+      "L":   { "priority":  4, "category": "passive" },
+      "FB":  { "priority":  4, "category": "passive" },
+      "C":   { "priority":  5, "category": "passive" },
+      "R":   { "priority":  6, "category": "passive" },
+      "RV":  { "priority":  6, "category": "passive" },
+      "RN":  { "priority":  6, "category": "passive" },
+      "Y":   { "priority":  7, "category": "crystal" },
+      "X":   { "priority":  7, "category": "crystal" },
+      "F":   { "priority":  8, "category": "protection" },
+      "PTC": { "priority":  8, "category": "protection" },
+      "TVS": { "priority":  8, "category": "protection" },
+      "MOV": { "priority":  8, "category": "protection" },
+      "SW":  { "priority":  9, "category": "switch" },
+      "S":   { "priority":  9, "category": "switch" },
+      "BT":  { "priority":  9, "category": "battery" },
+      "K":   { "priority":  9, "category": "relay" },
+      "J":   { "priority": 10, "category": "connector" },
+      "P":   { "priority": 10, "category": "connector" },
+      "CN":  { "priority": 10, "category": "connector" },
+      "TP":  { "priority": 11, "category": "test_point" },
+      "MP":  { "priority": 12, "category": "mechanical" },
+      "H":   { "priority": 12, "category": "mechanical" }
+    },
+    "default_priority": 99
+  },
+
+  "grid": {
+    "_comment": "KiCad default schematic grid. Symbols/wires off this grid silently fail to connect — checked by basic_checks.",
+    "schematic_mm": 1.27,
+    "tolerance_mm": 0.001
+  },
+
+  "kicad_string_escapes": {
+    "_comment": "KiCad serializes a few characters as {token} so they survive paths and identifiers. To compare or count net names correctly, un-escape them first. Extend as new tokens are observed in real schematics.",
+    "{slash}":  "/",
+    "{tilde}":  "~",
+    "{space}":  " ",
+    "{dollar}": "$",
+    "{colon}":  ":",
+    "{quote}":  "\""
+  }
+}

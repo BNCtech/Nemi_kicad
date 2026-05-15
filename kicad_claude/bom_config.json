@@ -1,0 +1,33 @@
+{
+  "_comment": "BOM-specific config only. Universal conventions (refdes letter codes, power-symbol filter, missing-value sentinels) live in conventions.json so basic_checks and other modules share them. Do not duplicate them here.",
+
+  "property_aliases": {
+    "_comment": "Different teams name fields differently. First match wins; lookup is case-insensitive.",
+    "mpn":          ["MPN", "Part Number", "PartNumber", "Manufacturer Part Number", "MFR_PN", "PN"],
+    "manufacturer": ["Manufacturer", "Mfr", "MFR", "Manufacturer Name"],
+    "description":  ["Description", "Desc"]
+  },
+
+  "_strict_mpn_categories_comment": "Categories from conventions.json:refdes that MUST carry an MPN when --strict-mpn is on. Edit to suit your shop.",
+  "strict_mpn_categories": ["ic"],
+
+  "text_table": {
+    "_comment": "Display widths for the printable BOM. Strings longer than max get an ellipsis. CSV/JSON exports never truncate.",
+    "references_max_width": 40,
+    "footprint_max_width": 50,
+    "ellipsis": "…"
+  },
+
+  "csv_columns": {
+    "_comment": "Column order and header labels for the CSV export. Keys are internal field names, values are the column headers manufacturers see.",
+    "qty":          "Qty",
+    "references":   "References",
+    "value":        "Value",
+    "footprint":    "Footprint",
+    "mpn":          "MPN",
+    "manufacturer": "Manufacturer",
+    "description":  "Description",
+    "lib_id":       "LibId",
+    "dnp":          "DNP"
+  }
+}

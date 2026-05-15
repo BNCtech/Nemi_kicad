@@ -1,0 +1,29 @@
+{
+  "_comment": "Validate->fix loop. Wraps L1 (basic_checks) + L2 (validator) + modifier so Claude can iteratively repair a schematic until it passes. Every threshold/limit/severity gate lives here, never in fixer.py.",
+
+  "loop": {
+    "_comment": "Maximum repair attempts. Each iteration: validate -> ask Claude for ops -> apply -> re-validate. Stops early on PASS or when no progress is made (issue count does not drop two iterations in a row).",
+    "max_iterations": 5,
+    "stop_on_no_progress": true
+  },
+
+  "gates": {
+    "_comment": "Which severities the loop tries to fix and which block declaring success. fix_severities = sent to Claude; success_blocking_severities = if any remain after the loop, status=FAIL. Lowering thresholds here makes the loop stricter without code changes.",
+    "fix_severities":               ["critical", "high"],
+    "success_blocking_severities":  ["critical"]
+  },
+
+  "claude": {
+    "_comment": "Which model to ask for repairs and what shape we expect back. The prompt template lives in fixer.py because it weaves runtime data; the controllable knobs are here.",
+    "model": null,
+    "max_tokens": 4000,
+    "_model_null_comment": "null = use the default deep model from .env (CLAUDE_MODEL_DEEP)."
+  },
+
+  "safety": {
+    "_comment": "What the loop refuses to do without explicit opt-in. delete_components stays off by default because deleting a part the user placed is rarely the right repair for a missing-decoupling-cap or wrong-value issue.",
+    "allow_delete_component": false,
+    "max_ops_per_iteration":  20,
+    "backup_before_apply":    true
+  }
+}
