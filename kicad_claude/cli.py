@@ -6,6 +6,7 @@ from pathlib import Path
 from .basic_checks import run_all as basic_check_run, to_text as basic_check_to_text
 from .bom import extract_rows as bom_extract_rows, to_csv as bom_to_csv, to_text as bom_to_text, validate_rows as bom_validate_rows
 from .chat import repl as chat_repl
+from .circuit_rules import apply_all as rules_apply_all, detect_all as rules_detect_all, to_text as rules_to_text
 from .erc import run as erc_run, to_text as erc_to_text
 from .fixer import diagnose as fix_diagnose, fix as fix_run, to_text as fix_to_text
 from .schematic_extractor import SchematicExtractor
@@ -140,6 +141,30 @@ def cmd_erc(args):
         sys.exit(2)
 
 
+def cmd_apply_rules(args):
+    """Deterministic rule applier (POWER_001 / POWER_005 / OSC_001 / RST_001 /
+    PUL_001 / LED_001). No Claude call — pure local. Mutates the schematic."""
+    rules = args.only.split(",") if args.only else None
+    if args.dry_run:
+        report = rules_detect_all(args.path)
+        if args.json:
+            print(json.dumps(report, indent=2, default=str))
+        else:
+            print(f"CIRCUIT RULES (DRY RUN) - {report['path']}")
+            print(f"  total findings: {len(report['findings'])}")
+            for rid, n in sorted(report["by_rule"].items()):
+                print(f"    {rid}: {n}")
+            for f in report["findings"]:
+                print(f"  [{f['severity']:8s}] {f['rule_id']:10s} "
+                      f"{', '.join(f['refs'])}: {f['message']}")
+        return
+    report = rules_apply_all(args.path, rules=rules)
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+    else:
+        print(rules_to_text(report))
+
+
 def cmd_serve(args):
     from .server import run as serve_run
     ipc_files = [Path(p) for p in (args.ipc_port_file or [])] or None
@@ -200,6 +225,19 @@ def main(argv=None):
     pc.add_argument("path", type=str)
     pc.add_argument("--model", default=None)
     pc.set_defaults(func=lambda a: chat_repl(a.path, model=a.model))
+
+    par = sub.add_parser("apply-rules",
+                         help="deterministic rule applier: auto-add decoupling caps, "
+                              "pull-ups, load caps, PWR_FLAGs, current-limit R for LEDs. "
+                              "Pure local — no Claude call. Mutates the schematic.")
+    par.add_argument("path", type=Path)
+    par.add_argument("--dry-run", action="store_true",
+                     help="list findings only; do not edit the schematic")
+    par.add_argument("--only", default=None,
+                     help="comma-separated rule IDs to apply "
+                          "(POWER_001,POWER_002,POWER_005,OSC_001,RST_001,PUL_001,LED_001)")
+    par.add_argument("--json", action="store_true")
+    par.set_defaults(func=cmd_apply_rules)
 
     ps = sub.add_parser("serve", help="run the WebSocket+IPC backend for the eeschema AI chat panel")
     ps.add_argument("--host", default="127.0.0.1")

@@ -18,7 +18,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import basic_checks, erc as erc_mod, hierarchy, validator
+from . import basic_checks, circuit_rules, erc as erc_mod, hierarchy, validator
 from ._config_loader import load as _load_config
 from .claude_client import ClaudeClient
 from .schematic_extractor import SchematicExtractor
@@ -199,6 +199,12 @@ def fix(schematic_path, model: Optional[str] = None) -> Dict[str, Any]:
     last_count: Optional[int] = None
     plateau_streak = 0
 
+    # Pre-pass: run the deterministic rule applier (free, no API call). Pulls
+    # the easy "every IC needs decoupling, every crystal needs load caps, every
+    # I2C bus needs pull-ups" defects off the table before Claude even sees the
+    # schematic — saves tokens and keeps Claude focused on judgement calls.
+    pre_pass = circuit_rules.apply_all(str(path))
+
     for i in range(1, max_iters + 1):
         report = _gather_issues(str(path))
         all_issues = report["issues"]
@@ -250,6 +256,7 @@ def fix(schematic_path, model: Optional[str] = None) -> Dict[str, Any]:
     return {
         "path": str(path),
         "status": "PASS" if not final_blocking else "FAIL",
+        "pre_pass": pre_pass,
         "iterations": iterations,
         "final": final,
     }

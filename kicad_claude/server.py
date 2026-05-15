@@ -7,7 +7,7 @@ import tempfile
 import uuid as _uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -19,6 +19,87 @@ from .schematic_modifier import SchematicDocument, apply_operation
 
 
 HISTORY_TURNS = 12
+
+
+# Map each basic_checks check_id to (human-readable title, category).
+# Keeps the chat panel free of raw [CHECK_ID] tokens.
+_CHECK_INFO: Dict[str, Tuple[str, str]] = {
+    # Grid / placement
+    "GRID_COMPONENT":          ("Component off grid", "Grid alignment"),
+    "GRID_LABEL":              ("Label off grid", "Grid alignment"),
+    "GRID_WIRE":               ("Wire endpoint off grid", "Grid alignment"),
+    "GEOM_DIAGONAL":           ("Diagonal wire segment", "Routing"),
+    "GEOM_WIRE_OVERLAP":       ("Overlapping wires", "Routing"),
+    "GEOM_WIRE_THRU_BODY":     ("Wire crosses through symbol body", "Routing"),
+    "GEOM_LABEL_CONFLICT":     ("Conflicting labels on same net", "Labels"),
+    "GEOM_LABEL_REDUNDANT":    ("Redundant label", "Labels"),
+    "GEOM_LABEL_OVER_WIRE":    ("Label sits on a wire mid-segment", "Labels"),
+    "GEOM_SYMBOL_PROXIMITY":   ("Symbols too close (placement clash)", "Placement"),
+    "GEOM_SYMBOL_OVERLAP":     ("Symbol bodies overlap", "Placement"),
+    # References / values
+    "REF_MISSING":             ("Reference designator missing", "References"),
+    "REF_UNANNOTATED":         ("Component not annotated (e.g. R?)", "References"),
+    "REF_INVALID_FORMAT":      ("Reference format invalid", "References"),
+    "REF_DUPLICATE":           ("Duplicate reference designator", "References"),
+    "VALUE_MISSING":           ("Component value missing", "BOM / Values"),
+    "VALUE_INVALID":           ("Component value invalid", "BOM / Values"),
+    "LABEL_FORMAT":            ("Label name format invalid", "Labels"),
+    # Net integrity / ERC-ish
+    "NET_DANGLING_LABEL":      ("Label is dangling (no net)", "Connectivity"),
+    "NET_JUNCTION_MISSING":    ("Junction missing at wire crossing", "Connectivity"),
+    "MISSING_DECOUPLING":      ("Missing decoupling capacitor on power pin", "Power integrity"),
+}
+
+
+_PASSIVE_REF_PREFIXES = ("R", "C", "L", "D", "Q", "TP", "FB", "MH", "F", "Y", "X")
+
+
+def _identify_circuit(components: List[Dict[str, Any]]) -> str:
+    """Return a concise one-line summary of the active ICs on the sheet —
+    e.g. "NE555 + LM2596" — so the user instantly sees what circuit is on
+    the page without paying for a Claude call.
+
+    Skips passives (R/C/L/D/Q/TP/F/Y/X), power-port symbols, mounting holes,
+    and PWR_FLAGs. Dedupes by value, preserves first-seen order, and adds
+    a "Nx" prefix when the same active part appears more than once.
+    """
+    seen: Dict[str, int] = {}
+    order: List[str] = []
+    for c in components:
+        lib = (c.get("lib_id") or "")
+        ref = (c.get("reference") or "")
+        val = ((c.get("value") or "") or "").strip()
+        if lib.startswith("power:") or ref.startswith("#"):
+            continue
+        # passive refdes like R1, C12, D3, Q4 — first char is a passive
+        # letter AND the rest starts with a digit (avoids skipping U1/IC1).
+        if ref and ref[0] in _PASSIVE_REF_PREFIXES and ref[1:2].isdigit():
+            continue
+        if not val or val.lower() in {"~", "?", "x"}:
+            val = lib.split(":")[-1] if lib else ""
+        if not val:
+            continue
+        if val not in seen:
+            order.append(val)
+            seen[val] = 0
+        seen[val] += 1
+    if not order:
+        return ""
+    return " + ".join((f"{seen[v]}× {v}" if seen[v] > 1 else v) for v in order)
+
+
+def _humanize_issue(it: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a chat-friendly dict for one basic_checks issue."""
+    cid = it.get("check") or ""
+    title, category = _CHECK_INFO.get(cid, (cid.replace("_", " ").title(), "Other"))
+    return {
+        "id":       cid,
+        "severity": it.get("severity") or "info",
+        "title":    title,
+        "category": category,
+        "refs":     it.get("refs") or "",
+        "message":  it.get("message") or "",
+    }
 
 
 def _build_auto_summary(room: "ChatRoom") -> Optional[Dict[str, Any]]:
@@ -54,20 +135,29 @@ def _build_auto_summary(room: "ChatRoom") -> Optional[Dict[str, Any]]:
         and not (c.get("reference", "") or "").startswith("#")
     }
 
-    # Quick L1 pass — only show critical/high so users don't drown in low-priority noise.
-    l1_critical: List[str] = []
-    l1_high: List[str] = []
+    # Production-grade pass — surface critical / high / medium so the user sees
+    # everything that matters before sign-off, not just the worst.
+    issues: List[Dict[str, Any]] = []
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     try:
         report = basic_checks.run_all(room.schematic_path)
         for it in report.get("issues", []):
-            sev = it.get("severity")
-            msg = f"[{it.get('check','?')}] {it.get('refs','')}: {it.get('message','')}"
-            if sev == "critical":
-                l1_critical.append(msg)
-            elif sev == "high":
-                l1_high.append(msg)
+            sev = it.get("severity") or "info"
+            counts[sev] = counts.get(sev, 0) + 1
+            if sev in ("critical", "high", "medium"):
+                issues.append(_humanize_issue(it))
     except Exception:
         pass
+
+    # Production-readiness verdict — drives the colored status badge in the UI.
+    if counts.get("critical", 0) > 0:
+        readiness = "not_ready"
+    elif counts.get("high", 0) > 0 or counts.get("medium", 0) > 3:
+        readiness = "needs_review"
+    elif counts.get("medium", 0) > 0:
+        readiness = "minor_polish"
+    else:
+        readiness = "ready"
 
     name = Path(room.schematic_path).name
     return {
@@ -75,9 +165,10 @@ def _build_auto_summary(room: "ChatRoom") -> Optional[Dict[str, Any]]:
         "sheets":      sheets,
         "parts":       len(physical_refs),
         "power_rails": rails,
-        "critical":    l1_critical[:10],
-        "high":        l1_high[:10],
-        "more_high":   max(0, len(l1_high) - 10),
+        "circuit":     _identify_circuit(components),
+        "issues":      issues,
+        "counts":      counts,
+        "readiness":   readiness,
     }
 
 

@@ -243,9 +243,153 @@ class SchematicDocument:
         node = self.find_component(reference)
         if not node:
             return {"ok": False, "message": f"component {reference} not found"}
+        # Compute this component's world pin tip positions BEFORE removing —
+        # so we can sweep wires/junctions/labels/no_connects that would be
+        # left stranded. Without this, "remove X" leaves a forest of dangling
+        # wires that ERC then complains about.
+        pin_positions = self._world_pin_positions(node)
         self._snapshot()
         self.tree.remove(node)
-        return {"ok": True, "message": f"deleted {reference}"}
+        # Only sweep positions where NO OTHER live component still has a pin —
+        # multi-unit ICs share pins across units, and shared power-rail pin
+        # positions should not be wiped just because one consumer was deleted.
+        other_set = {self._snap_xy(x, y) for (x, y) in self._all_world_pin_positions()}
+        targets = [p for p in pin_positions if self._snap_xy(*p) not in other_set]
+        swept = self._sweep_orphans_at(targets)
+        msg = f"deleted {reference}"
+        if swept:
+            msg += f" (+ cleaned {swept} stranded item{'s' if swept != 1 else ''})"
+        return {"ok": True, "message": msg}
+
+    # ------------------------------------------------------------------
+    # Pin geometry helpers (used by delete_component auto-cleanup)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _snap_xy(x: float, y: float, tol: float = 0.05) -> Tuple[int, int]:
+        return (int(round(x / tol)), int(round(y / tol)))
+
+    @staticmethod
+    def _rot_xy(x: float, y: float, deg: float) -> Tuple[float, float]:
+        q = (int(round(deg)) % 360) // 90
+        for _ in range(q):
+            x, y = -y, x
+        return (x, y)
+
+    def _lib_symbol_node(self, lib_id: str) -> Optional[list]:
+        for child in self.tree[1:]:
+            if isinstance(child, list) and _head(child) == "lib_symbols":
+                for sym in child[1:]:
+                    if (
+                        isinstance(sym, list)
+                        and _head(sym) == "symbol"
+                        and len(sym) > 1
+                        and _to_str(sym[1]) == lib_id
+                    ):
+                        return sym
+        return None
+
+    def _pin_defs_for_unit(self, lib_sym: list, unit: int) -> List[Tuple[float, float]]:
+        """Return symbol-local (px, py) for every pin in unit `unit` plus unit 0
+        (unit 0 holds shared pins like VCC/GND on multi-unit ICs)."""
+        out: List[Tuple[float, float]] = []
+        for sub in lib_sym[1:]:
+            if not (isinstance(sub, list) and _head(sub) == "symbol"):
+                continue
+            sub_name = _to_str(sub[1]) if len(sub) > 1 else ""
+            parts = sub_name.rsplit("_", 2)
+            sub_unit = 0
+            if len(parts) == 3:
+                try:
+                    sub_unit = int(parts[1])
+                except ValueError:
+                    sub_unit = 0
+            if sub_unit not in (0, unit):
+                continue
+            for pin in sub[1:]:
+                if not (isinstance(pin, list) and _head(pin) == "pin"):
+                    continue
+                for tag in pin[1:]:
+                    if isinstance(tag, list) and _head(tag) == "at" and len(tag) >= 3:
+                        out.append((float(tag[1]), float(tag[2])))
+                        break
+        return out
+
+    def _world_pin_positions(self, comp_node: list) -> List[Tuple[float, float]]:
+        cx = cy = 0.0
+        crot = 0.0
+        lib_id = ""
+        unit = 1
+        for sub in comp_node[1:]:
+            if not isinstance(sub, list):
+                continue
+            tag = _head(sub)
+            if tag == "at" and len(sub) >= 3:
+                cx = float(sub[1]); cy = float(sub[2])
+                if len(sub) > 3:
+                    crot = float(sub[3])
+            elif tag == "lib_id" and len(sub) > 1:
+                lib_id = _to_str(sub[1])
+            elif tag == "unit" and len(sub) > 1:
+                try:
+                    unit = int(sub[1])
+                except (TypeError, ValueError):
+                    unit = 1
+        if not lib_id:
+            # Power flag / no-symbol nodes still occupy a position — use `at`.
+            return [(cx, cy)] if (cx or cy) else []
+        lib_sym = self._lib_symbol_node(lib_id)
+        if not lib_sym:
+            return [(cx, cy)] if (cx or cy) else []
+        out: List[Tuple[float, float]] = []
+        for (px, py) in self._pin_defs_for_unit(lib_sym, unit):
+            rx, ry = self._rot_xy(px, py, crot)
+            out.append((cx + rx, cy - ry))
+        if not out:
+            out.append((cx, cy))
+        return out
+
+    def _all_world_pin_positions(self) -> List[Tuple[float, float]]:
+        out: List[Tuple[float, float]] = []
+        for child in self.tree[1:]:
+            if isinstance(child, list) and _head(child) == "symbol":
+                out.extend(self._world_pin_positions(child))
+        return out
+
+    def _sweep_orphans_at(self, positions: List[Tuple[float, float]]) -> int:
+        """Remove wires/junctions/labels/no_connects whose anchor sits at one
+        of the given positions (within snap tolerance). Wires are removed if
+        EITHER endpoint matches. Returns number of nodes removed."""
+        if not positions:
+            return 0
+        targets = {self._snap_xy(x, y) for (x, y) in positions}
+        to_remove: List[list] = []
+        for child in self.tree[1:]:
+            if not isinstance(child, list):
+                continue
+            tag = _head(child)
+            if tag == "wire":
+                pts = self._wire_pts(child)
+                if any(self._snap_xy(x, y) in targets for (x, y) in pts):
+                    to_remove.append(child)
+            elif tag in ("junction", "no_connect"):
+                for sub in child[1:]:
+                    if isinstance(sub, list) and _head(sub) == "at" and len(sub) >= 3:
+                        if self._snap_xy(float(sub[1]), float(sub[2])) in targets:
+                            to_remove.append(child)
+                        break
+            elif tag in ("label", "global_label", "hierarchical_label"):
+                for sub in child[1:]:
+                    if isinstance(sub, list) and _head(sub) == "at" and len(sub) >= 3:
+                        if self._snap_xy(float(sub[1]), float(sub[2])) in targets:
+                            to_remove.append(child)
+                        break
+        for n in to_remove:
+            try:
+                self.tree.remove(n)
+            except ValueError:
+                pass
+        return len(to_remove)
 
     def edit_value(self, reference: str, new_value: str) -> Dict[str, Any]:
         node = self.find_component(reference)
