@@ -1,0 +1,420 @@
+{
+  "_about": "Universal layout-engine config. All thresholds, conventions, and weights live here. No circuit names or component-specific logic — edits to this file change behavior across every circuit class without code changes.",
+
+  "power_net_patterns": {
+    "_comment": "A net is treated as power if (a) any member is a power-port symbol (lib_id starts with 'power:' or refdes starts with '#PWR') OR (b) its name matches one of these prefixes (case-insensitive). Both checks are needed — bare wires labeled '+3V3' without a power-port symbol still need power treatment.",
+    "patterns": [
+      "VCC", "VDD", "VEE", "VSS",
+      "GND", "AGND", "DGND", "PGND", "EGND", "SGND",
+      "VBUS", "VBAT", "VIN", "VOUT", "VSYS",
+      "+3V3", "+3.3V", "+5V", "+12V", "+24V", "+1V8", "+1.8V", "+2V5",
+      "-3V3", "-5V", "-12V"
+    ]
+  },
+
+  "ignored_refdes_prefixes": {
+    "_comment": "Refdes prefixes that represent annotation/utility symbols, not real components. Excluded from the connectivity graph so they don't inflate degree counts or create phantom nodes.",
+    "prefixes": ["#PWR", "#FLG", "TP", "MK", "LOGO", "FID"]
+  },
+
+  "importance_weights": {
+    "_comment": "score = w_pins * pin_count + w_degree * unique-non-power-neighbors + w_betweenness * betweenness_centrality. The highest-scoring node is the layout center candidate (MAIN_CONTROLLER). Tune these to bias toward pin-rich ICs vs hub-like passives.",
+    "pin_count": 1.0,
+    "degree": 2.0,
+    "betweenness": 5.0
+  },
+
+  "edge_rules": {
+    "_comment": "How non-power nets create edges between components. Power nets are excluded by default so the graph reveals signal topology (otherwise every component connects via GND and the graph is useless for layout). min_pin_count_for_edge filters single-pin dangling nets that would create no real edge anyway.",
+    "exclude_power_nets": true,
+    "min_pin_count_for_edge": 2
+  },
+
+  "grid_mm": 1.27,
+
+  "sheet": {
+    "_comment": "Sheet sizing. A4 landscape is the default for small/medium designs. When the role-grouped block count exceeds a4_block_limit, the placer auto-promotes to A3_landscape. margin_mm is the keep-out border on every side.",
+    "default_size": "A3_landscape",
+    "sizes_mm": {
+      "A4_landscape": [297, 210],
+      "A4_portrait":  [210, 297],
+      "A3_landscape": [420, 297],
+      "A3_portrait":  [297, 420],
+      "A2_landscape": [594, 420]
+    },
+    "a4_block_limit": 12,
+    "a3_block_limit": 20,
+    "margin_mm": 10.0,
+    "margin_bottom_mm": 30.0,
+    "density_factor": 1.4
+  },
+
+  "spacing": {
+    "_comment": "Geometry constants used by the placer. component_pitch_mm is the per-cell pitch. block_padding_mm is the white-space ring inside a block's border. block_gap_mm is the lane between adjacent blocks. The per-cell label keepout pad is NOT specified here — it is DERIVED at runtime from label_format.fixed_font_mm and label_format.label_gap_mm (see _cell_size), so a single edit to those values propagates everywhere.",
+    "component_pitch_mm": 7.62,
+    "block_padding_mm":   5.0,
+    "block_gap_mm":       8.0,
+    "ic_cell_mm":         30.0,
+    "passive_cell_mm":    7.62,
+    "connector_cell_mm": 12.7,
+    "dynamic_gap_max_mm": 30.0,
+    "dynamic_gap_low_fill_ratio": 0.30,
+    "dynamic_gap_high_fill_ratio": 0.70
+  },
+
+  "zones": {
+    "_comment": "Sheet-fractional positions for each named zone (top-left corner of the zone's first block). A block assigned to zone Z lands at (frac_x * sheet_w + margin, frac_y * sheet_h + margin). Tuning these reshapes the whole sheet at once.",
+    "top_center":    [0.36, 0.04],
+    "top_left":      [0.04, 0.04],
+    "top_right":     [0.68, 0.04],
+    "center":        [0.36, 0.32],
+    "left_top":      [0.04, 0.22],
+    "left_center":   [0.04, 0.46],
+    "left_bottom":   [0.04, 0.66],
+    "right_top":     [0.70, 0.12],
+    "right_center":  [0.70, 0.40],
+    "right_bottom":  [0.70, 0.66],
+    "bottom_left":   [0.10, 0.76],
+    "bottom_center": [0.38, 0.76],
+    "bottom_right":  [0.62, 0.76]
+  },
+
+  "role_zone_map": {
+    "_comment": "Legacy single-map fallback. Used when role_zone_maps is absent or the detected circuit type has no entry. New circuit types go in role_zone_maps instead.",
+    "MAIN_CONTROLLER": "center",
+    "POWER":           "top_center",
+    "POWER_REGULATOR": "top_left",
+    "PROTECTION":      "top_right",
+    "RESET":           "left_top",
+    "CRYSTAL":         "left_bottom",
+    "ANALOG":          "left_center",
+    "UART":            "left_bottom",
+    "USB":             "left_center",
+    "MEMORY":          "right_top",
+    "WIRELESS":        "right_top",
+    "DISPLAY":         "right_center",
+    "DEBUG":           "right_bottom",
+    "BOOT":            "right_bottom",
+    "CONNECTOR":       "right_center",
+    "SPI":             "bottom_left",
+    "I2C":             "bottom_center",
+    "SENSOR":          "bottom_right",
+    "CAN":             "bottom_right",
+    "MOTOR":           "bottom_center",
+    "GENERIC":         "bottom_center"
+  },
+
+  "circuit_detection": {
+    "_comment": "Layer 5 classifier — picks a sheet-layout template from the role distribution after Layers 1-4 finish. Result: MCU_BOARD (default), POWER_SUPPLY, ANALOG, MOTOR_DRIVER, RF_CIRCUIT. motor_keywords is the substring match list against value + lib_id; add new motor-driver families with a one-line edit.",
+    "power_supply_min_regulators": 1,
+    "power_supply_max_mcus":       0,
+    "analog_min_analog_role":      3,
+    "analog_max_mcus":             0,
+    "motor_min_analog_role":       2,
+    "rf_min_wireless_role":        1,
+    "motor_keywords": ["MOTOR", "DRIVER", "L293", "L298", "DRV8", "TB6", "A4988", "TMC", "DRV10", "AS5", "BTS7", "VNH"]
+  },
+
+  "role_zone_maps": {
+    "_comment": "Per-circuit-type zone layouts. The placer picks one of these maps based on circuit_type returned by Layer 5. Adding a new circuit type means: extend circuit_type.detect_circuit_type AND add a map here — no other code changes needed. Missing entries for a circuit_type fall back to MCU_BOARD's map.",
+
+    "MCU_BOARD": {
+      "_comment": "Classic MCU-centric board: MCU center, power top, support circuits on the sides, connectors right.",
+      "MAIN_CONTROLLER": "center",
+      "POWER":           "top_center",
+      "POWER_REGULATOR": "top_left",
+      "PROTECTION":      "top_right",
+      "RESET":           "left_top",
+      "CRYSTAL":         "left_bottom",
+      "ANALOG":          "left_center",
+      "UART":            "left_bottom",
+      "USB":             "left_center",
+      "MEMORY":          "right_top",
+      "WIRELESS":        "right_top",
+      "DISPLAY":         "right_center",
+      "DEBUG":           "right_bottom",
+      "BOOT":            "right_bottom",
+      "CONNECTOR":       "right_center",
+      "SPI":             "bottom_left",
+      "I2C":             "bottom_center",
+      "SENSOR":          "bottom_right",
+      "CAN":             "bottom_right",
+      "MOTOR":           "bottom_center",
+      "GENERIC":         "bottom_center"
+    },
+
+    "POWER_SUPPLY": {
+      "_comment": "Switching / linear PSU. Regulator at center, input protection top-left, output filtering on the right, connectors bottom.",
+      "POWER_REGULATOR": "center",
+      "POWER":           "top_center",
+      "PROTECTION":      "top_left",
+      "ANALOG":          "left_center",
+      "SENSOR":          "right_top",
+      "CONNECTOR":       "bottom_center",
+      "RESET":           "left_bottom",
+      "GENERIC":         "right_center"
+    },
+
+    "ANALOG": {
+      "_comment": "Pure-analog circuit (op-amps, audio, filters). The analog block anchors at center; passives spread around.",
+      "ANALOG":          "center",
+      "POWER":           "top_center",
+      "POWER_REGULATOR": "top_left",
+      "PROTECTION":      "top_right",
+      "SENSOR":          "left_top",
+      "CONNECTOR":       "right_center",
+      "GENERIC":         "bottom_center"
+    },
+
+    "MOTOR_DRIVER": {
+      "_comment": "Motor driver board. Driver IC center, power top, protection left, motor connector right, sense passives bottom.",
+      "ANALOG":          "center",
+      "POWER":           "top_center",
+      "POWER_REGULATOR": "top_left",
+      "PROTECTION":      "left_center",
+      "SENSOR":          "left_bottom",
+      "CONNECTOR":       "right_center",
+      "MOTOR":           "right_top",
+      "GENERIC":         "bottom_center"
+    },
+
+    "RF_CIRCUIT": {
+      "_comment": "RF / wireless module board. The radio module is the centre, MCU (if present) opposite, antenna connector to one side.",
+      "WIRELESS":        "center",
+      "MAIN_CONTROLLER": "left_center",
+      "POWER":           "top_center",
+      "POWER_REGULATOR": "top_left",
+      "PROTECTION":      "top_right",
+      "CONNECTOR":       "right_center",
+      "CRYSTAL":         "left_bottom",
+      "GENERIC":         "bottom_center"
+    }
+  },
+
+  "hide_pin_numbers": {
+    "_comment": "Hide pin numbers + pin names on small symbols (≤ max_pins). A 2-pin diode rendering '1' and '2' next to a 2 mm body is pure clutter — net labels carry the connection info. ICs (>4 pins by default) keep pin numbers/names visible because P0.04 / VCC / GND on an MCU is genuinely useful. force_show_min_pins overrides any source-side `(pin_numbers (hide yes))` for symbols at or above the threshold — without this, an MCU lib_symbol cached with hide=yes from a foreign library renders without any pin numbers next to our column-aligned labels.",
+    "enabled": true,
+    "max_pins_to_hide_numbers": 4,
+    "max_pins_to_hide_names": 2,
+    "force_show_min_pins": 6
+  },
+
+  "property_normalize": {
+    "_comment": "After moving a component, override its Reference and Value property positions to KiCad's canonical convention: Reference centered above the body, Value centered below. The source schematic's property offsets may have been hand-tuned for a specific layout — when our placer moves the component into a tight zone those offsets often land the text on top of the body or on adjacent components. Disable (enabled=false) to preserve source offsets when emitting a near-pixel-perfect copy of the original schematic.",
+    "enabled": true,
+    "refdes_margin_mm": 1.27,
+    "value_margin_mm": 1.27
+  },
+
+  "block_split": {
+    "_comment": "Split blocks that have more than max_block_size members into multiple sub-blocks (e.g. a GENERIC trash bucket of 43 components becomes 3 sub-blocks of ~15 each). Sub-block role gets a `_N` suffix so the existing zone resolver pushes them into fallback zones with gaps. Universal fix for dense layouts — same logic helps dcdc's 127-component GENERIC.",
+    "enabled": true,
+    "max_block_size": 15
+  },
+
+  "bbox_padding": {
+    "_comment": "Dynamic padding around the union-of-outlines bbox per block. Bigger blocks need slightly more breathing room than the constant in spacing.block_padding_mm provides — formula is `base + count * per_component`, clamped to [min, max]. Without this, dense blocks (many components -> tight bbox) get the same 5 mm padding as a 1-component block and look cramped.",
+    "base_mm": 8.0,
+    "per_component_mm": 0.5,
+    "min_mm": 6.0,
+    "max_mm": 15.0
+  },
+
+  "debug_overlay": {
+    "_comment": "Functional-zone overlay — circuit-shape gated. Dashed boxes + titles only render when they add navigation value: sheet must have ≥ min_blocks_for_borders distinct blocks AND ≥ min_components_for_borders parts AND ≥ min_distinct_subsystems distinct base roles. Per-block gate skip_single_component_blocks suppresses solo-part boxes; per-role floor `bbox_policy.role_min_members` suppresses single-IC PROTECTION/POWER_REGULATOR/CONNECTOR boxes that turn small datasheet-style circuits (LM317, AMS1117, NE555 reg-only) into 3-4 ugly dashed boxes. Industry rule of thumb (TI/ON/ST/KiCad/EMA/Cadence/Sierra/Schemalyzer): boxes are for MEDIUM+ circuits — small circuits (<20 parts, 1-2 sub-systems) render direct-wire single-sheet, no boxes.",
+    "min_components_for_borders": 20,
+    "min_blocks_for_borders": 2,
+    "min_distinct_subsystems": 2,
+    "skip_single_component_blocks": true,
+    "bbox_policy": {
+      "_comment": "Per-block bbox decision. always_box_roles get a box ONLY when they reach role_min_members[role] (or default_min_members if absent) — a lone U1 LM317 with role POWER_REGULATOR is not a 'sub-system boundary', it's the whole circuit. never_box_roles never get a box. Other roles: boxed when ≥min_components_to_box members AND title not in skip_topology_titles.",
+      "always_box_roles": ["POWER", "POWER_REGULATOR", "CONNECTOR", "USB",
+                            "WIRELESS", "MEMORY", "PROTECTION", "DEBUG",
+                            "BOOT", "MOTOR", "SENSOR", "DISPLAY"],
+      "never_box_roles":  ["MAIN_CONTROLLER", "CRYSTAL", "RESET", "ANALOG"],
+      "min_components_to_box": 3,
+      "default_min_members": 2,
+      "role_min_members": {
+        "POWER_REGULATOR": 4,
+        "POWER":           3,
+        "PROTECTION":      2,
+        "CONNECTOR":       2,
+        "USB":             2,
+        "WIRELESS":        2,
+        "MEMORY":          2,
+        "DEBUG":           2,
+        "BOOT":            2,
+        "MOTOR":           2,
+        "SENSOR":          2,
+        "DISPLAY":         2
+      },
+      "skip_topology_titles": ["VOLTAGE DIVIDER", "FILTER NETWORK", "RESISTOR NETWORK"]
+    },
+    "draw_zone_borders": true,
+    "draw_zone_titles": true,
+    "border_offset_mm": 0.0,
+    "border_stroke_mm": 0.2,
+    "border_style": "dash",
+    "title_font_size_mm": 1.6,
+    "title_margin_mm": 1.0,
+    "title_color_rgba": [0, 72, 150, 1.0],
+    "title_bold": true,
+    "title_justify": "center"
+  },
+
+  "net_name_sanitizer": {
+    "_comment": "KiCad rejects '(' and ')' in label names (KLC says label names must be a single symbol token). Auto-generated 'Net-(REF-PadN)' names from build_sheet_nets always violate. This rewrites the canonical auto-name shape to 'REF_PN' and strips remaining invalid chars from anything else. Applied at router emission time so routed.json carries clean text downstream.",
+    "auto_name_pattern": "^Net-\\((.+)-Pad(.+)\\)$",
+    "auto_name_format": "{ref}_P{pad}",
+    "invalid_chars": "()&",
+    "fallback_replacement": "_",
+    "drop_namespace_prefix": true,
+    "max_chars": 0
+  },
+
+  "power_port_edge_anchor": {
+    "_comment": "Pattern from professional reference schematics: every block's positive-rail (VCC/VDD/+3V3/+5V) power-port symbol gets anchored to the block's TOP edge; ground-rail (GND/VSS/AGND) power-ports to the BOTTOM edge. A connecting wire runs from each colocated component pin up/down to the relocated port. Universal — relies only on rail-name polarity + block bbox geometry, no part-number knowledge. Disable for the legacy 'port-at-pin-tip' behaviour.",
+    "enabled": true,
+    "offset_mm": 2.54
+  },
+
+  "label_format": {
+    "_comment": "Fixed-font label format. Net labels render as PURE net names — never embed the pin number into the label text. KiCad's native pin-number rendering on the lib_symbol covers visible pin-number display next to the body, and embedding a pin number into the label name produces invalid net identifiers (KiCad reports 'Lbl Bad Format' when labels start with digits / contain spaces). The embed_pin_number flag exists for experimental/visual-only use; default OFF so the chat's lint passes and labels stay valid net identifiers.",
+    "embed_pin_number": false,
+    "fixed_font_mm": 1.0,
+    "label_gap_mm": 2.0,
+    "separator": "  ",
+    "left_format":   "{net}{sep}{pin}",
+    "right_format":  "{pin}{sep}{net}",
+    "top_format":    "{pin}{sep}{net}",
+    "bottom_format": "{pin}{sep}{net}",
+    "show_pin_number_threshold": 1.5,
+    "abbrev_threshold": 1.0,
+    "abbrev_max_chars": 8,
+    "abbrev_prefix_chars": 5,
+    "abbrev_suffix_chars": 3
+  },
+
+  "label_placement": {
+    "_comment": "Dynamic label position resolver — try 4 orthogonal angles (outward + 2 perpendiculars + opposite), ray-cast each, first clear position wins. component_body_margin_mm pads each component bbox to cover ref/value text overhangs that aren't in the body bbox itself (KiCad renders 'Reference' + 'Value' properties ~2.5 mm outside the body line). Stub wire from pin tip to label is orthogonal-only; diagonal angles are rejected because KiCad parser rejects diagonal wires. spatial_hash_cell_mm controls the grid spacing of the O(1)-lookup index — bigger cells = fewer buckets but more candidates per bucket; 20 mm is a sweet spot for A4-class sheets.",
+    "enabled": true,
+    "min_offset_mm": 1.27,
+    "max_offset_mm": 25.0,
+    "step_mm": 0.635,
+    "collision_pad_mm": 0.5,
+    "component_body_margin_mm": 2.5,
+    "char_width_mm": 0.55,
+    "_font_height_mm_note": "auto-synced from label_format.fixed_font_mm at runtime; this fallback applies only if label_format is absent",
+    "font_height_mm": 1.0,
+    "spatial_hash_cell_mm": 20.0,
+    "angle_candidates_offset_deg": [0, 90, -90, 180],
+    "apply_to_power_ports": false
+  },
+
+  "dense_pin_stagger": {
+    "_comment": "Superseded by swim_lanes. Set enabled=false; the old tier-by-index logic forced every Nth pin to a different lane even when adjacent pins fit fine in the same column.",
+    "enabled": false,
+    "density_threshold_1": 0.30,
+    "stagger_step_mm": 4.0,
+    "density_threshold_2": 0.45,
+    "stagger_groups": 3,
+    "group_step_mm": 3.0
+  },
+
+  "column_alignment": {
+    "_comment": "Per (component, unit, side) group: align every label's anchor to the same X (for left/right sides) or same Y (for top/bottom). Force swim-lanes when label count > max_column_labels even if pin pitch is technically OK — a 26-label single column still reads crammed visually even at 2.54 mm pitch.",
+    "enabled": true,
+    "max_column_labels": 100
+  },
+
+  "swim_lanes": {
+    "_comment": "Fallback when column_alignment is disabled. Greedy lane assignment per (component_side, outward_angle): each label assigned to first lane with enough vertical clearance; opens new lanes as needed.",
+    "enabled": false,
+    "lane_width_mm": 6.0,
+    "label_gap_mm": 1.5,
+    "max_lanes": 4
+  },
+
+  "hierarchical_split": {
+    "_comment": "Step 6: hierarchical sheet splitter — circuit-shape-driven. Fires when ANY of: (1) min_main_controllers MCUs are present (multi-MCU board); OR (2) component count ≥ min_components AND distinct roles ≥ min_roles; OR (3) any single role bucket has ≥ single_role_overflow members. All three are config-tunable; pure topology, no part-number knowledge.",
+    "enabled": true,
+    "min_main_controllers": 2,
+    "min_components": 40,
+    "min_roles": 3,
+    "single_role_overflow": 40,
+    "wireless_mcu_min_pins": 12,
+    "complexity": {
+      "_comment": "Unified circuit-complexity score combining component count, net density, cross-block traffic, and label density. Each signal is normalised to [0,1] then weighted; the total is divided by max_score (sum of weights) and compared to split_threshold. Crosses tricky-but-small designs (small RF board with many sub-systems) that bucket rules miss.",
+      "split_threshold": 0.55,
+      "soft_cap_components": 100,
+      "weights": {
+        "count": 2.0,
+        "density": 1.5,
+        "cross": 1.5,
+        "text": 1.0
+      }
+    },
+    "parent_grid_cols": 3,
+    "parent_cell_w_mm": 80.0,
+    "parent_cell_h_mm": 50.0,
+    "parent_cell_gap_mm": 12.0,
+    "parent_origin_x_mm": 20.0,
+    "parent_origin_y_mm": 20.0
+  },
+
+  "local_wire_synthesis": {
+    "_comment": "P11 — short-range label-to-wire promotion. After the router emits labels for every signal net, this pass replaces labels with direct Manhattan wires when ALL pins on the net sit within `max_distance_mm` of each other. Long-haul nets (cross-page rails like 3V3 / GND / SDA) keep their labels. Shifts the wire-edges:label-edges ratio toward wires — the visual reason human schematics don't look like floating-label spaghetti.",
+    "enabled": true,
+    "max_distance_mm": 80.0,
+    "min_pins_per_net": 2
+  },
+
+  "pin_role_placement": {
+    "_comment": "P10 — pin-role aware placement. After the grid-based placer assigns coordinates, this post-pass moves 2-pin satellite passives (decoupling caps, pull-ups, biasing resistors, crystal load caps) to sit adjacent to the specific anchor IC pin they connect to. A decoupling cap that classifier put in MAIN_CONTROLLER role gets moved next to VCC pin, NOT just somewhere inside the MAIN_CONTROLLER grid cell.",
+    "enabled": true,
+    "offset_from_pin_mm": 5.08,
+    "max_passive_move_mm": 50.8,
+    "min_clearance_mm": 1.27
+  },
+
+  "community_partition": {
+    "_comment": "Connectivity-graph community detection that replaces the role-bucket hierarchy split. Weighted edges (wire=1.0 strong, label=0.6 medium, power=0.2 weak) feed Louvain modularity clustering; clusters are role-named by plurality vote of their members' classifier roles. Used by community_partition.partition_schematic — gated by `enabled` on the consumer side (hierarchical.py).",
+    "enabled": true,
+    "weights": {
+      "wire": 1.0,
+      "label": 0.6,
+      "power": 0.2
+    },
+    "detection": {
+      "algorithm": "louvain",
+      "seed": 42
+    },
+    "balance": {
+      "_comment": "Post-partition merging: communities below min_members absorb into the largest community; if more than max_sheets remain, smallest ones merge into a final MISC bucket.",
+      "min_members": 3,
+      "max_sheets": 8
+    },
+    "anchor_boost": {
+      "_comment": "Pre-Louvain weight boost on every edge from an anchor component (MCU / POWER_REGULATOR / SENSOR / WIRELESS / etc.) to its direct neighbours. Pulls the subsystem (anchor + decoupling + crystal + pull-ups) into one community even when the anchor also shares label-edges with other clusters. multiplier=2.5 keeps satellite caps glued to their parent IC.",
+      "enabled": true,
+      "multiplier": 2.5
+    },
+    "merge_duplicate_names": true,
+    "cross_cluster": {
+      "_comment": "When generating sheet pins on the parent, only signal-strength edges become hierarchical labels — power edges merge naturally via power-port symbols and would clutter the parent if exposed.",
+      "min_edge_weight_for_sheet_pin": 0.5
+    }
+  },
+
+  "fallback_zones": {
+    "_comment": "When two roles claim the same zone, the second one is bumped to the next unused entry in this order. Spillover roles that exhaust the list re-use the first entry (placer logs a warning).",
+    "order": [
+      "bottom_left", "bottom_center", "bottom_right",
+      "left_center", "right_center",
+      "top_center", "top_left", "top_right",
+      "left_top", "right_top",
+      "left_bottom", "right_bottom",
+      "center"
+    ]
+  }
+}

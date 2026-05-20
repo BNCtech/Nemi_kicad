@@ -1,0 +1,318 @@
+{
+  "_comment": "Dynamic scaling config for rules.py. All thresholds are per-tier. Tier is auto-detected from CircuitProfile but can be overridden via conventions.json -> circuit.size_tier.",
+
+  "tiers": {
+    "nano": {
+      "_desc": "<=10 components, <=50 pins. LED blinkers, breakout boards, single-sensor nodes.",
+      "component_count_max": 10,
+      "pin_count_max": 50,
+      "net_count_max": 20
+    },
+    "small": {
+      "_desc": "11-40 components, 51-200 pins. Arduino-class, simple MCU boards.",
+      "component_count_max": 40,
+      "pin_count_max": 200,
+      "net_count_max": 80
+    },
+    "medium": {
+      "_desc": "41-120 components, 201-600 pins. STM32/ESP32 boards, shields.",
+      "component_count_max": 120,
+      "pin_count_max": 600,
+      "net_count_max": 250
+    },
+    "large": {
+      "_desc": "121-400 components, 601-2000 pins. SBC, FPGA boards, motor controllers.",
+      "component_count_max": 400,
+      "pin_count_max": 2000,
+      "net_count_max": 800
+    },
+    "xlarge": {
+      "_desc": ">400 components or >2000 pins. Multi-sheet industrial, server boards.",
+      "component_count_max": 999999,
+      "pin_count_max": 999999,
+      "net_count_max": 999999
+    }
+  },
+
+  "thresholds": {
+    "_comment": "Every numeric threshold used by detectors/fixers, keyed by tier.",
+
+    "proximity_per_pin_radius_mm": {
+      "nano":   5.08,
+      "small":  7.62,
+      "medium": 10.16,
+      "large":  12.70,
+      "xlarge": 15.24
+    },
+
+    "wire_label_threshold_mm": {
+      "nano":   10.0,
+      "small":  15.0,
+      "medium": 25.4,
+      "large":  35.0,
+      "xlarge": 50.0
+    },
+
+    "long_power_wire_threshold_mm": {
+      "nano":   15.0,
+      "small":  20.0,
+      "medium": 25.0,
+      "large":  35.0,
+      "xlarge": 50.0
+    },
+
+    "mcu_min_pins": {
+      "nano":   4,
+      "small":  6,
+      "medium": 8,
+      "large":  8,
+      "xlarge": 8
+    },
+
+    "junction_tolerance_mm": {
+      "nano":   0.05,
+      "small":  0.05,
+      "medium": 0.05,
+      "large":  0.05,
+      "xlarge": 0.05
+    },
+
+    "lse_max_load_cap_pf": {
+      "nano":   15.0,
+      "small":  15.0,
+      "medium": 15.0,
+      "large":  15.0,
+      "xlarge": 15.0
+    },
+
+    "usb_series_r_min_ohm": {
+      "nano":   15.0,
+      "small":  15.0,
+      "medium": 15.0,
+      "large":  15.0,
+      "xlarge": 15.0
+    },
+
+    "usb_series_r_max_ohm": {
+      "nano":   50.0,
+      "small":  50.0,
+      "medium": 50.0,
+      "large":  50.0,
+      "xlarge": 50.0
+    },
+
+    "label_density_window_mm": {
+      "nano":   8.0,
+      "small":  10.0,
+      "medium": 12.0,
+      "large":  14.0,
+      "xlarge": 16.0
+    },
+
+    "label_density_max_count": {
+      "nano":   3,
+      "small":  4,
+      "medium": 4,
+      "large":  5,
+      "xlarge": 6
+    },
+
+    "min_component_spacing_mm": {
+      "nano":   2.54,
+      "small":  2.54,
+      "medium": 2.54,
+      "large":  1.27,
+      "xlarge": 1.27
+    },
+
+    "page_edge_margin_mm": {
+      "nano":   5.0,
+      "small":  8.0,
+      "medium": 10.0,
+      "large":  10.0,
+      "xlarge": 10.0
+    },
+
+    "decoupling_cap_max_per_fixer_run": {
+      "_comment": "Max caps auto-placed per detect+fix pass. Prevents flooding small boards.",
+      "nano":   2,
+      "small":  5,
+      "medium": 12,
+      "large":  30,
+      "xlarge": 999
+    },
+
+    "pullup_max_per_fixer_run": {
+      "nano":   2,
+      "small":  4,
+      "medium": 8,
+      "large":  20,
+      "xlarge": 999
+    }
+  },
+
+  "active_rules": {
+    "_comment": "Rules that are DISABLED at each tier (too noisy or irrelevant). Empty list = all rules active.",
+    "nano": [
+      "LAY_002", "LAY_003", "LAY_004", "LAY_005", "LAY_006",
+      "LAY_010", "LAY_011", "LAY_014", "LAY_015",
+      "HIE_001", "HIE_002", "HIE_003", "HIE_004",
+      "DOC_001", "DOC_002", "DOC_003",
+      "POWER_006", "POWER_007",
+      "SI_003", "SI_004",
+      "DBG_001", "DBG_002",
+      "LAY_021", "LAY_027", "LAY_028"
+    ],
+    "small": [
+      "LAY_002", "LAY_005",
+      "HIE_001", "HIE_002", "HIE_003", "HIE_004",
+      "DOC_002", "DOC_003",
+      "SI_003", "SI_004"
+    ],
+    "medium": [],
+    "large":  [],
+    "xlarge": []
+  },
+
+  "severity_overrides": {
+    "_comment": "For tiny circuits relax MEDIUM->LOW and HIGH->MEDIUM for layout/style rules only. CRITICAL is never relaxed.",
+    "nano": {
+      "LAY_007":  "low",
+      "LAY_008":  "low",
+      "LAY_009":  "low",
+      "LAY_010":  "low",
+      "LAY_012":  "low",
+      "LAY_013":  "low",
+      "LAY_015":  "low",
+      "LAY_016":  "medium",
+      "LAY_017":  "low",
+      "LAY_018":  "low",
+      "LAY_019":  "low",
+      "LAY_020":  "low",
+      "LAY_024":  "low",
+      "LAY_031":  "low",
+      "LAY_032":  "low",
+      "LAY_033":  "low",
+      "WIR_003":  "low",
+      "WIR_004":  "low",
+      "VAL_002":  "low",
+      "VAL_003":  "low",
+      "VAL_004":  "low",
+      "MARK_004": "low",
+      "MARK_005": "low"
+    },
+    "small": {
+      "LAY_010":  "low",
+      "LAY_015":  "low",
+      "LAY_032":  "low",
+      "LAY_033":  "low",
+      "VAL_003":  "low",
+      "MARK_005": "low"
+    },
+    "medium": {},
+    "large":  {},
+    "xlarge": {}
+  },
+
+  "fix_defaults": {
+    "_comment": "Cap/resistor VALUES placed by fixers, per tier. Larger circuits may need different defaults.",
+    "cap_decoupling": {
+      "nano":   "100n",
+      "small":  "100n",
+      "medium": "100n",
+      "large":  "100n",
+      "xlarge": "100n"
+    },
+    "cap_bulk": {
+      "nano":   "1u",
+      "small":  "4u7",
+      "medium": "10u",
+      "large":  "10u",
+      "xlarge": "22u"
+    },
+    "cap_regulator_out": {
+      "nano":   "4u7",
+      "small":  "10u",
+      "medium": "10u",
+      "large":  "10u",
+      "xlarge": "22u"
+    },
+    "cap_crystal_load": {
+      "nano":   "22p",
+      "small":  "22p",
+      "medium": "22p",
+      "large":  "22p",
+      "xlarge": "22p"
+    },
+    "cap_lse_load": {
+      "nano":   "12p",
+      "small":  "12p",
+      "medium": "12p",
+      "large":  "12p",
+      "xlarge": "12p"
+    },
+    "res_reset_pullup": {
+      "nano":   "10k",
+      "small":  "10k",
+      "medium": "10k",
+      "large":  "10k",
+      "xlarge": "10k"
+    },
+    "res_i2c_pullup": {
+      "nano":   "10k",
+      "small":  "4k7",
+      "medium": "4k7",
+      "large":  "2k2",
+      "xlarge": "2k2"
+    },
+    "res_led_series": {
+      "nano":   "330",
+      "small":  "330",
+      "medium": "330",
+      "large":  "330",
+      "xlarge": "330"
+    },
+    "res_usb_series": {
+      "nano":   "22R",
+      "small":  "22R",
+      "medium": "22R",
+      "large":  "22R",
+      "xlarge": "22R"
+    },
+    "res_strap_pull": {
+      "nano":   "10k",
+      "small":  "10k",
+      "medium": "10k",
+      "large":  "10k",
+      "xlarge": "10k"
+    },
+    "diode_freewheel": {
+      "nano":   "1N4148",
+      "small":  "1N4148",
+      "medium": "1N4148",
+      "large":  "1N4007",
+      "xlarge": "1N4007"
+    },
+    "placement_coil_diode_offset_mm": {
+      "nano":   5.08,
+      "small":  7.62,
+      "medium": 7.62,
+      "large":  10.16,
+      "xlarge": 10.16
+    },
+    "rail_reset": {
+      "nano":   "VCC",
+      "small":  "VCC",
+      "medium": "VCC",
+      "large":  "VCC",
+      "xlarge": "VCC"
+    },
+    "rail_i2c": {
+      "nano":   "VCC",
+      "small":  "VCC",
+      "medium": "VCC",
+      "large":  "VCC",
+      "xlarge": "VCC"
+    }
+  }
+}

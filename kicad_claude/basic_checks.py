@@ -12,6 +12,7 @@ Nothing is hardcoded in this file; add a new IC family or a new placeholder
 string by editing JSON.
 """
 
+import math
 import re
 from collections import defaultdict
 from typing import Any, Dict, List, Tuple
@@ -27,6 +28,47 @@ def _bc_cfg() -> Dict[str, Any]:
 
 def _conv_cfg() -> Dict[str, Any]:
     return _load_config("conventions")
+
+
+def _make_profile(schematic_path=None, override_tier=None):
+    """Build a CircuitProfile for the given schematic, or return a medium-tier
+    fallback when called from a context that has no schematic path (e.g. unit
+    tests, standalone check_references() calls)."""
+    try:
+        from .circuit_profile import CircuitProfile, CircuitMetrics
+        if schematic_path is not None:
+            ext = SchematicExtractor(schematic_path)
+            comps = ext.components()
+            lib_pins = ext.lib_symbol_pins()
+            cpbr: Dict[str, List[Any]] = {}
+            for c in comps:
+                ref = c.get("reference", "")
+                by_unit = lib_pins.get(c.get("lib_id", ""), {})
+                pins = list(by_unit.get(0, [])) + list(by_unit.get(int(c.get("unit", 1)), []))
+                cpbr.setdefault(ref, []).extend(pins)
+            nets_data = _nets.build_sheet_nets(ext)["nets"]
+
+            class _S:
+                pass
+            s = _S()
+            s.components = comps
+            s.component_pins_by_ref = cpbr
+            s.nets = nets_data
+            return CircuitProfile.from_context(s, override_tier=override_tier)
+        m = CircuitMetrics()  # zeros -> auto-detects nano, override forces medium
+        return CircuitProfile.from_metrics(m, override_tier=override_tier or "medium")
+    except Exception:
+        # Duck-type fallback for the rare case the profile module fails to
+        # import or the schematic can't be parsed. Returns medium-tier defaults.
+        class _FallbackProfile:
+            tier = "medium"
+            def threshold(self, k):
+                return {"proximity_per_pin_radius_mm": 10.16, "mcu_min_pins": 8,
+                        "min_component_spacing_mm": 2.54}.get(k, 5.0)
+            def threshold_float(self, k): return float(self.threshold(k))
+            def threshold_int(self, k): return int(self.threshold(k))
+            def summary(self): return "CircuitProfile(tier='medium' — fallback)"
+        return _FallbackProfile()
 
 
 def _is_ignored(lib_id: str, reference: str) -> bool:
@@ -366,7 +408,8 @@ def check_label_collision(labels: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     return issues
 
 
-def check_symbol_proximity(components: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+def check_symbol_proximity(components: List[Dict[str, Any]],
+                            override_tier=None) -> List[Dict[str, str]]:
     """Flag two non-power components whose origin points are closer than min_separation_mm.
 
     Coarse proxy for full bbox-vs-bbox intersection (which needs lib_symbol
@@ -377,7 +420,12 @@ def check_symbol_proximity(components: List[Dict[str, Any]]) -> List[Dict[str, s
     if not cfg.get("enabled", True):
         return []
     sev = cfg["severity"]
-    min_sep = float(cfg["min_separation_mm"])
+    tier_key = cfg.get("_min_separation_tier_key")
+    if tier_key:
+        profile = _make_profile(override_tier=override_tier)
+        min_sep = profile.threshold_float(tier_key)
+    else:
+        min_sep = float(cfg["min_separation_mm"])
     excl_power = bool(cfg.get("exclude_power", True))
     excl_dnp = bool(cfg.get("exclude_dnp", True))
 
@@ -591,7 +639,7 @@ def check_symbol_bbox_overlap(schematic_path) -> List[Dict[str, str]]:
 # Net-aware checks: powered by the union-find walker in nets.py.
 # ---------------------------------------------------------------------------
 
-def check_net_dangling_label(schematic_path) -> List[Dict[str, str]]:
+def check_net_dangling_label(schematic_path, override_tier=None) -> List[Dict[str, str]]:
     """Real orphan-label check using the topology walker. A label is dangling
     when its net has fewer than min_endpoints electrical members (pins +
     power ports). Replaces the count-only check_orphan_labels (which is
@@ -599,9 +647,12 @@ def check_net_dangling_label(schematic_path) -> List[Dict[str, str]]:
     cfg = _bc_cfg()["geometry"]["net_dangling_label"]
     if not cfg.get("enabled", True):
         return []
-    kinds_to_check = set(cfg["kinds_to_check"])
+    profile = _make_profile(schematic_path, override_tier)
+    tier_orphan_map = _bc_cfg()["label"].get("_orphan_tier_keys", {})
+    tier_kinds = tier_orphan_map.get(profile.tier, cfg.get("kinds_to_check", []))
+    kinds_to_check = set(tier_kinds)
     if not kinds_to_check:
-        return []  # default-off until cross-sheet binding lands
+        return []  # tier says: don't check (nano/small until cross-sheet binding lands)
     sev = cfg["severity"]
     min_endpoints = int(cfg["min_endpoints"])
 
@@ -864,7 +915,7 @@ def _refdes_category(ref: str) -> str:
     return (table.get(p) or {}).get("category", "other")
 
 
-def check_missing_decoupling(schematic_path) -> List[Dict[str, str]]:
+def check_missing_decoupling(schematic_path, override_tier=None) -> List[Dict[str, str]]:
     """KLC POWER_001: every IC power-input pin must share a net with at least
     one decoupling capacitor. Walks the net topology built by nets.py and
     flags any power_in pin whose net contains no capacitor.
@@ -877,7 +928,12 @@ def check_missing_decoupling(schematic_path) -> List[Dict[str, str]]:
     cap_prefixes = {p.upper() for p in cfg["cap_prefixes"]}
     pin_types = set(cfg["pin_types"])
     skip_pin_names = {n.lower() for n in cfg["skip_pin_names"]}
-    min_pins_per_ic = int(cfg["min_pins"])
+    tier_key = cfg.get("_min_pins_tier_key")
+    if tier_key:
+        profile = _make_profile(schematic_path, override_tier)
+        min_pins_per_ic = profile.threshold_int(tier_key)
+    else:
+        min_pins_per_ic = int(cfg["min_pins"])
 
     issues: List[Dict[str, str]] = []
     proj = _nets.build_project_nets(schematic_path)
@@ -928,12 +984,167 @@ def check_missing_decoupling(schematic_path) -> List[Dict[str, str]]:
     return issues
 
 
-def run_all(schematic_path) -> Dict[str, Any]:
-    """Run every L1 check across the WHOLE project (root sheet + all child sheets)."""
+def check_decoupling_proximity(schematic_path, override_tier=None) -> List[Dict[str, str]]:
+    """LAY_001: every IC power_in pin must have a decoupling cap whose origin
+    sits within max_distance_mm of the pin's world endpoint. Net membership
+    alone (check_missing_decoupling above) is not enough — a cap parked in a
+    corner satisfies ERC but defeats the entire reason for bypassing.
+
+    We re-use the IC / cap / pin-type / skip-pin-name / min-pin filters from
+    missing_decoupling so both checks agree on what counts as an IC. Threshold
+    lives in functional.decoupling_proximity.max_distance_mm.
+    """
+    func = _bc_cfg()["functional"]
+    cfg = func.get("decoupling_proximity", {})
+    if not cfg.get("enabled", True):
+        return []
+    md = func["missing_decoupling"]  # inherit IC-definition filters
+    sev = cfg["severity"]
+    dist_key = cfg.get("_max_distance_tier_key")
+    pins_key = md.get("_min_pins_tier_key")
+    if dist_key or pins_key:
+        profile = _make_profile(schematic_path, override_tier)
+        max_dist = profile.threshold_float(dist_key) if dist_key else float(cfg["max_distance_mm"])
+        min_pins_per_ic = profile.threshold_int(pins_key) if pins_key else int(md["min_pins"])
+    else:
+        max_dist = float(cfg["max_distance_mm"])
+        min_pins_per_ic = int(md["min_pins"])
+    ic_categories = set(md["ic_categories"])
+    cap_prefixes = {p.upper() for p in md["cap_prefixes"]}
+    pin_types = set(md["pin_types"])
+    skip_pin_names = {n.lower() for n in md["skip_pin_names"]}
+
+    issues: List[Dict[str, str]] = []
+    proj = _nets.build_project_nets(schematic_path)
+    for hpath, path in hierarchy.iter_sheet_instances(schematic_path):
+        try:
+            extractor = SchematicExtractor(path)
+        except Exception:
+            continue
+        comps = extractor.components()
+        lib_pins = extractor.lib_symbol_pins()
+
+        # (ref, pin_number) -> (x, y) and ref -> (x, y) for caps.
+        pin_xy: Dict[Tuple[str, str], Tuple[float, float]] = {}
+        cap_origin: Dict[str, Tuple[float, float]] = {}
+        pin_counts: Dict[str, int] = defaultdict(int)
+        for c in comps:
+            ref = c.get("reference") or ""
+            lib_id = c.get("lib_id", "")
+            if _is_ignored(lib_id, ref):
+                continue
+            at = c.get("at")
+            if not at:
+                continue
+            cx, cy = float(at[0]), float(at[1])
+            p = re.match(r"^([A-Za-z]+)", ref)
+            if p and p.group(1).upper() in cap_prefixes:
+                cap_origin[ref] = (cx, cy)
+            by_unit = lib_pins.get(lib_id) or {}
+            unit_no = int(c.get("unit", 1))
+            pin_defs = list(by_unit.get(0, [])) + list(by_unit.get(unit_no, []))
+            for ep in _nets.placed_pin_endpoints(c, pin_defs):
+                pin_xy[(ref, str(ep["number"]))] = (ep["x"], ep["y"])
+                pin_counts[ref] += 1
+
+        sheet = proj["sheets"].get(hpath)
+        if not sheet:
+            continue
+        for net in sheet["nets"]:
+            ic_pin_pts: List[Tuple[str, str, Tuple[float, float]]] = []
+            cap_refs_on_net: List[str] = []
+            for m in net["members"]:
+                if m.get("kind") != "pin":
+                    continue
+                ref = m.get("ref", "")
+                pname = (m.get("pin_name") or "").lower()
+                p = re.match(r"^([A-Za-z]+)", ref or "")
+                if p and p.group(1).upper() in cap_prefixes:
+                    cap_refs_on_net.append(ref)
+                    continue
+                if _refdes_category(ref) not in ic_categories:
+                    continue
+                if m.get("electrical_type") not in pin_types:
+                    continue
+                if any(skip in pname for skip in skip_pin_names):
+                    continue
+                if pin_counts.get(ref, 0) < min_pins_per_ic:
+                    continue
+                xy = pin_xy.get((ref, str(m.get("pin_number"))))
+                if xy:
+                    ic_pin_pts.append((ref, str(m.get("pin_number")), xy))
+
+            if not ic_pin_pts or not cap_refs_on_net:
+                continue  # caught by check_missing_decoupling (or nothing to check)
+
+            # For each IC power pin, find the closest cap on this net.
+            for ref, pin_num, (px, py) in ic_pin_pts:
+                best_cap = None
+                best_d = float("inf")
+                for cap_ref in cap_refs_on_net:
+                    cxy = cap_origin.get(cap_ref)
+                    if not cxy:
+                        continue
+                    d = math.hypot(cxy[0] - px, cxy[1] - py)
+                    if d < best_d:
+                        best_d = d
+                        best_cap = cap_ref
+                if best_cap is not None and best_d > max_dist:
+                    issues.append(_issue(
+                        sev,
+                        f"{ref}.{pin_num} & {best_cap}",
+                        f"decoupling cap {best_cap} is {best_d:.1f} mm from "
+                        f"{ref} pin {pin_num} on net '{net['name']}' (sheet {hpath}); "
+                        f"move within {max_dist:.1f} mm of the pin tip",
+                        "FUNC_DECOUPLING_FAR",
+                    ))
+    return issues
+
+
+def check_excess_pwr_flag(schematic_path) -> List[Dict[str, str]]:
+    """LAY_009: KiCad ERC only needs ONE PWR_FLAG per supply rail. More than
+    one is visual clutter and a sign the AI is treating PWR_FLAG as a generic
+    'this is a power node' marker. Walk every net and flag any with more than
+    max_per_net PWR_FLAG members."""
+    cfg = _bc_cfg()["functional"].get("excess_pwr_flag", {})
+    if not cfg.get("enabled", True):
+        return []
+    sev = cfg["severity"]
+    max_per_net = int(cfg.get("max_per_net", 1))
+    flag_values = {v.upper() for v in cfg.get("pwr_flag_values", ["PWR_FLAG"])}
+
+    issues: List[Dict[str, str]] = []
+    proj = _nets.build_project_nets(schematic_path)
+    for hpath, sheet in proj["sheets"].items():
+        for net in sheet["nets"]:
+            flag_refs = [
+                m.get("ref", "?") for m in net["members"]
+                if m.get("kind") == "power"
+                and (m.get("name") or "").upper() in flag_values
+            ]
+            if len(flag_refs) > max_per_net:
+                issues.append(_issue(
+                    sev,
+                    ", ".join(flag_refs),
+                    f"{len(flag_refs)} PWR_FLAGs on net '{net['name']}' on sheet {hpath} "
+                    f"(max {max_per_net}); delete the extras",
+                    "FUNC_EXCESS_PWR_FLAG",
+                ))
+    return issues
+
+
+def run_all(schematic_path, override_tier=None) -> Dict[str, Any]:
+    """Run every L1 check across the WHOLE project (root sheet + all child sheets).
+
+    override_tier: force a specific size tier ('nano'|'small'|'medium'|'large'|'xlarge')
+    for tier-scaled checks. None = auto-detect from circuit metrics, with
+    conventions.json:circuit.size_tier as a project-level fallback.
+    """
     components = hierarchy.aggregate_components(schematic_path)
     labels = hierarchy.aggregate_labels(schematic_path)
     wires = hierarchy.aggregate_wires(schematic_path)
     sheet_count = hierarchy.sheet_count(schematic_path)
+    profile = _make_profile(schematic_path, override_tier)
 
     issues: List[Dict[str, str]] = []
     issues.extend(check_references(components))
@@ -947,13 +1158,15 @@ def run_all(schematic_path) -> Dict[str, Any]:
     # sheet-tagged variant from hierarchy.aggregate_wires_with_sheet.
     issues.extend(check_wire_overlap(hierarchy.aggregate_wires_with_sheet(schematic_path)))
     issues.extend(check_label_collision(labels))
-    issues.extend(check_symbol_proximity(components))
+    issues.extend(check_symbol_proximity(components, override_tier=override_tier))
     issues.extend(check_symbol_bbox_overlap(schematic_path))
     issues.extend(check_wire_through_body(schematic_path))
     issues.extend(check_label_over_wire(schematic_path))
-    issues.extend(check_net_dangling_label(schematic_path))
+    issues.extend(check_net_dangling_label(schematic_path, override_tier=override_tier))
     issues.extend(check_junction_missing(schematic_path))
-    issues.extend(check_missing_decoupling(schematic_path))
+    issues.extend(check_missing_decoupling(schematic_path, override_tier=override_tier))
+    issues.extend(check_decoupling_proximity(schematic_path, override_tier=override_tier))
+    issues.extend(check_excess_pwr_flag(schematic_path))
 
     by_sev: Dict[str, int] = defaultdict(int)
     for i in issues:
@@ -969,6 +1182,8 @@ def run_all(schematic_path) -> Dict[str, Any]:
     return {
         "path": str(schematic_path),
         "status": status,
+        "tier": getattr(profile, "tier", "medium"),
+        "profile": profile.summary() if hasattr(profile, "summary") else getattr(profile, "tier", "medium"),
         "summary": {
             "sheets": sheet_count,
             "physical_parts": physical_parts,

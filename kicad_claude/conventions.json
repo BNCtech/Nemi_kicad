@@ -55,6 +55,67 @@
     "tolerance_mm": 0.001
   },
 
+  "defaults": {
+    "_comment": "Footprints assigned to satellite parts (decoupling caps, pull-ups, freewheel diodes, current-limit R) that rules.py auto-inserts. Override here when switching to 0402 / 0805 house standard.",
+    "footprints": {
+      "capacitor": "Capacitor_SMD:C_0603_1608Metric",
+      "resistor":  "Resistor_SMD:R_0603_1608Metric",
+      "diode":     "Diode_SMD:D_SOD-123"
+    }
+  },
+
+  "wire": {
+    "_comment": "LAY_007 — power-net wires longer than this are flagged as defects (route them via power-port pairs instead).",
+    "long_threshold_mm": 25.0
+  },
+
+  "chat": {
+    "_comment": "Number of past chat turns kept in the Claude context window. Lower = cheaper but less continuity; higher = better recall but more tokens.",
+    "history_turns": 12
+  },
+
+  "auto_no_connect": {
+    "_comment": "Conservative auto-NC for floating pins. The connectivity_normalize pipeline inserts (no_connect) markers ONLY when a pin matches HIGH or SAFE confidence — never on power / clock / reset / analog / communication / differential / feedback. Patterns are CASE-INSENSITIVE; matched against the lib_symbol's pin name AFTER stripping leading ~. Each list is a substring/equality test — a pin name 'AVDD' matches 'AVDD' under unsafe_substrings. Add new patterns here as the user's MCU families surface them.",
+    "enabled": true,
+    "safe_substrings": [
+      "NC", "DNU", "DNC", "RSV", "RESERVED", "NO_USE",
+      "TESTPAD", "TESTPT", "TP_", "DEBUG"
+    ],
+    "gpio_name_regex": [
+      "^P[A-K][0-9]+$",
+      "^GPIO[0-9]+$",
+      "^GP[0-9]+$",
+      "^P[0-9]+_[0-9]+$",
+      "^IO[0-9]+$",
+      "^PIO[A-K]?[0-9]+$"
+    ],
+    "unsafe_substrings": [
+      "VCC", "VDD", "VEE", "VSS", "GND",
+      "VBUS", "VBAT", "VSYS", "VREF", "AVCC", "AVDD", "AVSS", "DVDD", "DVSS",
+      "+5V", "+3V3", "+12V", "+1V", "+2V",
+      "XTAL", "XIN", "XOUT", "OSC", "MCLK", "CLK", "CKIN", "CKOUT",
+      "RST", "RESET", "NRST", "MCLR",
+      "FB", "FEEDBACK", "SENSE", "ISENSE", "VSENSE",
+      "USBDP", "USBDM", "USB_DP", "USB_DM", "USB_D",
+      "AIN", "AOUT", "DAC", "ADC", "AREF",
+      "BOOT", "ENABLE",
+      "_P", "_N", "D+", "D-", "DP", "DM",
+      "SDA", "SCL", "MOSI", "MISO", "SCK", "CIPO", "COPI", "PICO", "POCI",
+      "TX", "RX", "TXD", "RXD", "CTS", "RTS", "DSR", "DTR",
+      "CAN_H", "CAN_L", "CANH", "CANL",
+      "TCK", "TMS", "TDO", "TDI", "TRST", "SWDIO", "SWCLK", "SWO",
+      "NSS", "WP", "HOLD", "CMD", "DQ",
+      "VPP", "VPROG"
+    ],
+    "safe_electrical_types": [
+      "unspecified", "no_connect", "passive"
+    ],
+    "tier_2_gpio_electrical_types": [
+      "bidirectional"
+    ],
+    "max_inserts_per_run": 256
+  },
+
   "kicad_string_escapes": {
     "_comment": "KiCad serializes a few characters as {token} so they survive paths and identifiers. To compare or count net names correctly, un-escape them first. Extend as new tokens are observed in real schematics.",
     "{slash}":  "/",

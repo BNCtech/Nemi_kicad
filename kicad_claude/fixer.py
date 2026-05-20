@@ -18,8 +18,8 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import basic_checks, circuit_rules, erc as erc_mod, hierarchy, validator
-from ._config_loader import load as _load_config
+from . import basic_checks, erc as erc_mod, hierarchy, rules, validator
+from ._config_loader import load as _load_config, load_prompt as _load_prompt
 from .claude_client import ClaudeClient
 from .schematic_extractor import SchematicExtractor
 from .schematic_modifier import SchematicDocument, apply_operation
@@ -29,54 +29,26 @@ def _cfg() -> Dict[str, Any]:
     return _load_config("fixer_config")
 
 
-_FIX_SYSTEM_PROMPT = """You are an electronics engineer repairing a KiCad schematic.
-
-You receive (a) the current schematic dump, (b) a list of issues found by the
-validators. Your job: emit a JSON object containing schematic-edit ops that
-fix as many issues as possible. Reply with a SINGLE JSON object, no prose, no
-fences:
-
-{
-  "message": "one-sentence Tanglish/English summary of the fix",
-  "ops": [
-    {"op": "add_component",   "lib_id": "Device:C", "reference": "C99",
-     "value": "100n", "x": 75.0, "y": 50.0, "rotation": 0,
-     "footprint": "Capacitor_SMD:C_0603"},
-    {"op": "edit_value",      "reference": "R2", "new_value": "47k"},
-    {"op": "move_component",  "reference": "C3", "x": 80.0, "y": 60.0},
-    {"op": "add_wire",        "points": [[75.0, 50.0], [75.0, 60.0]]},
-    {"op": "add_label",       "name": "VOUT", "x": 100.0, "y": 56.19, "kind": "label"},
-    {"op": "add_junction",    "x": 75.0, "y": 60.0}
-  ]
-}
-
-Rules:
-- Coordinates in mm, snap to multiples of 1.27 (50 mil).
-- New refdes must continue the existing series (R8, R9, ...).
-- Address ONLY the listed issues. Do not refactor unrelated parts.
-- If an issue is ambiguous or missing context, skip it; do not guess.
-"""
+def _render_fix_prompt() -> str:
+    """Render the fixer system prompt from prompts/fixer_system.md, interpolating
+    the grid step from conventions.json and the layout-guidance distances from
+    fixer_config.json. Resolved at call time so edits take effect after
+    _config_loader.reload_all() without restart."""
+    tpl = _load_prompt("fixer_system")
+    grid_mm = float(_load_config("conventions")["grid"]["schematic_mm"])
+    g = _cfg()["layout_guidance"]
+    return (
+        tpl
+        .replace("{{GRID_MM}}",            f"{grid_mm:g}")
+        .replace("{{DECOUPLING_MAX_MM}}",  f"{float(g['decoupling_max_mm']):g}")
+        .replace("{{STRAP_MAX_MM}}",       f"{float(g['strap_max_mm']):g}")
+        .replace("{{RAIL_PORT_MM}}",       f"{float(g['rail_port_mm']):g}")
+        .replace("{{MIN_BODY_GAP_MM}}",    f"{float(g['min_body_gap_mm']):g}")
+        .replace("{{EDGE_MARGIN_MM}}",     f"{float(g['edge_margin_mm']):g}")
+    )
 
 
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*\})\s*```", re.S)
-
-
-def _extract_json(text: str) -> Optional[Dict[str, Any]]:
-    candidates = []
-    m = _JSON_FENCE_RE.search(text)
-    if m:
-        candidates.append(m.group(1))
-    candidates.append(text.strip())
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end > start:
-        candidates.append(text[start : end + 1])
-    for c in candidates:
-        try:
-            return json.loads(c)
-        except json.JSONDecodeError:
-            continue
-    return None
+from .json_utils import extract_json as _extract_json
 
 
 def _gather_issues(schematic_path: str, run_l2: bool = True) -> Dict[str, Any]:
@@ -142,7 +114,7 @@ def _ask_claude_for_ops(
         f"- Emit at most {max_ops} ops in this batch (most-impactful first).\n"
         f"- delete_component is {'ALLOWED' if allow_delete else 'FORBIDDEN'}.\n"
     )
-    raw = client.ask(system=_FIX_SYSTEM_PROMPT, user=user_msg)
+    raw = client.ask(system=_render_fix_prompt(), user=user_msg)
     parsed = _extract_json(raw) or {"message": raw, "ops": []}
     ops = parsed.get("ops") or []
     if not allow_delete:
@@ -203,7 +175,7 @@ def fix(schematic_path, model: Optional[str] = None) -> Dict[str, Any]:
     # the easy "every IC needs decoupling, every crystal needs load caps, every
     # I2C bus needs pull-ups" defects off the table before Claude even sees the
     # schematic — saves tokens and keeps Claude focused on judgement calls.
-    pre_pass = circuit_rules.apply_all(str(path))
+    pre_pass = rules.apply_all(str(path))
 
     for i in range(1, max_iters + 1):
         report = _gather_issues(str(path))

@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "bomdoc_config.json",
+  "type": "object",
+  "required": ["bomdoc", "manufacturer_map", "distributors", "lifecycle", "ai_resolver", "variants"],
+  "properties": {
+    "bomdoc": {
+      "type": "object",
+      "required": ["filename_pattern"],
+      "properties": {
+        "filename_pattern": { "type": "string" }
+      }
+    },
+    "manufacturer_map": { "type": "object" },
+    "distributors": {
+      "type": "object",
+      "required": ["currency", "ranked"],
+      "properties": {
+        "currency": { "type": "string" },
+        "ranked":   { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+      }
+    },
+    "quantity_breaks": {
+      "type": "object",
+      "properties": {
+        "tiers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["min_qty", "discount"],
+            "properties": {
+              "min_qty":  { "type": "integer", "minimum": 1 },
+              "discount": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        }
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "required": ["states"],
+      "properties": {
+        "states": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+      }
+    },
+    "ai_resolver": {
+      "type": "object",
+      "required": ["system", "user_template"],
+      "properties": {
+        "enabled":         { "type": "boolean" },
+        "cache_in_bomdoc": { "type": "boolean" },
+        "max_tokens":      { "type": "integer", "minimum": 1 },
+        "system":          { "type": "string" },
+        "user_template":   { "type": "string" }
+      }
+    },
+    "variants":      { "type": "object" },
+    "validation":    { "type": "object" },
+    "bom_types":     { "type": "object" },
+    "extra_columns": { "type": "object" },
+    "xlsx":          { "type": "object" },
+    "html":          { "type": "object" },
+    "report":        { "type": "object" }
+  }
+}

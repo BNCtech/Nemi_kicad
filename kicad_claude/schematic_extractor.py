@@ -43,6 +43,26 @@ def _find_scalar(node: list, tag: str) -> Optional[float]:
     return None
 
 
+def _property_is_hidden(prop_node: list) -> bool:
+    """True iff a (property ...) node carries (hide yes) directly OR inside its
+    (effects ...) block. KiCad has used both shapes across versions; treat them
+    equivalently. Returns False when no hide flag is set (default = visible)."""
+    for sub in prop_node[1:]:
+        if not isinstance(sub, list) or not sub:
+            continue
+        head = _to_str(sub[0])
+        if head == "hide" and len(sub) > 1 and _to_str(sub[1]).lower() == "yes":
+            return True
+        if head == "effects":
+            for eff in sub[1:]:
+                if isinstance(eff, list) and eff and _to_str(eff[0]) == "hide":
+                    if len(eff) > 1 and _to_str(eff[1]).lower() == "yes":
+                        return True
+                if isinstance(eff, sexpdata.Symbol) and eff.value() == "hide":
+                    return True  # bare (hide) atom — older KiCad
+    return False
+
+
 class SchematicExtractor:
     def __init__(self, path):
         self.path = Path(path)
@@ -54,7 +74,8 @@ class SchematicExtractor:
     def components(self) -> List[Dict[str, Any]]:
         out = []
         for sym in _walk(self.tree, "symbol"):
-            entry: Dict[str, Any] = {"properties": {}, "in_bom": True, "dnp": False, "unit": 1}
+            entry: Dict[str, Any] = {"properties": {}, "property_hidden": {},
+                                     "in_bom": True, "dnp": False, "unit": 1}
             for child in sym[1:]:
                 if not isinstance(child, list):
                     continue
@@ -77,6 +98,7 @@ class SchematicExtractor:
                     pname = _to_str(child[1])
                     pval = _to_str(child[2])
                     entry["properties"][pname] = pval
+                    entry["property_hidden"][pname] = _property_is_hidden(child)
                     if pname == "Reference":
                         entry["reference"] = pval
                     elif pname == "Value":
@@ -374,3 +396,78 @@ class SchematicExtractor:
             for j in junctions:
                 lines.append(f"  @ ({j[0]:.2f},{j[1]:.2f})")
         return "\n".join(lines)
+
+
+def format_dump_with_context(schematic_path, max_defects: int = 80) -> str:
+    """Bare schematic dump + PIN ENDPOINTS + DETECTED DEFECTS.
+
+    Single source of truth used by both server.ChatRoom and chat.ChatSession.
+    Without the two appended sections the AI cannot emit wire ops that LAND on
+    real pin endpoints, and has no signal that the previous turn produced
+    layout/electrical defects — so it can't self-correct. Lazy imports of
+    `nets` and `basic_checks` to avoid an import cycle with this module.
+    """
+    try:
+        base = SchematicExtractor(schematic_path).format_for_claude()
+    except Exception as e:
+        return f"(unable to read schematic: {e})"
+    parts: List[str] = [base]
+
+    try:
+        from . import nets as _nets
+        ext = SchematicExtractor(schematic_path)
+        lib_pins = ext.lib_symbol_pins()
+        pin_lines: List[str] = []
+        for c in ext.components():
+            lib_id = c.get("lib_id", "")
+            ref = c.get("reference", "")
+            if not ref or (lib_id or "").startswith("power:"):
+                continue
+            by_unit = lib_pins.get(lib_id) or {}
+            if not by_unit:
+                continue
+            inst_unit = int(c.get("unit", 1))
+            pin_defs = list(by_unit.get(0, [])) + list(by_unit.get(inst_unit, []))
+            if not pin_defs:
+                continue
+            for ep in _nets.placed_pin_endpoints(c, pin_defs):
+                name = ep.get("name", "") or "~"
+                num = ep.get("pin_number", "?")
+                etype = ep.get("electrical_type", "")
+                pin_lines.append(
+                    f"  {ref}.{num}({name:>8s}) [{etype:>10s}] @ ({ep['x']:.2f}, {ep['y']:.2f})"
+                )
+        if pin_lines:
+            parts.append("")
+            parts.append("=== PIN ENDPOINTS (wire to these exact coordinates) ===")
+            parts.extend(pin_lines)
+    except Exception:
+        pass
+
+    try:
+        from . import basic_checks
+        report = basic_checks.run_all(schematic_path)
+        # Sort by severity so the cap-at-`max_defects` keeps the most important
+        # ones. Without this, a check that runs LATE in run_all (e.g.
+        # FUNC_EXCESS_PWR_FLAG, FUNC_DECOUPLING_FAR) falls off the bottom of
+        # the dump on busy schematics and the AI never sees it.
+        sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        issues = sorted(
+            (i for i in report.get("issues", [])
+             if i.get("severity") in ("critical", "high", "medium")),
+            key=lambda i: sev_order.get(i.get("severity", "low"), 9),
+        )
+        if issues:
+            parts.append("")
+            parts.append("=== DETECTED DEFECTS (fix these unless the user says otherwise) ===")
+            for i in issues[:max_defects]:
+                parts.append(
+                    f"  [{i.get('severity','?')}/{i.get('check','?')}] "
+                    f"{i.get('refs','')}: {i.get('message','')}"
+                )
+            if len(issues) > max_defects:
+                parts.append(f"  ... +{len(issues)-max_defects} more")
+    except Exception:
+        pass
+
+    return "\n".join(parts)

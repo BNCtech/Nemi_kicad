@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "erc_config.json",
+  "type": "object",
+  "required": ["binary", "invoke", "ignore"],
+  "properties": {
+    "binary": { "type": "object" },
+    "invoke": { "type": "object" },
+    "ignore": { "type": "object" }
+  }
+}

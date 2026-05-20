@@ -25,5 +25,14 @@
     "allow_delete_component": false,
     "max_ops_per_iteration":  20,
     "backup_before_apply":    true
+  },
+
+  "layout_guidance": {
+    "_comment": "Distance hints injected into the fixer prompt. Editing these tunes Claude's placement choices without touching Python. mm units. rail_port_mm matches conventions.json:wire.long_threshold_mm by intent — if you change one, change the other.",
+    "decoupling_max_mm":  5.0,
+    "strap_max_mm":       7.5,
+    "rail_port_mm":      25.0,
+    "min_body_gap_mm":    2.54,
+    "edge_margin_mm":    10.0
   }
 }

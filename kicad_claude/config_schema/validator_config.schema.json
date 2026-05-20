@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "validator_config.json",
+  "type": "object",
+  "required": ["claude"],
+  "properties": {
+    "claude": {
+      "type": "object",
+      "required": ["max_tokens"],
+      "properties": {
+        "model":      { "type": ["string", "null"] },
+        "max_tokens": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

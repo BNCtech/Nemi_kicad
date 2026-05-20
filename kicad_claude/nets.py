@@ -203,8 +203,14 @@ def build_sheet_nets(extractor: SchematicExtractor) -> Dict[str, Any]:
                     uf.union(jp, s2)
 
     # 3. Labels — anchor binds the label-name to whatever else is at that point.
-    # Global labels with the same name are one net regardless of position;
-    # union them via a virtual "global_label::<name>" node.
+    # ALL same-name labels on a sheet merge into one net, regardless of kind.
+    # KiCad's electrical model: local label "FOO" + global label "FOO" +
+    # hierarchical label "FOO" on the same sheet are one net (the global /
+    # hier makes it cross-sheet, but the on-sheet equivalence is unconditional).
+    # We use a single virtual node per name so cross-kind same-name labels
+    # also merge — fixes the dominant "labels exist but graph stays empty"
+    # failure mode on MCU-sized sheets where Claude declares I2C1_SDA on the
+    # MCU and a sensor in two physically disconnected spots.
     for lb in labels:
         at = lb.get("at")
         if not at:
@@ -214,8 +220,8 @@ def build_sheet_nets(extractor: SchematicExtractor) -> Dict[str, Any]:
         kind = lb.get("kind", "label")
         name = lb.get("name") or ""
         members[s].append({"kind": kind, "name": name})
-        if kind == "global_label" and name:
-            virt = ("__global_label__", name)
+        if name:
+            virt = ("__net_name__", name)
             uf.add(virt)
             uf.union(s, virt)
 

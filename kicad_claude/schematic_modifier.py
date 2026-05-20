@@ -6,6 +6,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import sexpdata
 
+from ._config_loader import load as _load_config
+from .geom import grid_mm as _grid_mm, snap as _snap  # canonical grid + snap
+
 Sym = sexpdata.Symbol
 
 
@@ -95,12 +98,12 @@ def _gen_uuid_node() -> list:
 
 
 def _make_at(x: float, y: float, rot: float = 0) -> list:
-    return [_sym("at"), float(x), float(y), float(rot)]
+    return [_sym("at"), _snap(x), _snap(y), float(rot)]
 
 
 def _make_at_xy(x: float, y: float) -> list:
     """Two-arg (at x y) — for junctions, which reject a rotation token."""
-    return [_sym("at"), float(x), float(y)]
+    return [_sym("at"), _snap(x), _snap(y)]
 
 
 def _make_property(name: str, value: str, x: float, y: float, hide: bool = False) -> list:
@@ -183,9 +186,14 @@ class SchematicDocument:
         y: float,
         rotation: float = 0,
         footprint: str = "",
+        hide_value: bool = False,
     ) -> Dict[str, Any]:
         if self.find_component(reference):
             return {"ok": False, "message": f"component {reference} already exists"}
+        if self._component_at_position_exists(lib_id, x, y, value=value):
+            return {"ok": True,
+                    "message": f"component {lib_id}={value!r} @ (~{x:.1f},{y:.1f}) "
+                               f"already exists nearby; skipped duplicate"}
         # Inline the lib_symbol drawing definition into the file's
         # (lib_symbols ...) block — without this, KiCad has no artwork for the
         # symbol and renders a blank "?" placeholder rectangle. If the lib_id
@@ -209,6 +217,23 @@ class SchematicDocument:
                     f"or correct the lib_id, then re-run."
                 ),
             }
+        # Fuzzy-resolution alternates are intentionally NOT surfaced as an
+        # ask-back here. The resolver already chose its best candidate; chat
+        # apply commits silently and the user can correct via a follow-up
+        # prompt if needed. See [[project-fuzzy-alternates-ask-first]] memory.
+
+        # Power-port symbols (lib_id 'power:*' or '#'-prefixed refdes) bake the
+        # rail name into their own graphic, so the auto-placed Reference (#PWR0n)
+        # and Value text are pure clutter. KiCad's library ships both hidden;
+        # hide them here at placement time so the schematic shows only the
+        # rail label (+3V / +5V / GND) — and so LAY_032 has nothing to fix.
+        cfg = _load_config("conventions")["power_symbol"]
+        is_power = (
+            any(resolved_lib_id.startswith(p) for p in cfg["lib_id_prefixes"])
+            or any(reference.startswith(p) for p in cfg["reference_prefixes"])
+        )
+        hide_ref = is_power
+        hide_val = hide_value or is_power
 
         self._snapshot()
         sym = [
@@ -221,22 +246,53 @@ class SchematicDocument:
             [_sym("on_board"), _sym("yes")],
             [_sym("dnp"), _sym("no")],
             _gen_uuid_node(),
-            _make_property("Reference", reference, x + 2.54, y - 1.27),
-            _make_property("Value", value, x + 2.54, y + 1.27),
+            _make_property("Reference", reference, x + 2.54, y - 1.27, hide=hide_ref),
+            _make_property("Value", value, x + 2.54, y + 1.27, hide=hide_val),
             _make_property("Footprint", footprint, x, y, hide=True),
             _make_property("Datasheet", "~", x, y, hide=True),
         ]
+        # Provenance tagging (P9.1). When the resolver used the fallback chain
+        # (fuzzy / capability / pin_compat / generic_placeholder) the placed
+        # symbol IS NOT a verbatim catalogue part — it's the closest fit. Tag
+        # the placed instance with the chain so downstream tools (ERC
+        # filtering, BOM enrichment, audit logs) can distinguish auto-resolved
+        # parts from exact matches without re-running the resolver.
+        if status and status not in ("exact", "alias_remapped"):
+            sym.append(_make_property("envil_provenance", str(status),
+                                        x, y, hide=True))
+            if resolved_lib_id != lib_id:
+                sym.append(_make_property("envil_original_lib_id", str(lib_id),
+                                            x, y, hide=True))
+            conf = info.get("confidence")
+            if conf is not None:
+                sym.append(_make_property("envil_confidence", str(conf),
+                                            x, y, hide=True))
         self.tree.append(sym)
         msg = f"added {reference} ({resolved_lib_id}) = {value} @ ({x},{y})"
         result: Dict[str, Any] = {"ok": True, "message": msg}
+        # Always surface the resolver strategy so callers can aggregate stats
+        # (exact / normalized / family_renamed / fuzzy / capability / pin_compat
+        # / generic_placeholder). Confidence is present for the new Phase 3-5
+        # layers; status alone is enough for the older layers.
+        result["resolver_status"] = status
+        if resolved_lib_id != lib_id:
+            result["lib_id_requested"] = lib_id
+            result["lib_id_resolved"] = resolved_lib_id
+        if "confidence" in info:
+            result["resolver_confidence"] = info["confidence"]
         if status == "fuzzy":
             result["warning"] = (
                 f"'{lib_id}' not found in your libraries; used closest match "
                 f"'{resolved_lib_id}'. Tell me if you want the original instead — "
                 f"you'll need to add it to a library first."
             )
-            result["lib_id_requested"] = lib_id
-            result["lib_id_resolved"] = resolved_lib_id
+        elif status in ("capability", "pin_compat", "generic_placeholder"):
+            conf = info.get("confidence")
+            result["warning"] = (
+                f"'{lib_id}' not in your libraries; resolver used "
+                f"{status} fallback → '{resolved_lib_id}' "
+                f"(confidence {conf})."
+            )
         return result
 
     def delete_component(self, reference: str) -> Dict[str, Any]:
@@ -402,6 +458,52 @@ class SchematicDocument:
         prop[2] = new_value
         return {"ok": True, "message": f"{reference}: value -> {new_value}"}
 
+    def hide_property(self, reference: str, property_name: str,
+                      hidden: bool = True) -> Dict[str, Any]:
+        """Set or clear the hide flag on one property of a placed symbol.
+
+        Used by LAY_032 to silence the auto-generated #PWR refdes / value text
+        that KiCad considers visible by default in some libraries. Idempotent
+        — calling twice with the same value is a no-op."""
+        node = self.find_component(reference)
+        if not node:
+            return {"ok": False, "message": f"component {reference} not found"}
+        prop = _get_property(node, property_name)
+        if not prop:
+            return {"ok": False, "message": f"{reference}: property '{property_name}' missing"}
+
+        effects = None
+        for sub in prop[1:]:
+            if isinstance(sub, list) and _head(sub) == "effects":
+                effects = sub
+                break
+        if effects is None:
+            effects = [_sym("effects"), [_sym("font"), [_sym("size"), 1.27, 1.27]]]
+            prop.append(effects)
+
+        existing_idx = None
+        for i, eff in enumerate(effects[1:], start=1):
+            if isinstance(eff, list) and eff and _head(eff) == "hide":
+                existing_idx = i
+                break
+            if isinstance(eff, Sym) and eff.value() == "hide":
+                existing_idx = i
+                break
+
+        was_hidden = existing_idx is not None
+        if hidden and was_hidden:
+            return {"ok": True, "message": f"{reference}.{property_name}: already hidden"}
+        if not hidden and not was_hidden:
+            return {"ok": True, "message": f"{reference}.{property_name}: already visible"}
+
+        self._snapshot()
+        if hidden:
+            effects.append([_sym("hide"), _sym("yes")])
+        else:
+            effects.pop(existing_idx)
+        verb = "hidden" if hidden else "shown"
+        return {"ok": True, "message": f"{reference}.{property_name}: {verb}"}
+
     def move_component(self, reference: str, x: float, y: float, rotation: Optional[float] = None) -> Dict[str, Any]:
         node = self.find_component(reference)
         if not node:
@@ -414,21 +516,186 @@ class SchematicDocument:
                 return {"ok": True, "message": f"{reference}: moved to ({x},{y})"}
         return {"ok": False, "message": f"{reference}: at-block missing"}
 
+    def dedup_collinear_wires(self) -> int:
+        """Drop every wire whose axis-aligned interval is FULLY CONTAINED
+        inside another wire on the same axis at the same perpendicular
+        coordinate. Two wires share axis + perp value (e.g. both horizontal
+        at y=50.8) and one's [x_lo, x_hi] ⊆ the other's [x_lo, x_hi] → the
+        contained wire is redundant; KiCad treats the longer wire as the
+        single conductor across that span anyway, regardless of net
+        assignment, because they're the same geometric segment.
+
+        Containment-only by design: partial overlaps (neither contains the
+        other) are LEFT ALONE — they could belong to distinct nets that
+        happen to share start/end on one axis, and merging would short
+        them. The label_placer's same-net merge already handles that case
+        upstream where net identity is known.
+
+        Returns count of wires dropped."""
+        wires: List[Tuple[int, str, float, float, float]] = []
+        for idx, child in enumerate(self.tree[1:], start=1):
+            if not (isinstance(child, list) and _head(child) == "wire"):
+                continue
+            pts = self._wire_pts(child)
+            if len(pts) != 2:
+                continue
+            (x1, y1), (x2, y2) = pts[0], pts[1]
+            if abs(y1 - y2) < 1e-3:
+                axis = "h"
+                perp = round(y1, 3)
+                lo, hi = (x1, x2) if x1 <= x2 else (x2, x1)
+            elif abs(x1 - x2) < 1e-3:
+                axis = "v"
+                perp = round(x1, 3)
+                lo, hi = (y1, y2) if y1 <= y2 else (y2, y1)
+            else:
+                continue  # diagonal — out of scope
+            wires.append((idx, axis, perp, lo, hi))
+
+        drop: set = set()
+        # O(N^2) — N is the wire count per sheet, typically < 500. The
+        # spatial-hash speedup isn't worth the code for this many wires.
+        for i, (idx_a, ax_a, p_a, lo_a, hi_a) in enumerate(wires):
+            if idx_a in drop:
+                continue
+            for j, (idx_b, ax_b, p_b, lo_b, hi_b) in enumerate(wires):
+                if i == j or idx_b in drop:
+                    continue
+                if ax_a != ax_b or abs(p_a - p_b) > 1e-3:
+                    continue
+                # B contains A?
+                if lo_b - 1e-3 <= lo_a and hi_a <= hi_b + 1e-3:
+                    # Skip exact-duplicate symmetric drop: only kill A if B
+                    # is strictly larger, OR (equal length) only the higher
+                    # index drops to keep determinism.
+                    if (hi_b - lo_b) > (hi_a - lo_a) + 1e-3 or idx_a > idx_b:
+                        drop.add(idx_a)
+                        break
+        if not drop:
+            return 0
+        self._snapshot()
+        self.tree[:] = [c for k, c in enumerate(self.tree)
+                        if k not in drop]
+        return len(drop)
+
+    def _wire_exists(self, p1: Tuple[float, float], p2: Tuple[float, float]) -> bool:
+        """True iff a wire with these two endpoints (in either order) already
+        exists at the snapped key. Same key collision = real duplicate."""
+        a = self._snap_xy(_snap(p1[0]), _snap(p1[1]))
+        b = self._snap_xy(_snap(p2[0]), _snap(p2[1]))
+        if a == b:
+            return True
+        target = frozenset((a, b))
+        for child in self.tree[1:]:
+            if not (isinstance(child, list) and _head(child) == "wire"):
+                continue
+            pts = self._wire_pts(child)
+            if len(pts) < 2:
+                continue
+            ka = self._snap_xy(pts[0][0], pts[0][1])
+            kb = self._snap_xy(pts[-1][0], pts[-1][1])
+            if frozenset((ka, kb)) == target:
+                return True
+        return False
+
+    def _label_exists(self, name: str, x: float, y: float, kind: str) -> bool:
+        key = self._snap_xy(_snap(x), _snap(y))
+        for child in self.tree[1:]:
+            if not (isinstance(child, list) and _head(child) == kind):
+                continue
+            if len(child) < 3 or _to_str(child[1]) != name:
+                continue
+            for sub in child[1:]:
+                if isinstance(sub, list) and _head(sub) == "at" and len(sub) >= 3:
+                    if self._snap_xy(float(sub[1]), float(sub[2])) == key:
+                        return True
+        return False
+
+    def _junction_exists(self, x: float, y: float) -> bool:
+        key = self._snap_xy(_snap(x), _snap(y))
+        for child in self.tree[1:]:
+            if not (isinstance(child, list) and _head(child) == "junction"):
+                continue
+            for sub in child[1:]:
+                if isinstance(sub, list) and _head(sub) == "at" and len(sub) >= 3:
+                    if self._snap_xy(float(sub[1]), float(sub[2])) == key:
+                        return True
+        return False
+
+    def _component_at_position_exists(self, lib_id: str, x: float, y: float,
+                                       value: str = "",
+                                       proximity_mm: float = 5.08) -> bool:
+        """True if a component with the same lib_id is already placed within
+        `proximity_mm` of (x, y). When `value` is provided AND the candidate
+        is a passive (R/C/L/D), the value must also match — this stops the
+        check from collapsing two genuinely-different decoupling caps (100n
+        and 10u) that happen to be near each other on a regulator output.
+
+        Why proximity not exact-match: when the user re-prompts the same
+        circuit on the same page, the LLM picks fresh refdes (R3 instead
+        of R1) AND often shifts coordinates by 1-2 mm so neither the refdes
+        check nor an exact-position check fires — duplicates ship. A 5 mm
+        proximity radius (~2 grid units) catches the re-prompt case
+        without colliding with legitimate dense layouts (decoupling caps
+        in adjacent VDD columns sit ≥ 5.08 mm apart).
+        """
+        prox_sq = proximity_mm * proximity_mm
+        for child in self.tree[1:]:
+            if not (isinstance(child, list) and _head(child) == "symbol"):
+                continue
+            comp_lib = None
+            comp_xy = None
+            comp_value = ""
+            for sub in child[1:]:
+                if isinstance(sub, list) and _head(sub) == "lib_id" and len(sub) > 1:
+                    comp_lib = _to_str(sub[1])
+                elif isinstance(sub, list) and _head(sub) == "at" and len(sub) >= 3:
+                    try:
+                        comp_xy = (float(sub[1]), float(sub[2]))
+                    except (TypeError, ValueError):
+                        comp_xy = None
+                elif isinstance(sub, list) and _head(sub) == "property" and len(sub) >= 3:
+                    if _to_str(sub[1]) == "Value":
+                        comp_value = _to_str(sub[2])
+            if comp_lib != lib_id or comp_xy is None:
+                continue
+            dx = comp_xy[0] - x
+            dy = comp_xy[1] - y
+            if dx * dx + dy * dy > prox_sq:
+                continue
+            # For passives (R/C/L/D from Device:* or similar), require value
+            # match too — two different-value parts close together is a real
+            # layout pattern, not a duplicate.
+            lib_low = (lib_id or "").lower()
+            is_passive = any(p in lib_low for p in ("device:r", "device:c", "device:l",
+                                                     "device:d", ":r_", ":c_", ":l_"))
+            if is_passive and value and comp_value and comp_value != value:
+                continue
+            return True
+        return False
+
     def add_wire(self, points: List[Tuple[float, float]]) -> Dict[str, Any]:
         if len(points) < 2:
             return {"ok": False, "message": "wire needs at least 2 points"}
+        if len(points) == 2 and self._wire_exists(points[0], points[1]):
+            return {"ok": True, "message": f"wire {points[0]}<->{points[1]} already exists; skipped duplicate"}
         # KiCad's parser requires each (wire ...) sexp to contain exactly TWO
         # (xy) points. A 3+ point path (e.g. an L-shape) must be expressed as
         # multiple (wire) sexps, one per segment. Without this split the file
         # fails to reload with "Expecting ')'".
         if len(points) > 2:
             self._snapshot()
+            added = 0
+            skipped = 0
             for i in range(len(points) - 1):
                 p1 = points[i]; p2 = points[i + 1]
+                if self._wire_exists(p1, p2):
+                    skipped += 1
+                    continue
                 seg = [
                     _sym("wire"),
-                    [_sym("pts"), [_sym("xy"), float(p1[0]), float(p1[1])],
-                                  [_sym("xy"), float(p2[0]), float(p2[1])]],
+                    [_sym("pts"), [_sym("xy"), _snap(p1[0]), _snap(p1[1])],
+                                  [_sym("xy"), _snap(p2[0]), _snap(p2[1])]],
                     [
                         _sym("stroke"),
                         [_sym("width"), 0],
@@ -437,11 +704,15 @@ class SchematicDocument:
                     _gen_uuid_node(),
                 ]
                 self.tree.append(seg)
-            return {"ok": True, "message": f"added {len(points)-1} wire segment(s) along {len(points)} points"}
+                added += 1
+            msg = f"added {added} wire segment(s) along {len(points)} points"
+            if skipped:
+                msg += f" (skipped {skipped} duplicate segment(s))"
+            return {"ok": True, "message": msg}
         self._snapshot()
         node = [
             _sym("wire"),
-            [_sym("pts")] + [[_sym("xy"), float(x), float(y)] for x, y in points],
+            [_sym("pts")] + [[_sym("xy"), _snap(x), _snap(y)] for x, y in points],
             [
                 _sym("stroke"),
                 [_sym("width"), 0],
@@ -455,6 +726,8 @@ class SchematicDocument:
     def add_label(self, name: str, x: float, y: float, kind: str = "label") -> Dict[str, Any]:
         if kind not in ("label", "global_label", "hierarchical_label"):
             return {"ok": False, "message": f"unknown label kind: {kind}"}
+        if self._label_exists(name, x, y, kind):
+            return {"ok": True, "message": f"{kind} '{name}' @ ({x},{y}) already exists; skipped duplicate"}
         self._snapshot()
         node = [
             _sym(kind),
@@ -472,6 +745,8 @@ class SchematicDocument:
         return {"ok": True, "message": f"added {kind} '{name}' @ ({x},{y})"}
 
     def add_junction(self, x: float, y: float) -> Dict[str, Any]:
+        if self._junction_exists(x, y):
+            return {"ok": True, "message": f"junction @ ({x},{y}) already exists; skipped duplicate"}
         self._snapshot()
         # KiCad's parser accepts (at x y rot) for symbols/labels but rejects
         # the rotation token inside (junction ...) — use the 2-arg form here
@@ -537,7 +812,7 @@ class SchematicDocument:
         moved = 0
         snapshotted = False
         from_t = (float(from_point[0]), float(from_point[1]))
-        to_t = (float(to_point[0]), float(to_point[1]))
+        to_t = (_snap(to_point[0]), _snap(to_point[1]))
         for child in self.tree[1:]:
             if not (isinstance(child, list) and _head(child) == "wire"):
                 continue
@@ -571,11 +846,54 @@ class SchematicDocument:
                         return {"ok": True, "message": f"deleted junction @ ({x},{y})"}
         return {"ok": False, "message": f"no junction found near ({x},{y})"}
 
+    def _no_connect_exists(self, x: float, y: float, tol: float = 0.05) -> bool:
+        for child in self.tree[1:]:
+            if not (isinstance(child, list) and _head(child) == "no_connect"):
+                continue
+            for sub in child[1:]:
+                if isinstance(sub, list) and _head(sub) == "at" and len(sub) >= 3:
+                    if abs(float(sub[1]) - x) <= tol and abs(float(sub[2]) - y) <= tol:
+                        return True
+        return False
+
+    def add_no_connect(self, x: float, y: float) -> Dict[str, Any]:
+        """Place a no_connect (X) marker at a pin tip, per LAY_022 / CON_002.
+        KiCad ERC requires every intentionally unused IC pin to carry one of
+        these or be tied to a net — without it, ERC flags 'unconnected pin'
+        and the reviewer can't tell 'forgotten' from 'reviewed-unused'.
+        Same 2-arg (at x y) form as junctions — adding a rotation token here
+        makes KiCad's parser reject the file with 'Expecting )'.
+        """
+        if self._no_connect_exists(x, y):
+            return {"ok": True, "message": f"no_connect @ ({x},{y}) already exists; skipped duplicate"}
+        self._snapshot()
+        node = [
+            _sym("no_connect"),
+            _make_at_xy(x, y),
+            _gen_uuid_node(),
+        ]
+        self.tree.append(node)
+        return {"ok": True, "message": f"added no_connect @ ({x},{y})"}
+
+    def delete_no_connect(self, x: float, y: float, tol: float = 0.05) -> Dict[str, Any]:
+        """Remove a no_connect marker at (x, y) — counterpart to add_no_connect."""
+        for child in self.tree[1:]:
+            if not (isinstance(child, list) and _head(child) == "no_connect"):
+                continue
+            for sub in child[1:]:
+                if isinstance(sub, list) and _head(sub) == "at" and len(sub) >= 3:
+                    if abs(float(sub[1]) - x) <= tol and abs(float(sub[2]) - y) <= tol:
+                        self._snapshot()
+                        self.tree.remove(child)
+                        return {"ok": True, "message": f"deleted no_connect @ ({x},{y})"}
+        return {"ok": False, "message": f"no no_connect found near ({x},{y})"}
+
 
 OPERATION_HANDLERS = {
     "add_component":     "add_component",
     "delete_component":  "delete_component",
     "edit_value":        "edit_value",
+    "hide_property":     "hide_property",
     "move_component":    "move_component",
     "add_wire":          "add_wire",
     "delete_wire":       "delete_wire",
@@ -583,6 +901,8 @@ OPERATION_HANDLERS = {
     "add_label":         "add_label",
     "add_junction":      "add_junction",
     "delete_junction":   "delete_junction",
+    "add_no_connect":    "add_no_connect",
+    "delete_no_connect": "delete_no_connect",
 }
 
 

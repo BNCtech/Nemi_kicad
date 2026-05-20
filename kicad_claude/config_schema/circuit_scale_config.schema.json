@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "circuit_scale_config.json",
+  "type": "object",
+  "required": ["tiers", "thresholds", "active_rules", "severity_overrides", "fix_defaults"],
+  "properties": {
+    "tiers":              { "type": "object" },
+    "thresholds":         { "type": "object" },
+    "active_rules":       { "type": "object" },
+    "severity_overrides": { "type": "object" },
+    "fix_defaults":       { "type": "object" }
+  }
+}

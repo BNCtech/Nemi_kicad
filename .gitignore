@@ -21,6 +21,7 @@ ipc_port.txt
 # Editor / OS
 .vscode/
 .idea/
+.history/
 *.swp
 .DS_Store
 Thumbs.db

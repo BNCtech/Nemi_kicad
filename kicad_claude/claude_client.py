@@ -23,12 +23,16 @@ class ClaudeClient:
         last_err = None
         for attempt in range(3):
             try:
-                resp = self.client.messages.create(
+                # Stream required: max_tokens of 16k+ exceeds the SDK's
+                # non-streaming 10-minute ceiling. get_final_message() yields
+                # the same Message a .create() call would have returned.
+                with self.client.messages.stream(
                     model=self.model,
                     max_tokens=max_tokens,
                     system=system_arg,
                     messages=[{"role": "user", "content": user}],
-                )
+                ) as stream:
+                    resp = stream.get_final_message()
                 return resp.content[0].text
             except anthropic.RateLimitError as e:
                 last_err = e

@@ -1,5 +1,5 @@
 {
-  "_comment": "BOM-specific config only. Universal conventions (refdes letter codes, power-symbol filter, missing-value sentinels) live in conventions.json so basic_checks and other modules share them. Do not duplicate them here.",
+  "_comment": "BOM-specific config. Universal conventions (refdes letter codes, power-symbol filter, missing-value sentinels) live in conventions.json. No tier-scaling needed for BOM — part data is fixed regardless of circuit size.",
 
   "property_aliases": {
     "_comment": "Different teams name fields differently. First match wins; lookup is case-insensitive.",
@@ -8,18 +8,17 @@
     "description":  ["Description", "Desc"]
   },
 
-  "_strict_mpn_categories_comment": "Categories from conventions.json:refdes that MUST carry an MPN when --strict-mpn is on. Edit to suit your shop.",
   "strict_mpn_categories": ["ic"],
 
   "text_table": {
-    "_comment": "Display widths for the printable BOM. Strings longer than max get an ellipsis. CSV/JSON exports never truncate.",
+    "_comment": "Display widths for printable BOM. CSV/JSON exports never truncate.",
     "references_max_width": 40,
-    "footprint_max_width": 50,
+    "footprint_max_width":  50,
     "ellipsis": "…"
   },
 
   "csv_columns": {
-    "_comment": "Column order and header labels for the CSV export. Keys are internal field names, values are the column headers manufacturers see.",
+    "_comment": "Column order and header labels for CSV export.",
     "qty":          "Qty",
     "references":   "References",
     "value":        "Value",
@@ -29,5 +28,14 @@
     "description":  "Description",
     "lib_id":       "LibId",
     "dnp":          "DNP"
+  },
+
+  "backfill": {
+    "_comment": "Controls bom_backfill.py behaviour. All previously hardcoded defaults are here.",
+    "default_fields": ["Description", "Datasheet", "MPN", "Manufacturer"],
+    "hidden_by_default": true,
+    "_hidden_comment": "New properties appended by backfill are hidden on the canvas (invisible in eeschema) but visible in the KiCad properties dialog and BOM CSV. Set false to make them visible — useful for quick schematic reviews.",
+    "overwrite_existing": false,
+    "_overwrite_comment": "When false (default), backfill only fills blank/sentinel fields and never clobbers the user's explicit value. Set true to always refresh from lib + bomdoc."
   }
 }

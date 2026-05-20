@@ -4,9 +4,23 @@ import sys
 from pathlib import Path
 
 from .basic_checks import run_all as basic_check_run, to_text as basic_check_to_text
-from .bom import extract_rows as bom_extract_rows, to_csv as bom_to_csv, to_text as bom_to_text, validate_rows as bom_validate_rows
+from .bom import (
+    apply_quantity_breaks as bom_apply_qb,
+    enrich_with_ai as bom_enrich_ai,
+    extract_rows as bom_extract_rows,
+    health_scorecard as bom_health,
+    to_csv as bom_to_csv,
+    to_html as bom_to_html,
+    to_json as bom_to_json,
+    to_text as bom_to_text,
+    to_text_report as bom_to_text_report,
+    to_xml as bom_to_xml,
+    validate_rows as bom_validate_rows,
+)
+from . import bomdoc as bom_doc
+from . import bom_backfill as bom_bf
 from .chat import repl as chat_repl
-from .circuit_rules import apply_all as rules_apply_all, detect_all as rules_detect_all, to_text as rules_to_text
+from .rules import apply_all as rules_apply_all, detect_all as rules_detect_all, to_text as rules_to_text
 from .erc import run as erc_run, to_text as erc_to_text
 from .fixer import diagnose as fix_diagnose, fix as fix_run, to_text as fix_to_text
 from .schematic_extractor import SchematicExtractor
@@ -85,21 +99,142 @@ def cmd_check(args):
 
 
 def cmd_bom(args):
-    rows = bom_extract_rows(args.path)
+    # Layer 1: schematic + library enrichment.
+    doc = bom_doc.load(args.path) if args.bomdoc or args.enrich else None
+    rows = bom_extract_rows(
+        args.path,
+        enrich_from_lib=not args.no_lib_enrich,
+        bomdoc_overlay=doc,
+        variant=args.variant,
+    )
+
+    # Layer 2: AI procurement enrichment (Claude → MPN/Mfr/Price/Lifecycle).
+    if args.enrich:
+        if doc is None:
+            doc = bom_doc.load(args.path)
+
+        def _progress(i, total, r):
+            print(f"  [{i+1}/{total}] resolving {r.get('value','?')} {r.get('footprint','')}",
+                  file=sys.stderr)
+
+        rows = bom_enrich_ai(
+            rows, args.path, doc,
+            force_refresh=args.refresh,
+            progress=_progress,
+        )
+        bom_doc.save(args.path, doc)
+        print(f"BomDoc saved: {bom_doc.doc_path_for(args.path)}", file=sys.stderr)
+
+    # Layer 3: quantity breaks → ext_price.
+    rows = bom_apply_qb(rows, boards=max(1, int(args.boards)))
+
     issues = bom_validate_rows(rows, strict_mpn=args.strict_mpn)
+    scorecard = bom_health(rows)
 
     if args.json:
-        print(json.dumps({"rows": rows, "issues": issues}, indent=2, default=str))
+        print(bom_to_json(rows, issues, scorecard))
     else:
-        print(bom_to_text(rows, issues))
+        print(bom_to_text_report(rows, issues, scorecard, bom_type=args.bom_type))
 
     if args.csv:
-        out = bom_to_csv(rows, args.csv)
+        out = bom_to_csv(rows, args.csv, bom_type=args.bom_type)
         print(f"\nCSV written to {out}", file=sys.stderr)
+
+    if args.xlsx:
+        try:
+            from .xlsx_writer import write as xlsx_write
+            out = xlsx_write(rows, args.xlsx, issues, scorecard, bom_type=args.bom_type)
+            print(f"XLSX written to {out}", file=sys.stderr)
+        except ImportError as e:
+            print(f"XLSX skipped: {e}", file=sys.stderr)
+
+    if args.html:
+        out = Path(args.html)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            bom_to_html(rows, issues, scorecard, bom_type=args.bom_type),
+            encoding="utf-8",
+        )
+        print(f"HTML written to {out}", file=sys.stderr)
+
+    if args.xml:
+        out = Path(args.xml)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(bom_to_xml(rows, bom_type=args.bom_type), encoding="utf-8")
+        print(f"XML written to {out}", file=sys.stderr)
 
     critical = [i for i in issues if i["severity"] == "critical"]
     if critical:
         sys.exit(1)
+
+
+def cmd_bom_lock(args):
+    """Lock a corrected MPN/Mfr/etc. for one or more refs (Altium-style
+    manual approval). Subsequent --enrich --refresh keeps user choices."""
+    refs = [r.strip() for r in args.ref.split(",") if r.strip()]
+    if not refs:
+        print("error: --ref required (comma-separated)", file=sys.stderr)
+        sys.exit(2)
+
+    doc = bom_doc.load(args.path)
+    key_map = bom_doc.find_keys_for_ref(args.path, refs)
+
+    missing = [r for r, k in key_map.items() if not k]
+    if missing:
+        print(f"error: refs not found in schematic: {', '.join(missing)}", file=sys.stderr)
+        sys.exit(2)
+
+    # Group refs that share the same line so we lock once per line.
+    seen_keys: set = set()
+    locked_summary = []
+    for ref in refs:
+        key = key_map[ref]
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        ld = bom_doc.apply_lock(
+            doc,
+            key,
+            mpn=args.mpn,
+            manufacturer=args.mfr,
+            distributor=args.distributor,
+            unit_price=args.unit_price,
+            lifecycle=args.lifecycle,
+            alternates=[a.strip() for a in args.alternates.split(",")] if args.alternates else None,
+            notes=args.notes,
+            locked=not args.unlock,
+        )
+        locked_summary.append((ref, key, ld))
+
+    out = bom_doc.save(args.path, doc)
+    if args.json:
+        print(json.dumps({"saved": str(out), "locked": [
+            {"ref": r, "key": k, "line": ld} for r, k, ld in locked_summary
+        ]}, indent=2, default=str))
+    else:
+        print(f"BomDoc saved: {out}")
+        print(f"{'Unlocked' if args.unlock else 'Locked'} {len(locked_summary)} line(s):")
+        for ref, key, ld in locked_summary:
+            mpn = (ld.get('approved_mpns') or [''])[0]
+            print(f"  {ref:6s}  {key}")
+            print(f"          MPN={mpn!r}  Mfr={ld.get('manufacturer','')!r}  "
+                  f"Dist={ld.get('preferred_distributor','')!r}  "
+                  f"Price={ld.get('unit_price')}  Lifecycle={ld.get('lifecycle','')!r}")
+
+
+def cmd_bom_backfill(args):
+    fields = [f.strip() for f in args.fields.split(",") if f.strip()]
+    report = bom_bf.back_fill(
+        args.path,
+        use_bomdoc=not args.no_bomdoc,
+        fields=fields,
+        overwrite_existing=args.overwrite,
+        dry_run=args.dry_run,
+    )
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+    else:
+        print(bom_bf.to_text(report))
 
 
 def cmd_fix(args):
@@ -201,13 +336,63 @@ def main(argv=None):
     perc.add_argument("--json", action="store_true")
     perc.set_defaults(func=cmd_erc)
 
-    pb = sub.add_parser("bom", help="extract a Bill of Materials from a .kicad_sch")
+    pb = sub.add_parser("bom",
+                        help="extract a Bill of Materials from a .kicad_sch (Altium-class: lib enrichment, AI MPN/price resolution, variants, quantity breaks, multi-format export)")
     pb.add_argument("path", type=Path)
     pb.add_argument("--csv", type=Path, default=None, help="also write a CSV to this path")
+    pb.add_argument("--xlsx", type=Path, default=None, help="also write an Excel .xlsx to this path (needs openpyxl)")
+    pb.add_argument("--html", type=Path, default=None, help="also write a self-contained HTML report")
+    pb.add_argument("--xml",  type=Path, default=None, help="also write an ERP-friendly XML")
     pb.add_argument("--json", action="store_true", help="emit JSON instead of a text table")
     pb.add_argument("--strict-mpn", action="store_true",
                     help="treat ICs without an MPN property as critical issues")
+    pb.add_argument("--bom-type", default="procurement",
+                    choices=["schematic", "procurement", "assembly", "test", "full"],
+                    help="column subset to render (defaults to procurement)")
+    pb.add_argument("--variant", default="default",
+                    help="assembly variant name (see bomdoc_config.json:variants)")
+    pb.add_argument("--boards", type=int, default=1,
+                    help="number of boards being built (multiplies qty for quantity-break discounts)")
+    pb.add_argument("--bomdoc", action="store_true",
+                    help="overlay user overrides + cached AI from <project>.bomdoc.json")
+    pb.add_argument("--enrich", action="store_true",
+                    help="run Claude-backed MPN/Mfr/Price/Lifecycle resolver, cache into bomdoc")
+    pb.add_argument("--refresh", action="store_true",
+                    help="force re-resolution; ignore the bomdoc cache (use after schematic edits)")
+    pb.add_argument("--no-lib-enrich", action="store_true",
+                    help="skip pulling Description/Datasheet/Footprint from the .kicad_sym lib")
     pb.set_defaults(func=cmd_bom)
+
+    pbl = sub.add_parser("bom-lock",
+                         help="lock a curated MPN/Mfr/Distributor/Price/Lifecycle for one or more refs (Altium-style manual approval). Future --enrich --refresh respects locks.")
+    pbl.add_argument("path", type=Path)
+    pbl.add_argument("--ref", required=True,
+                     help="reference designator(s), comma-separated (e.g. C1,C2). Locking once per shared line is automatic.")
+    pbl.add_argument("--mpn", default=None, help="approved MPN (becomes preferred)")
+    pbl.add_argument("--mfr", default=None, help="manufacturer")
+    pbl.add_argument("--distributor", default=None, help="preferred distributor (LCSC/DigiKey/Mouser/...)")
+    pbl.add_argument("--unit-price", type=float, default=None, help="unit price (single qty, currency from bomdoc_config)")
+    pbl.add_argument("--lifecycle", default=None,
+                     choices=["Active", "NRND", "EOL", "Obsolete", "Unknown"])
+    pbl.add_argument("--alternates", default=None, help="comma-separated approved alternate MPNs")
+    pbl.add_argument("--notes", default=None, help="free-text procurement notes")
+    pbl.add_argument("--unlock", action="store_true", help="clear the lock flag (keep stored values)")
+    pbl.add_argument("--json", action="store_true")
+    pbl.set_defaults(func=cmd_bom_lock)
+
+    pbf = sub.add_parser("bom-backfill",
+                         help="write Description/Datasheet/MPN/Manufacturer onto each placed symbol so KiCad's GUI BOM tool also exports them")
+    pbf.add_argument("path", type=Path)
+    pbf.add_argument("--fields", default="Description,Datasheet,MPN,Manufacturer",
+                     help="comma-separated list of property names to back-fill")
+    pbf.add_argument("--overwrite", action="store_true",
+                     help="replace non-blank existing values too (default: only fill blanks/sentinels)")
+    pbf.add_argument("--no-bomdoc", action="store_true",
+                     help="ignore <project>.bomdoc.json (lib-only back-fill: Description+Datasheet only)")
+    pbf.add_argument("--dry-run", action="store_true",
+                     help="report what would change; do not modify the file")
+    pbf.add_argument("--json", action="store_true")
+    pbf.set_defaults(func=cmd_bom_backfill)
 
     pf = sub.add_parser("fix",
                         help="run validate->repair loop (L1 + L2 + Claude-driven ops, mutates the schematic)")

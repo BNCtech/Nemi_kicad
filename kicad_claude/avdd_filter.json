@@ -1,0 +1,278 @@
+{
+  "_comment": "AVDD/VDDA/AVCC isolation network catalog. Synthesized 2026-05-17 from ST AN4488, ATmega328P datasheet §23.5.2 + §28.6.2, Espressif HW Design Guidelines, SAM D21 datasheet, RP2040 datasheet §2.9.6, Nordic nWP030, Microchip support article on AVDD/AVSS. Cap/inductor values are now tier-keyed: circuit_profile.py resolves the correct value at runtime using the active CircuitProfile tier.",
+
+  "_tier_cap_values": {
+    "_comment": "Shared lookup table for all families. Keys match 'role' fields below. circuit_profile.py reads profile.avdd_cap(role) which resolves via this table using the active tier. nano/small favour smaller bulk caps (less board space, lower current); large/xlarge favour larger bulk for better transient response.",
+    "vdda_bulk":      { "nano": "1u",   "small": "1u",   "medium": "1u",   "large": "4u7",  "xlarge": "10u"  },
+    "vdda_decouple":  { "nano": "100n", "small": "100n", "medium": "100n", "large": "100n", "xlarge": "100n" },
+    "vref_decouple":  { "nano": "100n", "small": "100n", "medium": "100n", "large": "100n", "xlarge": "100n" },
+    "vref_bulk":      { "nano": "1u",   "small": "1u",   "medium": "1u",   "large": "4u7",  "xlarge": "4u7"  },
+    "avcc_decouple":  { "nano": "100n", "small": "100n", "medium": "100n", "large": "100n", "xlarge": "100n" },
+    "aref_decouple":  { "nano": "100n", "small": "100n", "medium": "100n", "large": "100n", "xlarge": "100n" },
+    "vdda_extra_hf":  { "nano": "100n", "small": "100n", "medium": "100n", "large": "100n", "xlarge": "100n" },
+    "series_L":       { "nano": "2u2",  "small": "10u",  "medium": "10u",  "large": "10u",  "xlarge": "10u"  },
+    "series_L_esp":   { "nano": "2u2",  "small": "2u2",  "medium": "2u2",  "large": "2u2",  "xlarge": "2u2"  },
+    "vdd_bulk_a":     { "nano": "1u",   "small": "2u2",  "medium": "4u7",  "large": "4u7",  "xlarge": "10u"  },
+    "vdd_bulk_b":     { "nano": "1u",   "small": "2u2",  "medium": "4u7",  "large": "4u7",  "xlarge": "10u"  },
+    "vdda_bulk_large":{ "nano": "1u",   "small": "4u7",  "medium": "10u",  "large": "10u",  "xlarge": "22u"  },
+    "avdd_bulk":      { "nano": "1u",   "small": "1u",   "medium": "1u",   "large": "4u7",  "xlarge": "4u7"  },
+    "avdd_decouple":  { "nano": "100n", "small": "100n", "medium": "100n", "large": "100n", "xlarge": "100n" },
+    "adc_avdd_dec":   { "nano": "100n", "small": "100n", "medium": "100n", "large": "100n", "xlarge": "100n" }
+  },
+
+  "_match_lib_id_substrings": {
+    "stm32_generic": ["stm32"],
+    "atmega328p":    ["atmega328", "atmega168", "atmega88"],
+    "esp32":         ["esp32"],
+    "samd21":        ["samd21", "atsamd21"],
+    "rp2040":        ["rp2040"],
+    "nrf52840":      ["nrf52840"],
+    "pic16f":        ["pic16f", "pic18f"],
+    "msp430g2":      ["msp430g2"],
+    "ch32v003":      ["ch32v003"]
+  },
+
+  "families": {
+    "stm32_generic": {
+      "topology": "ferrite_bead_series_plus_caps",
+      "components": [
+        {
+          "role": "series_FB",
+          "value": "FerriteBead",
+          "value_tier_key": null,
+          "mpn_example": "BLM18AG601SN1 (600Ω@100MHz)",
+          "lib_id": "Device:FerriteBead",
+          "wiring": "VDD net -> FB pin1; FB pin2 -> VDDA net (new isolated net)"
+        },
+        {
+          "role": "vdda_bulk",
+          "value": "1u",
+          "value_tier_key": "vdda_bulk",
+          "lib_id": "Device:C",
+          "wiring": "VDDA -> cap -> GND"
+        },
+        {
+          "role": "vdda_decouple",
+          "value": "100n",
+          "value_tier_key": "vdda_decouple",
+          "lib_id": "Device:C",
+          "wiring": "VDDA -> cap -> GND (at the VDDA pin)"
+        },
+        {
+          "role": "vref_decouple",
+          "value": "100n",
+          "value_tier_key": "vref_decouple",
+          "lib_id": "Device:C",
+          "wiring": "VREF+ -> cap -> GND (only if VREF+ exposed)"
+        },
+        {
+          "role": "vref_bulk",
+          "value": "1u",
+          "value_tier_key": "vref_bulk",
+          "lib_id": "Device:C",
+          "wiring": "VREF+ -> cap -> GND (only if VREF+ exposed)"
+        }
+      ],
+      "rationale": "ST AN4488 §2.1.6: VDDA via ferrite bead from VDD; 1µF + 100nF on VDDA, same on VREF+ when present."
+    },
+
+    "atmega328p": {
+      "topology": "LC_filter",
+      "components": [
+        {
+          "role": "series_L",
+          "value": "10u",
+          "value_tier_key": "series_L",
+          "lib_id": "Device:L",
+          "mpn_example": "10µH RF choke",
+          "wiring": "VCC -> L -> AVCC"
+        },
+        {
+          "role": "avcc_decouple",
+          "value": "100n",
+          "value_tier_key": "avcc_decouple",
+          "lib_id": "Device:C",
+          "wiring": "AVCC -> cap -> GND (at AVCC pin)"
+        },
+        {
+          "role": "aref_decouple",
+          "value": "100n",
+          "value_tier_key": "aref_decouple",
+          "lib_id": "Device:C",
+          "wiring": "AREF -> cap -> GND (when internal Vref used)"
+        }
+      ],
+      "rationale": "ATmega328P datasheet §23.5.2 + §28.6.2: AVCC via 10µH LC + 100nF; AREF 100nF to GND when internal Vref selected."
+    },
+
+    "esp32": {
+      "topology": "LC_filter_plus_bulk",
+      "components": [
+        {
+          "role": "series_L_esp",
+          "value": "2u2",
+          "value_tier_key": "series_L_esp",
+          "lib_id": "Device:L",
+          "mpn_example": "2.2µH >=500mA",
+          "wiring": "3V3 -> L -> VDD3P3/VDDA"
+        },
+        {
+          "role": "vdda_bulk_large",
+          "value": "10u",
+          "value_tier_key": "vdda_bulk_large",
+          "lib_id": "Device:C",
+          "wiring": "VDDA/VDD3P3 -> cap -> GND"
+        },
+        {
+          "role": "vdda_decouple",
+          "value": "1u",
+          "value_tier_key": "vdda_decouple",
+          "lib_id": "Device:C",
+          "wiring": "VDDA/VDD3P3 -> cap -> GND (per analog pin group)"
+        },
+        {
+          "role": "vdda_extra_hf",
+          "value": "100n",
+          "value_tier_key": "vdda_extra_hf",
+          "lib_id": "Device:C",
+          "wiring": "VDDA/VDD3P3 -> cap -> GND (HF bypass)"
+        }
+      ],
+      "rationale": "Espressif HW Design Guidelines Schematic Checklist: 10µF + 1µF + 100nF on VDDA/VDD3P3; LC on VDD3P3 to suppress HF harmonics (>=500mA inductor)."
+    },
+
+    "samd21": {
+      "topology": "LC_filter",
+      "components": [
+        {
+          "role": "series_FB",
+          "value": "FerriteBead",
+          "value_tier_key": null,
+          "lib_id": "Device:FerriteBead",
+          "mpn_example": "BLM18AG601SN1D (or 10µH)",
+          "wiring": "VDDIO -> FB -> VDDANA"
+        },
+        {
+          "role": "vdda_bulk_large",
+          "value": "10u",
+          "value_tier_key": "vdda_bulk_large",
+          "lib_id": "Device:C",
+          "wiring": "VDDANA -> cap -> GNDANA"
+        },
+        {
+          "role": "vdda_decouple",
+          "value": "100n",
+          "value_tier_key": "vdda_decouple",
+          "lib_id": "Device:C",
+          "wiring": "VDDANA -> cap -> GNDANA (at VDDANA pin)"
+        }
+      ],
+      "rationale": "SAM D21 datasheet DS40001882G schematic checklist: VDDANA 10µF + 100nF, isolated from VDDIO via ferrite bead."
+    },
+
+    "rp2040": {
+      "topology": "ferrite_bead_series_plus_caps",
+      "components": [
+        {
+          "role": "series_FB",
+          "value": "FerriteBead",
+          "value_tier_key": null,
+          "lib_id": "Device:FerriteBead",
+          "mpn_example": "BLM18AG601SN1 (600Ω@100MHz)",
+          "wiring": "3V3 -> FB -> ADC_AVDD"
+        },
+        {
+          "role": "adc_avdd_dec",
+          "value": "100n",
+          "value_tier_key": "adc_avdd_dec",
+          "lib_id": "Device:C",
+          "wiring": "ADC_AVDD -> cap -> GND (at ADC_AVDD pin)"
+        }
+      ],
+      "rationale": "RP2040 datasheet §2.9.6 + Hardware Design with RP2040 §1.4.2: ADC_AVDD 100nF at pin; filter from 3V3 via ferrite for best ADC SNR."
+    },
+
+    "nrf52840": {
+      "topology": "shared_VDD_with_corner_decoupling",
+      "components": [
+        {
+          "role": "vdd_bulk_a",
+          "value": "4u7",
+          "value_tier_key": "vdd_bulk_a",
+          "lib_id": "Device:C",
+          "wiring": "VDD corner 1 -> cap -> GND"
+        },
+        {
+          "role": "vdd_bulk_b",
+          "value": "4u7",
+          "value_tier_key": "vdd_bulk_b",
+          "lib_id": "Device:C",
+          "wiring": "VDD corner 2 -> cap -> GND"
+        },
+        {
+          "role": "vdda_decouple",
+          "value": "100n",
+          "value_tier_key": "vdda_decouple",
+          "lib_id": "Device:C",
+          "wiring": "VDD pin -> cap -> GND (one per VDD pin)"
+        },
+        {
+          "role": "vdda_decouple",
+          "value": "100n",
+          "value_tier_key": "vdda_decouple",
+          "lib_id": "Device:C",
+          "wiring": "VDD pin -> cap -> GND"
+        },
+        {
+          "role": "vdda_decouple",
+          "value": "100n",
+          "value_tier_key": "vdda_decouple",
+          "lib_id": "Device:C",
+          "wiring": "VDD pin -> cap -> GND"
+        }
+      ],
+      "rationale": "Nordic nWP030: 2x 2.2-4.7µF bulk + 3x 100nF per VDD corner; no separate AVDD pin on nRF52840."
+    },
+
+    "pic16f": {
+      "topology": "ferrite_or_R_isolation_plus_caps",
+      "components": [
+        {
+          "role": "series_FB",
+          "value": "FerriteBead",
+          "value_tier_key": null,
+          "lib_id": "Device:FerriteBead",
+          "mpn_example": "BLM18AG601SN1 or 10Ω series R",
+          "wiring": "VDD -> FB -> AVDD"
+        },
+        {
+          "role": "avdd_decouple",
+          "value": "100n",
+          "value_tier_key": "avdd_decouple",
+          "lib_id": "Device:C",
+          "wiring": "AVDD -> cap -> AVSS"
+        },
+        {
+          "role": "avdd_bulk",
+          "value": "1u",
+          "value_tier_key": "avdd_bulk",
+          "lib_id": "Device:C",
+          "wiring": "AVDD -> cap -> AVSS"
+        }
+      ],
+      "rationale": "Microchip support: AVDD must match VDD (Δ<=0.3V); ferrite isolation; 100nF + 1µF at pin. AVDD must NOT rise before VDD (latch-up)."
+    },
+
+    "msp430g2": {
+      "topology": "shared_DVCC",
+      "components": [],
+      "rationale": "MSP430G2x datasheet (SLAS735): AVCC and DVCC internally tied via diode; tie both to same rail (Δ<=0.3V). No external filter required."
+    },
+
+    "ch32v003": {
+      "topology": "shared_VDD",
+      "components": [],
+      "rationale": "CH32V003 datasheet V1.3: ADC runs from VDD; no AVDD pin. Standard 100nF + 1µF VDD decoupling sufficient."
+    }
+  }
+}

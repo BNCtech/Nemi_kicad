@@ -1,0 +1,9 @@
+{
+  "_comment": "Knobs for the L2 LLM judge (validator.py). Prompt template lives in prompts/validator_system.md.",
+
+  "claude": {
+    "_comment": "max_tokens is large because the L2 reply carries per-rule findings for ~138 rules; the SDK default truncates mid-response on real schematics. model:null = use CLAUDE_MODEL_DEEP from .env.",
+    "model":      null,
+    "max_tokens": 16000
+  }
+}

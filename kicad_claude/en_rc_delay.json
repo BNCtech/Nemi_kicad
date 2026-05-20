@@ -1,0 +1,22 @@
+{
+  "_comment": "EN / CHIP_PU RC delay catalog. tau = R*C; EN crosses Vih at ~1.2*tau, must be > rail ramp time. Synthesized 2026-05-17 from Espressif HW Design Guidelines (Schematic Checklist - Power Scheme) for ESP32 / S2 / S3 / C3 / 8266.",
+  "_match_lib_id_substrings": {
+    "esp32":    ["esp32-wroom", "esp32-wrover", "esp-wroom-32", "esp32-d0w"],
+    "esp32-s2": ["esp32-s2"],
+    "esp32-s3": ["esp32-s3"],
+    "esp32-c3": ["esp32-c3"],
+    "esp8266":  ["esp-12", "esp-07", "esp8266", "esp-wroom-02"]
+  },
+  "families": {
+    "esp32":    {"pin_name_patterns": ["EN", "CHIP_PU"], "r_ohm": "10k", "r_to": "VDD3V3", "c_farad": "1u",   "c_dielectric": "X7R or X5R", "c_to": "GND", "rationale": "Espressif ESP32 HW Design Guidelines - Schematic Checklist: CHIP_PU 10k pull-up + 1uF to GND. Tau=10ms gives 5x margin over typical 1-2ms rail ramp."},
+    "esp32-s2": {"pin_name_patterns": ["EN", "CHIP_PU"], "r_ohm": "10k", "r_to": "VDD3V3", "c_farad": "1u",   "c_dielectric": "X7R",        "c_to": "GND", "rationale": "ESP32-S2 HW Design Guidelines: identical to ESP32 (10k + 1uF)."},
+    "esp32-s3": {"pin_name_patterns": ["EN", "CHIP_PU"], "r_ohm": "10k", "r_to": "VDD3V3", "c_farad": "1u",   "c_dielectric": "X7R",        "c_to": "GND", "rationale": "ESP32-S3 HW Design Guidelines Schematic Checklist: 10k + 1uF on CHIP_PU."},
+    "esp32-c3": {"pin_name_patterns": ["EN", "CHIP_PU"], "r_ohm": "10k", "r_to": "VDD3V3", "c_farad": "1u",   "c_dielectric": "X7R",        "c_to": "GND", "rationale": "ESP32-C3 HW Design Guidelines: identical RC."},
+    "esp8266":  {"pin_name_patterns": ["CH_PD", "EN", "CH_EN"], "r_ohm": "10k", "r_to": "VDD3V3", "c_farad": "100n", "c_dielectric": "X7R", "c_to": "GND", "rationale": "ESP8266 + WROOM-02: CH_PD 10k pull-up + 100nF to GND (POR faster than ESP32, smaller cap)."}
+  },
+  "_generic": {
+    "applies_when": "MCU has active-high enable on a rail that ramps >1ms (battery, solar, slow PMIC LDO, shared rail with large bulk cap)",
+    "r_ohm": "10k", "c_farad": "1u", "tau_target_ms": 10,
+    "rationale": "tau = R*C = 10k * 1uF = 10ms; EN crosses ~0.7*VDD at ~1.2*tau = 12ms, comfortable for any 1-5ms rail ramp. Use C=4.7uF for supercap/battery rails."
+  }
+}

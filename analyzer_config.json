@@ -1,0 +1,124 @@
+{
+  "skill_signals": {
+    "beginner": [
+      "\\b(what is|how do i|how to|i dont know|not sure|confused|help me|simple|basic|just starting|newbie|beginner)\\b",
+      "\\b(connect|wire|put|add|make it work)\\b",
+      "\\b(arduino|raspberry pi|nodemcu|esp8266)\\b",
+      "[?]{2,}"
+    ],
+    "intermediate": [
+      "\\b(decoupling|bypass cap|pull.up|pull.down|gpio|uart|spi|i2c|pwm|adc|dma)\\b",
+      "\\b(footprint|schematic|netlist|bom|lcsc|jlcpcb|oshpark)\\b",
+      "\\b(regulator|ldo|buck|boost|mosfet|bjt|opamp)\\b",
+      "\\b(datasheet|reference design|application note)\\b"
+    ],
+    "expert": [
+      "\\b(impedance|differential pair|si|signal integrity|emi|emc|crosstalk|return path)\\b",
+      "\\b(power delivery|pdn|ripple|psrr|loop compensation|bode|phase margin)\\b",
+      "\\b(dfu|jtag|swd|bootloader|linker|rtos|hal|cmsis)\\b",
+      "\\b(ipc-?2221|ipc-?7351|mil-spec|iec|iso|ul)\\b",
+      "\\b(errata|silicon revision|workaround|bring.?up)\\b"
+    ]
+  },
+
+  "skill_detection": {
+    "min_confidence_for_rule_winner": 0.6,
+    "min_total_signals_for_rule_winner": 2
+  },
+
+  "skill_levels": {
+    "beginner": {
+      "feedback_tone": "encouraging, simple language, step-by-step fixes",
+      "show_sections": ["critical_issues", "warnings", "next_steps"],
+      "hide_sections": ["signal_integrity_detail", "pdn_analysis", "emc_gaps"],
+      "explain_terms": true,
+      "max_issues_shown": 5,
+      "issue_format": "what → why → how to fix"
+    },
+    "intermediate": {
+      "feedback_tone": "collegial, standard EE terminology, reference datasheets",
+      "show_sections": ["critical_issues", "warnings", "power_analysis", "signal_integrity", "good_practices"],
+      "hide_sections": ["emc_gaps", "pdn_deep"],
+      "explain_terms": false,
+      "max_issues_shown": 15,
+      "issue_format": "severity | location | problem | fix"
+    },
+    "expert": {
+      "feedback_tone": "peer review, blunt, cite standards and errata",
+      "show_sections": ["all"],
+      "hide_sections": [],
+      "explain_terms": false,
+      "max_issues_shown": 999,
+      "issue_format": "formal design review"
+    }
+  },
+
+  "analysis_checks": {
+    "power": {
+      "decoupling_required": true,
+      "decoupling_min_per_ic": 1,
+      "bulk_cap_required_on_rails": ["VCC", "VDD", "VBUS"],
+      "max_voltage_drop_mv": 100,
+      "current_budget_warn_percent": 80
+    },
+    "mcu": {
+      "required_pins_checked": ["NRST", "BOOT0", "VDD", "GND", "VDDA"],
+      "debug_interface_required": ["SWD", "JTAG"],
+      "crystal_load_cap_check": true,
+      "min_decoupling_caps": 2
+    },
+    "protection": {
+      "esd_on_external_io": true,
+      "tvs_on_power_input": true,
+      "reverse_polarity_check": true,
+      "fuse_on_main_power": true
+    },
+    "signal": {
+      "pullup_required_nets": ["SDA", "SCL", "NRST", "BOOT"],
+      "debounce_required_for": ["buttons", "switches"],
+      "series_resistor_on_high_speed": true
+    }
+  },
+
+  "mcu_families": {
+    "STM32": {
+      "required_pins": ["VDD", "VSS", "VDDA", "VSSA", "NRST", "BOOT0"],
+      "debug": "SWD",
+      "decoupling_note": "100nF per VDD pin + 4.7uF bulk per cluster",
+      "boot_strapping": "BOOT0 → GND for normal boot via 10k resistor"
+    },
+    "ESP32": {
+      "required_pins": ["VDD", "GND", "EN", "IO0"],
+      "debug": "UART0",
+      "decoupling_note": "100nF + 10uF on VDD, 100nF on VDDA",
+      "boot_strapping": "IO0 → GND for flash mode, IO2 must be pulled high"
+    },
+    "RP2040": {
+      "required_pins": ["IOVDD", "DVdd", "USB_DP", "USB_DM", "XIN", "XOUT"],
+      "debug": "SWD",
+      "decoupling_note": "100nF per IOVDD pin, 100nF + 1uF on DVDD",
+      "boot_strapping": "BOOTSEL → GND for bootloader mode"
+    },
+    "ATMEGA": {
+      "required_pins": ["VCC", "GND", "AVCC", "AREF"],
+      "debug": "ISP/debugWIRE",
+      "decoupling_note": "100nF on VCC + 100nF on AVCC",
+      "boot_strapping": "RESET with 10k pullup, ISP header recommended"
+    }
+  },
+
+  "current_estimations": {
+    "logic_ic_quiescent_ma": 5,
+    "led_typical_ma": 10,
+    "mcu_active_ma": 50,
+    "mcu_sleep_ua": 10,
+    "ldo_quiescent_ma": 5,
+    "motor_driver_ma": 500
+  },
+
+  "severity_labels": {
+    "beginner":     { "critical": "This will cause your board NOT to work", "warning": "This might cause problems", "info": "Good to know" },
+    "intermediate": { "critical": "CRITICAL",  "warning": "WARNING",  "info": "NOTE" },
+    "expert":       { "critical": "[BLOCKING]", "warning": "[MAJOR]",  "info": "[MINOR]" }
+  }
+}
