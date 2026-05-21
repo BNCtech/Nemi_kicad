@@ -927,9 +927,165 @@ def _build_message_blocks(text: str, attachments: List[Dict[str, Any]]) -> List[
     return blocks
 
 
+_IR_PIPELINE_ENABLED = os.environ.get("ENVIL_IR_PIPELINE", "1") != "0"
+# Explicit build verbs. Catches "make me a relay driver", "build an LM324
+# comparator", "design a regulator", etc.
+_IR_BUILD_VERBS_RE = _re_pro.compile(
+    r"\b(make|build|create|generate|design|draw|render|give\s+me|"
+    r"new\s+circuit|need\s+a|want\s+a|wireup|wire\s+up|sketch|"
+    r"add\s+a\s+circuit|implement)\b",
+    _re_pro.IGNORECASE,
+)
+# Part-list pattern — "LM324 + 10k + Relay_SPDT", "NE555 + 2x R + 2x C",
+# "STM32F103 + USB + LED". When the user just lists parts they're
+# implicitly asking for a circuit. Two or more `+`-joined tokens =
+# build request.
+_IR_PARTS_LIST_RE = _re_pro.compile(
+    r"\S+\s*\+\s*\S+",
+    _re_pro.IGNORECASE,
+)
+# Circuit-archetype keywords — even without a verb, these are always
+# synthesis requests. "Relay driver" / "voltage divider" / "low-pass
+# filter" / "555 timer astable" etc.
+_IR_ARCHETYPE_RE = _re_pro.compile(
+    r"\b("
+    r"relay\s+driver|voltage\s+divider|level\s+shifter|"
+    r"low[\-\s]?pass|high[\-\s]?pass|band[\-\s]?pass|"
+    r"astable|monostable|bistable|"
+    r"buck|boost|buck[\-\s]boost|inverting|non[\-\s]?inverting|"
+    r"comparator|amplifier|integrator|differentiator|"
+    r"regulator|rectifier|oscillator|"
+    r"h[\-\s]?bridge|half[\-\s]?bridge|"
+    r"timer\s+circuit|driver\s+circuit"
+    r")\b",
+    _re_pro.IGNORECASE,
+)
+
+
+def _detect_circuit_generation_intent(user_text: str, room: "ChatRoom") -> bool:
+    """Cheap rule-based intent classifier — no LLM round-trip just to
+    decide whether to take one. True when the user is asking for a
+    NEW circuit on an empty (or component-less) sheet.
+
+    Three trigger families (any one fires the IR pipeline):
+      * Build verb ("make / build / create / generate ...").
+      * Part-list shape ("LM324 + 10k + Relay_SPDT") — two or more
+        `+`-joined tokens implies "synthesise a circuit from these
+        parts" without needing an explicit verb.
+      * Circuit archetype keyword ("relay driver", "low-pass filter",
+        "astable", "voltage divider"...).
+
+    All three are gated by an empty-or-componentless schematic — once
+    the user starts editing a populated sheet, incremental edits use
+    the legacy path (lower-risk, preserves existing topology). Per
+    [[claude-architect-engine-composer]] this branch is what migrates
+    production off the "Claude draws .kicad_sch" failure mode."""
+    if not _IR_PIPELINE_ENABLED or not user_text:
+        return False
+
+    has_signal = bool(
+        _IR_BUILD_VERBS_RE.search(user_text)
+        or _IR_PARTS_LIST_RE.search(user_text)
+        or _IR_ARCHETYPE_RE.search(user_text)
+    )
+    if not has_signal:
+        return False
+
+    # Empty / componentless sheet → route to IR. Populated sheet →
+    # legacy incremental edits.
+    if room.doc is not None:
+        try:
+            existing = room.doc.list_components()
+        except Exception:
+            existing = []
+        if len(existing) > 0:
+            return False
+    return True
+
+
+async def _run_ir_pipeline(
+    ws: WebSocket, room: ChatRoom, user_text: str,
+) -> None:
+    """Route the user's "build me a circuit" turn through the
+    connectivity-first synthesizer. Architect prompt → TopologyIR →
+    deterministic engine → strict validate → up to 3 attempts with
+    targeted repair re-prompts on unfulfilled nets."""
+    from .layout.topology_to_schematic import run_with_retry
+    await ws.send_json({"kind": "status", "session_id": room.session_id,
+                         "text": "Analyzing circuit topology..."})
+
+    def _architect_call(prompt: str) -> str:
+        # The chat client returns an Anthropic Message. Pull the first
+        # text block — the architect prompt instructs Claude to return
+        # ONLY JSON, so there's no tool wrapping to unpack.
+        resp = room.client.client.messages.create(
+            model=room.client.model,
+            max_tokens=room.client.cfg.max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+            system="You are a circuit architect. Return only valid JSON.",
+        )
+        for block in resp.content:
+            if getattr(block, "type", None) == "text":
+                return getattr(block, "text", "")
+        return ""
+
+    out_dir = Path(room.schematic_path or "").parent / (
+        f"_ir_{room.session_id[:8]}"
+    ) if room.schematic_path else Path("/tmp") / f"_ir_{room.session_id[:8]}"
+
+    try:
+        report = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: run_with_retry(
+                user_text, out_dir,
+                max_attempts=3, strict=True,
+                architect_call=_architect_call,
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        await ws.send_json({"kind": "error", "session_id": room.session_id,
+                             "text": f"IR pipeline failed: {exc}"})
+        return
+
+    if report.status == "ok":
+        await ws.send_json({"kind": "message", "session_id": room.session_id,
+                             "text": (
+                                 f"Built schematic via topology IR. "
+                                 f"Components: "
+                                 f"{report.placement.get('stats', {}).get('components_placed', 0)} | "
+                                 f"Validator: 100% required nets connected."
+                             )})
+        # Auto-attach so the legacy edit-path can pick up follow-ups.
+        if report.schematic_path:
+            room.attach_schematic(report.schematic_path)
+            await ws.send_json({"kind": "open_schematic",
+                                 "session_id": room.session_id,
+                                 "path": report.schematic_path})
+    else:
+        failed = report.failed_intents or []
+        fail_lines = "\n".join(
+            f"  - {f.get('name')} ({f.get('signal_type')}): "
+            f"unreachable={f.get('unreachable_pins')}"
+            for f in failed[:5]
+        )
+        await ws.send_json({"kind": "message", "session_id": room.session_id,
+                             "text": (
+                                 f"Build did not converge after 3 attempts: "
+                                 f"{report.error or 'unknown'}\n"
+                                 f"Failing nets:\n{fail_lines}"
+                             )})
+
+
 async def _stream_turn(
     ws: WebSocket, room: ChatRoom, user_text: str, attachments: List[Dict[str, Any]]
 ) -> None:
+    # Route circuit-generation turns through the IR pipeline; legacy
+    # edit-path handles everything else (mutations on an existing
+    # schematic, questions, summaries, fixes).
+    if _detect_circuit_generation_intent(user_text, room):
+        await _run_ir_pipeline(ws, room, user_text)
+        return
+
     dump = room.current_dump()
     framed_prefix = f"=== CURRENT SCHEMATIC ===\n{dump}\n\n=== USER ===\n"
     blocks = _build_message_blocks(framed_prefix + user_text, attachments)

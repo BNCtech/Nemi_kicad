@@ -91,30 +91,6 @@ def run_layout(
              f"skip_too_far={prp_stats['satellites_skipped_too_far']} "
              f"skip_collision={prp_stats['satellites_skipped_collision']}")
         placement["_pin_role_stats"] = prp_stats
-    # P15.4 — regulator chain layout. Snap each regulator's input
-    # bulk caps + protection + output bulk caps + ferrite onto a
-    # consistent axis next to the regulator so the chain reads as a
-    # canonical VIN→protection→regulator→bulk→ferrite line. Runs after
-    # pin_role_placement so the regulator's own position is already
-    # locked.
-    rc_cfg = cfg.get("regulator_chain_layout") or {}
-    if rc_cfg.get("enabled", True):
-        from . import power_intent as _pi
-        try:
-            _tree = _pi.build_power_tree(in_p, classified=classified)
-            rc_stats = _pi.refine_regulator_chains(
-                placement, _tree, in_p,
-                chain_spacing_mm=float(rc_cfg.get("chain_spacing_mm", 7.62)),
-                max_chain_move_mm=float(rc_cfg.get("max_chain_move_mm", 25.4)),
-                min_clearance_mm=float(rc_cfg.get("min_clearance_mm", 1.27)),
-            )
-            _log(f"[3c/6] reg-chain: chains={rc_stats['regulator_chains']} "
-                 f"moved={rc_stats['chain_components_moved']} "
-                 f"skip_too_far={rc_stats['chain_skipped_too_far']} "
-                 f"skip_collision={rc_stats['chain_skipped_collision']}")
-            placement["_regulator_chain_stats"] = rc_stats
-        except Exception as _exc:  # pragma: no cover
-            _log(f"[3c/6] reg-chain: skipped ({_exc})")
     placement_path = _write_json(placement, out_dir / "placement.json")
 
     _log(f"[4/6] route    : {placement_path}")

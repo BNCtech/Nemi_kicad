@@ -235,6 +235,10 @@ class SchematicDocument:
         hide_ref = is_power
         hide_val = hide_value or is_power
 
+        if not footprint:
+            from .footprint_resolver import resolve_footprint
+            footprint = resolve_footprint(resolved_lib_id, value, reference)
+
         self._snapshot()
         sym = [
             _sym("symbol"),
