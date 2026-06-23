@@ -1,0 +1,168 @@
+{
+  "_about": "Declarative lint rules. Each entry references a selector function in `lint.selectors` and provides display metadata. Adding a rule is one JSON entry, no Python change. The lint engine (lint.engine.LintEngine) loads this file and dispatches.",
+  "version": 1,
+
+  "rules": [
+    {
+      "id": "R2",
+      "name": "no wire through component body",
+      "selector": "find_wires_piercing_bodies",
+      "severity": "error",
+      "source": "WIRING_RULES.md R2; KLC S3.5; Altium Best Practices 4.1",
+      "fix_hint": "Reroute the wire so it goes around the component, or use a same-named label on both ends of the connection."
+    },
+    {
+      "id": "R4",
+      "name": "ambiguous 4-way junction",
+      "selector": "find_four_way_junctions",
+      "severity": "warning",
+      "source": "WIRING_RULES.md R4; IEEE 315 6.3.2; IEC 60617 03-02-02",
+      "fix_hint": "Shift one wire by 1 grid (1.27 mm) so the junction becomes two T-junctions. Engine support: enable layout_config.json:wiring_rules.r4_split_four_way."
+    },
+    {
+      "id": "R9",
+      "name": "labels could become a bus",
+      "selector": "detect_bus_candidates",
+      "severity": "info",
+      "source": "WIRING_RULES.md R9; IEEE 315 6.5; KiCad User Manual 6.3",
+      "fix_hint": "When 4+ nets share a prefix (D0..D7, A0..A15), emit a `BusDef` in the IR and the engine will render `D[0..7]` notation with bus entries."
+    },
+    {
+      "id": "R11",
+      "name": "label overlaps wire",
+      "selector": "find_labels_overlapping_wires",
+      "severity": "warning",
+      "source": "WIRING_RULES.md R11; Altium Layout Guidelines; KLC S5",
+      "fix_hint": "Reposition the label perpendicular to the outward axis. Engine support: enable layout_config.json:wiring_rules.r11_avoid_label_overlap."
+    },
+    {
+      "id": "NET_FLOATING",
+      "name": "net has fewer than 2 pins",
+      "selector": "detect_floating_nets",
+      "severity": "error",
+      "source": "WIRING_RULES.md R15; KiCad ERC `unconnected_wire_endpoint`",
+      "fix_hint": "Every electrical net needs at least one driver pin and one receiver pin. A net with one pin is electrically meaningless --- either remove it from the IR, or extend its pin list."
+    },
+
+    {
+      "id": "R1",
+      "name": "diagonal / acute-angle wire",
+      "selector": "find_diagonal_wires",
+      "severity": "error",
+      "checklist_item": 9,
+      "source": "WIRING_RULES.md R1; image checklist #9 (acute angle routing)",
+      "fix_hint": "Replace the diagonal segment with an orthogonal L (one horizontal + one vertical wire). KiCad nets only support H/V segments.",
+      "params": { "tol_mm": 0.01 }
+    },
+    {
+      "id": "JUNCTION_MISSING",
+      "name": "missing junction dot at 3+ wire meet / T-tap",
+      "selector": "find_missing_junction_dots",
+      "severity": "warning",
+      "checklist_item": 4,
+      "source": "WIRING_RULES.md R4; image rule 2 / checklist #4 (missing junction dots)",
+      "fix_hint": "Add an explicit (junction) at the meeting point. 3+ joined wires (T or X) and any wire tapping another wire's mid-span need a dot to be unambiguous.",
+      "params": { "tol_mm": 0.05 }
+    },
+    {
+      "id": "JUNCTION_AT_CROSSING",
+      "name": "junction on a pure wire crossing",
+      "selector": "find_wrong_crossing_junctions",
+      "severity": "info",
+      "checklist_item": 5,
+      "source": "WIRING_RULES.md R4; image rule 3 / checklist #5 (crossing wires mistaken as connected)",
+      "fix_hint": "If the two crossing nets should NOT connect, delete the junction dot (crossing wires without a dot are not connected). If they should connect, ignore.",
+      "params": { "tol_mm": 0.05 }
+    },
+    {
+      "id": "WIRE_DANGLING",
+      "name": "dangling / open wire endpoint",
+      "selector": "find_dangling_wire_endpoints",
+      "severity": "error",
+      "checklist_item": 10,
+      "source": "WIRING_RULES.md R15; image rule 5 + cases 1/2 / checklist #2 & #10 (floating wires, open ends)",
+      "fix_hint": "Terminate the endpoint on a pin tip, another wire, a label, a junction or a no-connect marker --- or delete the stray wire.",
+      "params": { "tol_mm": 0.05 }
+    },
+    {
+      "id": "PIN_UNCONNECTED",
+      "name": "unconnected pin / near-miss / unmarked NC",
+      "selector": "find_unconnected_pins",
+      "_severity": "selector-driven: a near-miss (wire end near the tip but not on it) is `error`; a cleanly open pin is `warning`. Omit the top-level `severity` so the engine keeps the selector's per-issue value instead of flattening both.",
+      "checklist_item": 1,
+      "source": "WIRING_RULES.md R3/R15; image rules 1, 5, 6, 11 / checklist #1 & #7 (pin-to-wire, unused pins NC)",
+      "fix_hint": "Snap the wire to the pin centre (near-miss), wire the pin into a net, or add a (no_connect) marker if it is intentionally unused.",
+      "params": {
+        "tol_mm": 0.05,
+        "near_band_mm": 1.27,
+        "require_etypes": [
+          "input", "output", "bidirectional", "power_in", "power_out",
+          "passive", "tri_state", "open_collector", "open_emitter", "unspecified"
+        ]
+      }
+    },
+    {
+      "id": "LABEL_FLOATING",
+      "name": "net label not on a wire / pin",
+      "selector": "find_labels_not_on_wire",
+      "severity": "error",
+      "checklist_item": 6,
+      "source": "WIRING_RULES.md R8; image rule 7 / checklist #6 (net labels touching wire)",
+      "fix_hint": "Move the label so its anchor sits exactly on a wire endpoint, a wire mid-span, or a pin tip. A floating label bonds nothing.",
+      "params": { "tol_mm": 0.05 }
+    },
+    {
+      "id": "R11_TEXT",
+      "name": "wire overlaps component RefDes/Value text",
+      "selector": "find_wires_over_component_text",
+      "severity": "warning",
+      "checklist_item": 8,
+      "source": "WIRING_RULES.md R11; image rule 8 / checklist #8 (wire overlapping text)",
+      "fix_hint": "Reroute the wire clear of the symbol's Reference/Value text, or move the field so it does not sit under the wire.",
+      "params": { "margin_mm": 0.0 }
+    },
+    {
+      "id": "WIRE_OVERLAP",
+      "name": "wire-on-wire overlap (stacked / duplicate segments)",
+      "selector": "find_overlapping_wires",
+      "severity": "warning",
+      "source": "KiCad connectivity (collinear segments merge); image rule 'wire on wire'",
+      "fix_hint": "Two collinear wires lie on top of each other. Delete the redundant duplicate, or if they belong to different nets split them onto separate paths (an overlap of two nets is a short).",
+      "params": { "tol_mm": 0.05, "min_overlap_mm": 0.05 }
+    },
+    {
+      "id": "POWER_SHORT",
+      "name": "two power rails shorted on one net",
+      "selector": "find_power_rail_shorts",
+      "severity": "error",
+      "source": "KiCad ERC 'different power nets connected' / 'power output short'; decoupling-cap wiring (each cap bridges VCC->GND, caps in parallel not series)",
+      "fix_hint": "A single net carries 2+ different power rails (e.g. +3V3 and GND) -- a dead short. Trace the wire/label/junction bonding them and break it. For decoupling caps: each cap's top pin goes to the supply rail, bottom pin to GND; the rails must stay on separate nets.",
+      "params": { "tol_mm": 0.05, "ignore_rails": ["PWR_FLAG"] }
+    },
+    {
+      "id": "NET_NAME_CONFLICT",
+      "name": "two different labels on one net",
+      "selector": "find_conflicting_net_names",
+      "severity": "error",
+      "source": "KiCad docs 'A net can only have one name; two different labels on one net -> ERC violation'; WIRING_RULES.md R8 (inverse); verified deep-research 2026-06-22 (KiCad eeschema docs, 3-0 adversarial vote)",
+      "fix_hint": "One physical net carries 2+ distinct net labels. Rename all but one so the net has a single name, OR if the labels were meant to be separate nets, split the wire that bonds them. Dynamic/scale-free: per-net check, every tolerance is a param -- identical behaviour on a 5-pin or 500-pin board.",
+      "params": { "tol_mm": 0.05 }
+    },
+    {
+      "id": "R16",
+      "name": "drawn wire crosses a block boundary (use a label)",
+      "selector": "find_crossblock_wires",
+      "severity": "warning",
+      "source": "WIRING_RULES.md R16; reference 'WIRE vs LABEL' guide (wires INSIDE a block, labels BETWEEN blocks)",
+      "fix_hint": "Replace the cross-block wire with a same-named net label on the pin in each block (KiCad bonds them by name). Engine policy: keep multi_block.cross_block_signal_wires=false. Needs drawn block boxes (rectangles) in the file; circuits with no blocks are skipped."
+    },
+    {
+      "id": "R17",
+      "name": "net label used for an intra-block connection (use wires)",
+      "selector": "find_labels_inside_block",
+      "severity": "warning",
+      "source": "WIRING_RULES.md R16 (inverse); durable user rule 'block ulla wire tha use pannanum, label use panna kudathula'",
+      "fix_hint": "All instances of this label live in ONE block, so the net is intra-block -- connect the pins with drawn WIRES instead of a label. Root cause is usually placement: a pin's support network (pull-up R, button, debounce cap) sits too far from its IC pin, so the router fell back to a label. Pull that network adjacent to the pin (like decoupling caps) so a short wire routes. Needs drawn block boxes; circuits with no blocks are skipped."
+    }
+  ]
+}

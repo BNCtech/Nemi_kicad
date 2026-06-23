@@ -71,26 +71,6 @@ def run_layout(
 
     _log(f"[3/6] place    : {classified_path}")
     placement = _placer.place(classified)
-    # P10 — pin-role aware placement post-pass. Moves 2-pin satellite
-    # passives (decaps, pullups, biasing R) to sit adjacent to the
-    # specific anchor IC pin they connect to (instead of wherever the
-    # grid placer dropped them inside the role bucket).
-    prp_cfg = cfg.get("pin_role_placement") or {}
-    if prp_cfg.get("enabled", True):
-        from . import pin_role_placement as _prp
-        prp_stats = _prp.refine_placement_by_pin_role(
-            placement, classified, in_p,
-            offset_from_pin_mm=float(prp_cfg.get("offset_from_pin_mm", 5.08)),
-            max_passive_move_mm=float(prp_cfg.get("max_passive_move_mm", 25.4)),
-            min_clearance_mm=float(prp_cfg.get("min_clearance_mm", 1.27)),
-        )
-        _log(f"[3b/6] pin-role : moved={prp_stats['satellites_moved']} "
-             f"xtal={prp_stats.get('crystals_centered', 0)} "
-             f"diff={prp_stats.get('diff_pairs_aligned', 0)} "
-             f"skip_no_anchor={prp_stats['satellites_skipped_no_anchor']} "
-             f"skip_too_far={prp_stats['satellites_skipped_too_far']} "
-             f"skip_collision={prp_stats['satellites_skipped_collision']}")
-        placement["_pin_role_stats"] = prp_stats
     placement_path = _write_json(placement, out_dir / "placement.json")
 
     _log(f"[4/6] route    : {placement_path}")
@@ -99,27 +79,6 @@ def run_layout(
 
     _log(f"[5/6] labels   : {routed_path}")
     routed = _label_placer.place_labels(routed, placement, in_p)
-
-    # P11 — local-label-to-wire promotion. For label-named nets whose
-    # pins are within `max_distance_mm` of each other, replace the
-    # labels with direct Manhattan wires. Long-haul nets (3V3 / SDA /
-    # SCL crossing the whole sheet) keep their labels. This shifts the
-    # wire-edges:label-edges ratio toward wires — the visible reason
-    # human schematics don't look like floating-label spaghetti.
-    lw_cfg = (cfg.get("local_wire_synthesis") or {})
-    if lw_cfg.get("enabled", True):
-        from . import local_wire_synthesis as _lws
-        lw_stats = _lws.promote_local_labels_to_wires(
-            routed, placement, in_p,
-            max_distance_mm=float(lw_cfg.get("max_distance_mm", 80.0)),
-            min_pins_per_net=int(lw_cfg.get("min_pins_per_net", 2)),
-        )
-        _log(f"[5b/6] local-wires: promoted={lw_stats['nets_promoted']} "
-             f"wires_added={lw_stats['wires_added']} "
-             f"labels_removed={lw_stats['labels_removed']} "
-             f"bus_lanes={lw_stats.get('bus_lanes_aligned', 0)}")
-        routed["_local_wire_synthesis"] = lw_stats
-
     _write_json(routed, out_dir / "routed.json")  # overwrite with resolved labels
 
     out_sch = out_dir / f"{in_p.stem}_layout.kicad_sch"
@@ -134,10 +93,7 @@ def run_layout(
                                              classified=classified,
                                              routed=routed)):
         _log("[opt ] hierarchical split")
-        split = _hierarchical.split_placement(
-            placement, routed,
-            classified=classified, source_schematic=str(in_p),
-        )
+        split = _hierarchical.split_placement(placement, routed)
         parent_path = out_dir / f"{in_p.stem}_top.kicad_sch"
         children_dir = out_dir / "sheets"
         hierarchical_result = _hierarchical.emit_hierarchical(

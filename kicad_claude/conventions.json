@@ -74,6 +74,7 @@
     "history_turns": 12
   },
 
+<<<<<<< Updated upstream
   "auto_no_connect": {
     "_comment": "Conservative auto-NC for floating pins. The connectivity_normalize pipeline inserts (no_connect) markers ONLY when a pin matches HIGH or SAFE confidence — never on power / clock / reset / analog / communication / differential / feedback. Patterns are CASE-INSENSITIVE; matched against the lib_symbol's pin name AFTER stripping leading ~. Each list is a substring/equality test — a pin name 'AVDD' matches 'AVDD' under unsafe_substrings. Add new patterns here as the user's MCU families surface them.",
     "enabled": true,
@@ -114,6 +115,25 @@
       "bidirectional"
     ],
     "max_inserts_per_run": 256
+=======
+  "chat_snap": {
+    "_comment": "Auto-snap thresholds for chat-applied ops. Claude often gives label/power-port coords that are 'near' a pin tip but not on it — causing KiCad to report `(no net)` for every label. The dispatcher silently snaps any label/power-port placed within snap_search_mm of a pin tip / wire endpoint to the exact coord, so port-name merging actually fires. Beyond max_snap_mm we refuse the op (genuinely dangling — Claude made a real mistake, surface it). junction_infer adds (junction ...) at every detected 3+ wire convergence after apply. power_port_dedup_mm collapses stacked duplicate power-ports at the same anchor.",
+    "snap_search_mm":       5.08,
+    "max_snap_mm":          7.62,
+    "junction_infer":       true,
+    "power_port_dedup_mm":  0.635,
+    "delete_dangling_labels": true
+  },
+
+  "chat_post_apply": {
+    "_comment": "Post-apply normalization toggles. Each pass is idempotent — running twice produces the same result.",
+    "enabled": true,
+    "snap_labels":          true,
+    "snap_power_ports":     true,
+    "dedup_power_ports":    true,
+    "infer_junctions":      true,
+    "delete_dangling_labels": true
+>>>>>>> Stashed changes
   },
 
   "kicad_string_escapes": {

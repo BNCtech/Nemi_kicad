@@ -1,0 +1,98 @@
+{
+  "_about": "Professional schematic-layout policy. Cluster definitions, distance thresholds, sheet flow direction. Read by intent/engine.py after the initial placement pass to TIGHTEN component groupings (crystal + load caps, LED + series resistor, reset pullup + NRST pin). All policy lives here -- adding a new cluster type is one JSON entry, zero Python.",
+  "version": 1,
+
+  "enabled": true,
+  "_enabled_doc": "Master kill switch. When false, all relocators below are skipped --- restores the engine's pre-2026-06-01 placement byte-for-byte.",
+
+  "clusters": [
+    {
+      "name": "crystal_load_caps",
+      "_doc": "Pull the two load capacitors of a crystal so they sit adjacent to the crystal pins on the outward axis. Detected: any 2-pin cap whose only non-GND pin is on a net also connected to a crystal pin.",
+      "enabled": true,
+      "anchor_refdes_prefixes": ["Y"],
+      "anchor_lib_id_patterns": ["*Crystal*", "*XTAL*", "Device:Crystal*"],
+      "satellite_refdes_prefixes": ["C"],
+      "satellite_max_pins": 2,
+      "satellite_value_patterns": ["*p", "*pF", "??p", "?p?", "20p", "22p", "12p", "10p", "15p", "18p", "27p", "33p"],
+      "satellite_match_via_shared_net": true,
+      "satellite_must_share_gnd": true,
+      "max_satellite_distance_mm": 7.62,
+      "place_perpendicular_to_anchor_axis_mm": 5.08
+    },
+    {
+      "name": "led_indicator",
+      "_doc": "LED and its current-limit resistor must sit adjacent. Detected: any resistor sharing a net with an LED, where the LED is on the same net or the next-hop net.",
+      "enabled": true,
+      "anchor_refdes_prefixes": ["D"],
+      "anchor_lib_id_patterns": ["Device:LED*", "*:LED*", "LED*"],
+      "satellite_refdes_prefixes": ["R"],
+      "satellite_max_pins": 2,
+      "satellite_match_via_shared_net": true,
+      "max_satellite_distance_mm": 10.16
+    },
+    {
+      "name": "reset_pullup",
+      "_doc": "Pull-up resistor on NRST/RESET/MCLR pin should sit adjacent to the MCU's reset pin. Detected: 2-pin resistor whose one pin is on a net named NRST / RESET / ~{RESET} / MCLR and whose other pin is on a power rail.",
+      "enabled": true,
+      "anchor_pin_name_patterns": ["NRST", "RESET", "MCLR", "RST"],
+      "anchor_pin_name_overbar_forms": ["~{RESET}", "~{MCLR}", "~RESET", "~MCLR"],
+      "satellite_refdes_prefixes": ["R"],
+      "satellite_max_pins": 2,
+      "max_satellite_distance_mm": 10.16
+    },
+    {
+      "name": "boot_strap",
+      "_doc": "Boot-select / strap resistors on BOOT0 / BOOT1 / EN / PROG pins -- sit adjacent to the MCU/IC.",
+      "enabled": true,
+      "anchor_pin_name_patterns": ["BOOT0", "BOOT1", "BOOT", "EN", "PROG", "STRAP", "MODE"],
+      "satellite_refdes_prefixes": ["R"],
+      "satellite_max_pins": 2,
+      "max_satellite_distance_mm": 8.0
+    },
+    {
+      "name": "i2c_pullups",
+      "_doc": "I2C SDA/SCL pull-ups should sit at the bus, near the master IC.",
+      "enabled": true,
+      "anchor_pin_name_patterns": ["SDA", "SCL", "I2C_SDA", "I2C_SCL"],
+      "satellite_refdes_prefixes": ["R"],
+      "satellite_max_pins": 2,
+      "max_satellite_distance_mm": 12.7
+    }
+  ],
+
+  "sheet_flow": {
+    "_doc": "Per-block sheet-flow direction hint. The engine's _compute_flow_dag already orders ICs left-to-right by signal flow; this map adds a per-block override for sheets that should flow top-to-bottom (e.g. programming headers, vertical power chains). Falls back to engine default when a block is unlisted.",
+    "POWER":          {"direction": "left_to_right", "anchor_pos": "left"},
+    "PROTECTION":     {"direction": "left_to_right", "anchor_pos": "left"},
+    "USB_PROTECTION": {"direction": "left_to_right", "anchor_pos": "left"},
+    "MCU":            {"direction": "left_to_right", "anchor_pos": "center"},
+    "CPU":            {"direction": "left_to_right", "anchor_pos": "center"},
+    "ICSP":           {"direction": "top_to_bottom"},
+    "PROG":           {"direction": "top_to_bottom"},
+    "SWD":            {"direction": "top_to_bottom"},
+    "JTAG":           {"direction": "top_to_bottom"},
+    "INDICATOR":      {"direction": "left_to_right"},
+    "IO":             {"direction": "left_to_right"},
+    "GPIO":           {"direction": "left_to_right"},
+    "SENSOR":         {"direction": "left_to_right"},
+    "DISPLAY":        {"direction": "left_to_right"},
+    "AUDIO":          {"direction": "left_to_right"},
+    "RF":             {"direction": "left_to_right"},
+    "BLE":            {"direction": "left_to_right"},
+    "WIFI":           {"direction": "left_to_right"},
+    "STORAGE":        {"direction": "left_to_right"},
+    "COMM":           {"direction": "left_to_right"},
+    "CAN":            {"direction": "left_to_right"},
+    "MOTOR_DRIVER":   {"direction": "left_to_right"},
+    "CLOCK":          {"direction": "left_to_right", "anchor_pos": "center"},
+    "RESET":          {"direction": "top_to_bottom"}
+  },
+
+  "wire_label_ratio_hint": {
+    "_doc": "Target ratio for the rendered output. The engine doesn't enforce these directly; the architect prompt is tuned to keep them as professional defaults (most short connections become wires, mid-distance become labels, sheet-crossing become hierarchical labels).",
+    "wire_pct_target": 70,
+    "local_label_pct_target": 25,
+    "hierarchical_label_pct_target": 5
+  }
+}

@@ -1,0 +1,145 @@
+{
+  "_about": "JSON Schema for TopologyIR — passed as the `input_schema` of a strict tool_use definition so the LLM literally cannot emit tokens that violate it. Eliminates JSON-parse failures (the dominant retry trigger today). Mirrors the dataclass in envil_agent/intent/ir.py field-for-field; keep them in sync — `TopologyIR.from_dict()` consumes whatever passes this schema. Lives in JSON (not Python) so a project extending the IR adds fields here without forking the LLM-call code.",
+  "_strict_rules": "Anthropic strict mode constraints (2026): no minLength/minimum/maximum, no recursive refs, max 24 optional params per object, max 16 union-typed params. Keep this schema flat-ish.",
+
+  "tool_name": "emit_ir",
+  "tool_description": "Emit the TopologyIR JSON describing the requested circuit. ALWAYS use this tool — do not reply with text. Pin references in net.pins follow `<ref>.<pin>` where `<pin>` is a pin NAME (preferred for ICs from the pin_catalog) or a pin NUMBER (resistors, caps, diodes — use 1/2). Pick lib_ids that exist in the user's library; the pin_catalog block lists exact pin names for the common parts.",
+
+  "input_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["name", "circuit_type", "components", "nets"],
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Human-readable circuit name (e.g. 'NE555 1Hz LED blinker')."
+      },
+      "circuit_type": {
+        "type": "string",
+        "enum": [
+          "OSCILLATOR", "REGULATOR", "OPAMP", "LOGIC",
+          "SWITCHING_REG", "DRIVER", "SENSOR", "COMM",
+          "BATTERY", "MCU_BOARD", "DISPLAY", "RF",
+          "FILTER", "PROTECTION", "INTERFACE", "ANALOG",
+          "MOTOR_DRIVER", "AUDIO", "POWER_SUPPLY", "UNKNOWN"
+        ],
+        "description": "Top-level circuit class. Pick the closest match; engine uses this for layout heuristics."
+      },
+      "components": {
+        "type": "array",
+        "description": "Every part on the schematic. ref must be unique.",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ref", "lib_id", "value"],
+          "properties": {
+            "ref": {
+              "type": "string",
+              "description": "Reference designator: R1, R2, C1, U1, Q1, D1, J1, Y1, SW1, FB1, etc."
+            },
+            "lib_id": {
+              "type": "string",
+              "description": "Exact KiCad library:part name (e.g. 'Device:R', 'Timer:NE555', 'MCU_ST_STM32G0:STM32G030F6Px'). Never invent — pick from the pin_catalog when possible."
+            },
+            "value": {
+              "type": "string",
+              "description": "Display value: '10k', '100n', 'NE555', 'AMS1117-3.3'. Use IEC 60062 form (no decimal point on resistors: 4k7 not 4.7k)."
+            },
+            "footprint": {
+              "type": "string",
+              "description": "Optional footprint library reference. Leave empty string for engine to fill from defaults."
+            }
+          }
+        }
+      },
+      "nets": {
+        "type": "array",
+        "description": "Every named electrical net. Power rails (VCC, GND, +5V, +3V3) must have is_power=true.",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "pins"],
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Net name. Canonical power rails: GND, +3V3, +5V, +12V, VBUS, VBAT. Signal nets: descriptive (UART_TX, RESET, MISO, CAN_H)."
+            },
+            "pins": {
+              "type": "array",
+              "description": "Pin references in <ref>.<pin> form. Use pin names from the pin_catalog for ICs (e.g. 'U1.VCC'); pin numbers for passives ('R1.1', 'C2.2').",
+              "items": {
+                "type": "string"
+              }
+            },
+            "is_power": {
+              "type": "boolean",
+              "description": "True for power/ground rails — gets a PWR_FLAG so ERC sees the net as driven. False for signal nets."
+            }
+          }
+        }
+      },
+      "blocks": {
+        "type": "array",
+        "description": "Optional functional grouping. Emit [] for single-IC circuits (NE555, LM317, single op-amp). Emit a list ONLY when 2+ distinct multi-pin ICs/connectors exist AND each block contains its own ≥3-pin anchor.",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "block_type", "component_refs"],
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Short UPPERCASE block name: POWER, MCU, USB, RESET, CLOCK, PROTECTION, ICSP, SENSOR, MOTOR, AUDIO_IN, DEBUG, MEMORY."
+            },
+            "block_type": {
+              "type": "string",
+              "enum": ["power", "mcu", "io", "comm", "sensor", "driver", "regulator", "protection", "analog", "rf", "memory", "display", "audio", "motor", "generic"]
+            },
+            "component_refs": {
+              "type": "array",
+              "description": "Refs belonging to this block. Every ref in components[] must appear in exactly one block when blocks[] is non-empty.",
+              "items": { "type": "string" }
+            },
+            "flow_role": {
+              "type": "string",
+              "enum": ["", "source", "regulator", "compute", "sink"],
+              "description": "Optional left-to-right ordering hint. 'source' = power input (USB-C, battery). 'regulator' = LDO/buck/boost. 'compute' = MCU/DSP. 'sink' = output peripherals. Leave empty for engine default."
+            },
+            "anchor_pins": {
+              "type": "array",
+              "description": "Optional list of pin refs (e.g. ['U2.VDD']) that attract decoupling caps from other blocks. Leave [] for engine default.",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      },
+      "buses": {
+        "type": "array",
+        "description": "Optional bus declarations (rule R9). Emit when 4+ nets share a `<prefix><digit>` pattern (e.g. DATA0..DATA7) and you want the engine to render them as one bus line `DATA[0..7]` with bus entries instead of 8 separate labels. Leave [] for the engine's automatic per-net labels.",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "members"],
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Bus label: either the bare prefix ('DATA') or the explicit range form ('DATA[0..7]'). Engine canonicalises to the range form on render."
+            },
+            "members": {
+              "type": "array",
+              "description": "Net names belonging to the bus. Each must be declared separately in nets[].",
+              "items": { "type": "string" }
+            },
+            "width": {
+              "type": "integer",
+              "description": "Optional convenience; equals len(members). Architect can omit."
+            }
+          }
+        }
+      },
+      "notes": {
+        "type": "string",
+        "description": "Optional 1-2 sentence design rationale. Helps debug. Keep under 200 chars."
+      }
+    }
+  }
+}

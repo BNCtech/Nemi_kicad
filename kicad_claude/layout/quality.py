@@ -224,7 +224,232 @@ def _check_component_density(
     )]
 
 
+def _all_pin_tips(doc: SchematicDocument) -> List[Tuple[float, float]]:
+    """Every world-space pin endpoint across every placed symbol."""
+    out: List[Tuple[float, float]] = []
+    for child in doc.tree[1:]:
+        if isinstance(child, list) and _head(child) == "symbol":
+            out.extend(doc._world_pin_positions(child))
+    return out
+
+
+def _wire_endpoints(doc: SchematicDocument) -> List[Tuple[float, float]]:
+    out: List[Tuple[float, float]] = []
+    for child in doc.tree[1:]:
+        if not (isinstance(child, list) and _head(child) == "wire"):
+            continue
+        for sub in child[1:]:
+            if isinstance(sub, list) and _head(sub) == "pts":
+                for xy in sub[1:]:
+                    if isinstance(xy, list) and _head(xy) == "xy" and len(xy) >= 3:
+                        out.append((float(xy[1]), float(xy[2])))
+    return out
+
+
+def _label_anchors(doc: SchematicDocument) -> List[Tuple[str, str, Tuple[float, float]]]:
+    """Returns [(kind, name, (x,y))] for every label/global_label/hierarchical_label."""
+    out: List[Tuple[str, str, Tuple[float, float]]] = []
+    for child in doc.tree[1:]:
+        if not (isinstance(child, list)):
+            continue
+        kind = _head(child)
+        if kind not in ("label", "global_label", "hierarchical_label"):
+            continue
+        name = _to_str(child[1]) if len(child) > 1 else ""
+        for sub in child[1:]:
+            if isinstance(sub, list) and _head(sub) == "at" and len(sub) >= 3:
+                out.append((kind, name, (float(sub[1]), float(sub[2]))))
+                break
+    return out
+
+
+def _power_port_anchors(doc: SchematicDocument) -> List[Tuple[str, Tuple[float, float]]]:
+    """Power-port instance anchors (lib_id startswith 'power:')."""
+    out: List[Tuple[str, Tuple[float, float]]] = []
+    for child in doc.tree[1:]:
+        if not (isinstance(child, list) and _head(child) == "symbol"):
+            continue
+        lib_id = ""
+        at_xy: Optional[Tuple[float, float]] = None
+        for sub in child[1:]:
+            if isinstance(sub, list) and _head(sub) == "lib_id" and len(sub) > 1:
+                lib_id = _to_str(sub[1])
+            elif isinstance(sub, list) and _head(sub) == "at" and len(sub) >= 3:
+                at_xy = (float(sub[1]), float(sub[2]))
+        if lib_id.startswith("power:") and at_xy is not None:
+            out.append((lib_id, at_xy))
+    return out
+
+
+def _near(p: Tuple[float, float], pts: List[Tuple[float, float]], tol: float) -> bool:
+    px, py = p
+    for (x, y) in pts:
+        if abs(x - px) <= tol and abs(y - py) <= tol:
+            return True
+    return False
+
+
+def _check_zero_wires(
+    placement: Dict[str, Any], routed: Dict[str, Any], doc: SchematicDocument,
+) -> List[Issue]:
+    """CRITICAL: any non-trivial schematic with 0 wires AND <1 label-per-pin
+    cannot be electrically valid. Universal — works for every circuit type."""
+    n_comp = sum(1 for c in doc.tree[1:]
+                 if isinstance(c, list) and _head(c) == "symbol")
+    n_wires = sum(1 for c in doc.tree[1:]
+                  if isinstance(c, list) and _head(c) == "wire")
+    n_pins = len(_all_pin_tips(doc))
+    n_labels = len(_label_anchors(doc))
+    # power ports count as connectivity-by-name
+    n_pwr = len(_power_port_anchors(doc))
+    if n_comp >= 3 and n_wires == 0 and (n_labels + n_pwr) < n_pins * 0.5:
+        return [Issue(
+            severity="error", code="CONN_001",
+            message=f"0 wires emitted for {n_comp} components ({n_pins} pins, "
+                    f"{n_labels} labels, {n_pwr} power ports) — schematic is "
+                    f"electrically disconnected",
+            detail={"components": n_comp, "wires": n_wires,
+                    "pins": n_pins, "labels": n_labels, "power_ports": n_pwr},
+        )]
+    return []
+
+
+def _check_dangling_labels(
+    placement: Dict[str, Any], routed: Dict[str, Any], doc: SchematicDocument,
+    tol_mm: float = 0.635,
+) -> List[Issue]:
+    """Every label / global_label / hierarchical_label MUST sit on a pin tip
+    or wire endpoint. Anything else is dangling — KiCad reports it as
+    `(no net)` and the net never forms. Universal geometry check."""
+    anchors = _all_pin_tips(doc) + _wire_endpoints(doc)
+    dangling: List[Dict[str, Any]] = []
+    for kind, name, xy in _label_anchors(doc):
+        if not _near(xy, anchors, tol_mm):
+            dangling.append({"kind": kind, "name": name,
+                             "x": xy[0], "y": xy[1]})
+    if dangling:
+        return [Issue(
+            severity="error", code="CONN_002",
+            message=f"{len(dangling)} label(s) dangling — not on any pin or "
+                    f"wire endpoint (tol {tol_mm} mm)",
+            detail={"count": len(dangling), "sample": dangling[:10]},
+        )]
+    return []
+
+
+def _check_dangling_power_ports(
+    placement: Dict[str, Any], routed: Dict[str, Any], doc: SchematicDocument,
+    tol_mm: float = 0.635,
+) -> List[Issue]:
+    """Same as labels: power-port instances must sit on a pin tip or wire
+    endpoint. NE555 had 12 power ports scattered with no connection."""
+    anchors = _all_pin_tips(doc) + _wire_endpoints(doc)
+    # exclude the power-ports themselves from the "tip" set so they don't
+    # validate each other.
+    pwr_xys = {xy for _, xy in _power_port_anchors(doc)}
+    non_pwr_anchors = [a for a in anchors if a not in pwr_xys]
+    dangling: List[Dict[str, Any]] = []
+    for lib_id, xy in _power_port_anchors(doc):
+        if not _near(xy, non_pwr_anchors, tol_mm):
+            dangling.append({"lib_id": lib_id, "x": xy[0], "y": xy[1]})
+    if dangling:
+        return [Issue(
+            severity="error", code="CONN_003",
+            message=f"{len(dangling)} power-port(s) dangling — not on any "
+                    f"component pin or wire endpoint (tol {tol_mm} mm)",
+            detail={"count": len(dangling), "sample": dangling[:10]},
+        )]
+    return []
+
+
+def _check_body_overlap(
+    placement: Dict[str, Any], routed: Dict[str, Any], doc: SchematicDocument,
+    sep_mm: float = 0.0,
+) -> List[Issue]:
+    """Any two placed symbols whose real bboxes intersect → ERROR.
+    Universal geometry — same code for every circuit."""
+    try:
+        from .label_placer import _build_body_bbox_by_ref  # type: ignore
+    except Exception:
+        return []
+    schematic_path = getattr(doc, "path", None)
+    if not schematic_path:
+        return []
+    try:
+        by_ref = _build_body_bbox_by_ref(placement, schematic_path)
+    except Exception:
+        return []
+    refs = list(by_ref.items())
+    overlaps: List[Dict[str, Any]] = []
+    for i in range(len(refs)):
+        ra, (ax0, ay0, ax1, ay1) = refs[i]
+        if ax1 - ax0 < 0.1 or ay1 - ay0 < 0.1:
+            continue
+        for j in range(i + 1, len(refs)):
+            rb, (bx0, by0, bx1, by1) = refs[j]
+            if bx1 - bx0 < 0.1 or by1 - by0 < 0.1:
+                continue
+            if (ax0 < bx1 - sep_mm and bx0 < ax1 - sep_mm
+                    and ay0 < by1 - sep_mm and by0 < ay1 - sep_mm):
+                overlaps.append({"a": ra, "b": rb})
+    if overlaps:
+        return [Issue(
+            severity="error", code="GEOM_001",
+            message=f"{len(overlaps)} component body overlap(s)",
+            detail={"count": len(overlaps), "sample": overlaps[:10]},
+        )]
+    return []
+
+
+def _check_orphan_pins(
+    placement: Dict[str, Any], routed: Dict[str, Any], doc: SchematicDocument,
+    tol_mm: float = 0.635,
+) -> List[Issue]:
+    """Every pin tip that is NOT near a wire endpoint, another pin tip,
+    a label anchor, a power-port anchor, or a no_connect marker is
+    electrically floating. Universal — drives the "every part fully
+    connected" hard invariant from feedback memory."""
+    pin_tips = _all_pin_tips(doc)
+    wire_pts = _wire_endpoints(doc)
+    label_pts = [xy for _, _, xy in _label_anchors(doc)]
+    pwr_pts = [xy for _, xy in _power_port_anchors(doc)]
+    nc_pts: List[Tuple[float, float]] = []
+    for child in doc.tree[1:]:
+        if isinstance(child, list) and _head(child) == "no_connect":
+            for sub in child[1:]:
+                if isinstance(sub, list) and _head(sub) == "at" and len(sub) >= 3:
+                    nc_pts.append((float(sub[1]), float(sub[2])))
+                    break
+    # multi-set of pin coords so we can detect pin-on-pin connectivity
+    pin_set = pin_tips
+    universe = wire_pts + label_pts + pwr_pts + nc_pts
+    orphans: List[Tuple[float, float]] = []
+    for p in pin_tips:
+        if _near(p, universe, tol_mm):
+            continue
+        # pin sitting on another pin (direct touch) is connected
+        count = sum(1 for q in pin_set
+                    if abs(q[0] - p[0]) <= tol_mm and abs(q[1] - p[1]) <= tol_mm)
+        if count >= 2:
+            continue
+        orphans.append(p)
+    if orphans:
+        return [Issue(
+            severity="error", code="CONN_004",
+            message=f"{len(orphans)} pin(s) floating — no wire/label/power/NC "
+                    f"and no other pin touching",
+            detail={"count": len(orphans),
+                    "sample": [{"x": x, "y": y} for x, y in orphans[:10]]},
+        )]
+    return []
+
+
 _CHECKS: List[Callable[..., List[Issue]]] = [
+    _check_zero_wires,
+    _check_dangling_labels,
+    _check_dangling_power_ports,
+    _check_orphan_pins,
+    _check_body_overlap,
     _check_off_grid_components,
     _check_off_sheet_components,
     _check_wire_overlaps,

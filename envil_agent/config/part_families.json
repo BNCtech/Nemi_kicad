@@ -1,0 +1,86 @@
+{
+  "_comment": "Part-family recognition catalog. Each entry has three optional axes: lib_id_substrings (case-insensitive substring match against component lib_id), value_patterns (regex strings compiled with re.I and matched against the Value field), and reference_prefixes (refdes letter codes — informational only; not authoritative on their own since 'D' would match every diode). Extracted from rules.py module-level constants on 2026-05-18.",
+
+  "regulator": {
+    "_desc": "Linear/LDO/switching regulators. Drives POWER_003 (Cin/Cout) detection.",
+    "lib_id_substrings": ["regulator_linear", "regulator_switching", "ldo", "_ldo_", ":ldo"],
+    "value_patterns": [
+      "\\bLM\\s*78\\s*\\d{2}\\b",
+      "\\bLM\\s*79\\s*\\d{2}\\b",
+      "\\bLM\\s*317\\b",
+      "\\bLM\\s*337\\b",
+      "\\bLM\\s*1117\\b",
+      "\\bAMS\\s*1117\\b",
+      "\\bAP\\s*2112\\b",
+      "\\bLD\\s*1117\\b",
+      "\\bLP\\s*\\d{4}\\b",
+      "\\bMCP\\s*170\\d\\b",
+      "\\bMIC\\s*\\d{4}\\b",
+      "\\bTPS\\s*\\d{4,5}\\b",
+      "\\bMAX\\s*\\d{3,4}\\b",
+      "\\bTL\\s*431\\b",
+      "\\bREG\\s*\\d{3,4}\\b",
+      "\\bLDO\\b"
+    ],
+    "reference_prefixes": ["U"]
+  },
+
+  "relay": {
+    "_desc": "Relays / coil-bearing parts. Drives PROT_004 (freewheel diode required).",
+    "lib_id_substrings": ["relay", ":coil"],
+    "value_patterns": [],
+    "reference_prefixes": ["K"]
+  },
+
+  "usb_connector": {
+    "_desc": "USB host/device/OTG connectors. Drives USB_001/002 (series R, TVS, decoupling).",
+    "lib_id_substrings": ["usb_a", "usb_b", "usb_c", "usb_mini", "usb_micro", "usb_otg", "conn_usb"],
+    "value_patterns": [],
+    "reference_prefixes": ["J", "P"]
+  },
+
+  "debug_header": {
+    "_desc": "SWD / JTAG / Cortex debug connectors. Drives DBG_001/002 (SRST + VTREF tie).",
+    "lib_id_substrings": ["conn_arm_jtag", "conn_arm_swd", "conn_cortex", "conn_swd", "jtag"],
+    "value_patterns": [],
+    "reference_prefixes": ["J"]
+  },
+
+  "polarized_cap": {
+    "_desc": "Electrolytic / tantalum / polarized caps. Drives orientation + value-format checks.",
+    "lib_id_substrings": [
+      "device:cp", "device:c_polarized", "capacitor:cp",
+      "_polarized", "tantalum", "_electrolytic"
+    ],
+    "value_patterns": [],
+    "reference_prefixes": ["C"]
+  },
+
+  "tvs": {
+    "_desc": "TVS / ESD protection diodes (USBLC6, PESD, TPD, RClamp, etc.). Drives ESD_001/002 and USB protection rules.",
+    "lib_id_substrings": ["power_protection", "diode_tvs", "esd"],
+    "value_patterns": [
+      "(USBLC6|PESD\\d|SP0503|TPD2E|RClamp|NUP\\d|TVS|ESD\\b)"
+    ],
+    "reference_prefixes": ["D", "TVS"]
+  },
+
+  "uart_bridge": {
+    "_desc": "USB-UART bridge ICs (CH340, CP2102, FT23x, etc.). Drives bridge-specific power + series-R checks.",
+    "lib_id_substrings": [],
+    "value_patterns": [
+      "(CH340|CP210\\d|FT23\\d|FT232|CH9102|MCP2200|ATmega16U2|ATmega8U2)"
+    ],
+    "reference_prefixes": ["U"]
+  },
+
+  "isolation": {
+    "_desc": "Ferrite beads / isolation inductors used to split AVDD from VDD. Drives POWER_006 isolation detection.",
+    "lib_id_substrings": [
+      "device:l", "device:fb", "ferritebead", "ferrite_bead",
+      "_ferrite", ":fb_", ":fb ", "inductor"
+    ],
+    "value_patterns": [],
+    "reference_prefixes": ["L", "FB"]
+  }
+}

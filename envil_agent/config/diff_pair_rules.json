@@ -1,0 +1,59 @@
+{
+  "_about": "Differential-pair detection patterns + per-class length-skew tolerance. Read by the future `tools/route_diff_pair.py` to constrain intra-pair spacing and warn on length skew > tolerance. Also consumed by `intent/pcb_ir.py:PCBIntent.differential_pair_overrides` so the architect can promote / demote specific pairs per board without editing this file.",
+  "version": 1,
+  "_status": "v1: scaffold. Tool implementation pending. Schema is stable: changing it requires bumping `version`.",
+
+  "_pattern_order": "Specific patterns FIRST, generic catch-all LAST. The matcher consumes pairs greedily by rule order, so the *_P/*_N generic catch-all must sit at the bottom or it will swallow ETH_/LVDS_ pairs before the prefixed rules fire.",
+  "patterns": [
+    {
+      "_comment": "USB 2.0 high-speed pair --- 90 ohm differential, tight skew.",
+      "positive": "USB_DP",
+      "negative": "USB_DM",
+      "class": "DIFF_USB",
+      "max_skew_mm": 0.15,
+      "preferred_width_mm": 0.18,
+      "preferred_gap_mm": 0.10
+    },
+    {
+      "_comment": "Ethernet 10/100/1000 BASE-T MDI pairs --- 100 ohm differential.",
+      "positive_suffix": "_P",
+      "negative_suffix": "_N",
+      "name_prefix": "ETH_",
+      "class": "DIFF_ETH",
+      "max_skew_mm": 0.50,
+      "preferred_width_mm": 0.20,
+      "preferred_gap_mm": 0.15
+    },
+    {
+      "_comment": "LVDS standard pair.",
+      "positive_suffix": "_P",
+      "negative_suffix": "_N",
+      "name_prefix": "LVDS_",
+      "class": "DIFF_LVDS",
+      "max_skew_mm": 0.10,
+      "preferred_width_mm": 0.15,
+      "preferred_gap_mm": 0.10
+    },
+    {
+      "_comment": "CAN bus --- not a true differential routing target but the tool treats CANH/CANL as a pair for consistent routing.",
+      "positive": "CAN_H",
+      "negative": "CAN_L",
+      "class": "DIFF_CAN",
+      "max_skew_mm": 2.00,
+      "preferred_width_mm": 0.30,
+      "preferred_gap_mm": 0.20
+    },
+    {
+      "_comment": "Generic *_P / *_N suffix pair --- catch-all when no explicit rule matched. MUST stay last.",
+      "positive_suffix": "_P",
+      "negative_suffix": "_N",
+      "class": "DIFF_GENERIC",
+      "max_skew_mm": 0.25,
+      "preferred_width_mm": 0.20,
+      "preferred_gap_mm": 0.15
+    }
+  ],
+
+  "meander_enabled": false,
+  "_meander_comment": "v1 emits a warning when intra-pair skew exceeds `max_skew_mm`. Serpentine routing (meander) is a v2 feature; flipping this flag without the tool support will be a no-op until then."
+}

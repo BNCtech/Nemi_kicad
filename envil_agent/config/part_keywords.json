@@ -1,0 +1,37 @@
+{
+  "_about": "Keyword → lib_id map that FRONT-LOADS the pin catalog on attempt 1. When a part keyword appears in the user prompt, that lib_id's REAL pin names are injected into the architect system prompt BEFORE the first attempt — so the architect never has to guess pin names on its first try. Previously the live pin catalog (pin_catalog.py) only learned a part's exact pins on RETRY, after the failed attempt named the part (build_circuit.py extracts lib_ids from prior_attempt_json). Big designs (e.g. STM32F405 CAN data logger) time out before the retry can apply the correction, so attempt 1 must already be grounded. This closes that gap.",
+  "_why_this_matters": "VCAP pin naming VARIES per part: STM32F405RGTx uses 'VCAP_1'/'VCAP_2' (underscore) while STM32F411CEUx uses 'VCAP1' (no underscore). The architect cannot know the per-part convention, so on an un-cataloged part it hallucinates 'VCAP1' → PIN_NOT_ON_SYMBOL + the real VCAP_1/VCAP_2 pins left floating → validate fails → retry storm → token burn / GeneratorExit. Injecting the real pins up front kills the whole loop.",
+  "_apply_when": "resolve_lib_ids_from_prompt() (pin_catalog.py) lower-cases the prompt and, for each rule, if ANY keyword is a substring, adds its lib_ids. These merge with the seed list and any retry extras. When nothing matches, the prompt stays byte-identical to before (prompt-cache prefix preserved).",
+  "_maintenance": "All lib_ids below were verified to load from the live .kicad_sym library (tests probe). Adding a part = one rule; restart the server to pick up. Keep keywords SPECIFIC (e.g. 'stm32f405' not 'stm32') so the resolver injects the variant the user named, not a wrong sibling.",
+  "version": 1,
+  "enabled": true,
+  "_dynamic_mpn_doc": "DYNAMIC supplement to the hand-curated rules below. resolve_lib_ids_from_prompt also scans the prompt for part-number-like tokens (>= 2 letters + >= 1 digit, len >= 5: STM32G474VET6, BQ76952, INA240, LM5164, TJA1051, IRFB4110, AMS1117...) and resolves EACH to its real lib_id via symbol_geom.resolve_lib_id_by_value (cross-library, value-keyed), injecting that symbol's real pins. This covers any part the user names WITHOUT a keyword rule — so the architect wires real pin names (VC0..VC15, VIN/SW/EN-UVLO, +/-/REF) instead of inventing Pin_1/OUT/NRST that fail PIN_NOT_ON_SYMBOL. Per-circuit-agnostic, no part list. dynamic_mpn_min_score = confidence floor; dynamic_mpn_max_parts caps how many resolved parts are injected. Set dynamic_mpn_resolve false to revert to keyword-only.",
+  "dynamic_mpn_resolve": true,
+  "dynamic_mpn_min_score": 0.75,
+  "dynamic_mpn_max_parts": 16,
+
+  "rules": [
+    {"keywords": ["stm32f405"], "lib_ids": ["MCU_ST_STM32F4:STM32F405RGTx"]},
+    {"keywords": ["stm32f407"], "lib_ids": ["MCU_ST_STM32F4:STM32F407VETx"]},
+    {"keywords": ["stm32f411"], "lib_ids": ["MCU_ST_STM32F4:STM32F411CEUx"]},
+    {"keywords": ["stm32f401"], "lib_ids": ["MCU_ST_STM32F4:STM32F401RBTx"]},
+    {"keywords": ["stm32f103"], "lib_ids": ["MCU_ST_STM32F1:STM32F103C8Tx"]},
+    {"keywords": ["stm32g030"], "lib_ids": ["MCU_ST_STM32G0:STM32G030F6Px"]},
+    {"keywords": ["stm32g031"], "lib_ids": ["MCU_ST_STM32G0:STM32G031F6Px"]},
+    {"keywords": ["stm32g431", "stm32g4"], "lib_ids": ["MCU_ST_STM32G4:STM32G431CBTx"]},
+    {"keywords": ["stm32l432", "stm32l4"], "lib_ids": ["MCU_ST_STM32L4:STM32L432KCUx"]},
+    {"keywords": ["stm32f072"], "lib_ids": ["MCU_ST_STM32F0:STM32F072C8Tx"]},
+    {"keywords": ["stm32f030"], "lib_ids": ["MCU_ST_STM32F0:STM32F030F4Px"]},
+
+    {"keywords": ["mcp2551"], "lib_ids": ["Interface_CAN_LIN:MCP2551-I-P"]},
+    {"keywords": ["mcp2562"], "lib_ids": ["Interface_CAN_LIN:MCP2562-I-SN"]},
+    {"keywords": ["tja1050"], "lib_ids": ["Interface_CAN_LIN:TJA1050T"]},
+    {"keywords": ["sn65hvd230", "sn65hvd"], "lib_ids": ["Interface_CAN_LIN:SN65HVD230"]},
+    {"keywords": ["mcp2515"], "lib_ids": ["Interface_CAN_LIN:MCP2515-xSO"]},
+    {"keywords": ["max485"], "lib_ids": ["Interface_UART:MAX485E"]},
+    {"keywords": ["max3232"], "lib_ids": ["Interface_UART:MAX3232"]},
+
+    {"keywords": ["microsd", "micro sd", "micro-sd", "sd card", "tf card"], "lib_ids": ["Connector:microSD_card_socket_Hirose_DM3AT"]},
+    {"keywords": ["w25q128", "w25q"], "lib_ids": ["Memory_Flash:W25Q128JVS"]}
+  ]
+}

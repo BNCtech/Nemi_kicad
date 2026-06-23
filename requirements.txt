@@ -1,9 +1,16 @@
-anthropic>=0.40.0
+claude-agent-sdk>=0.2.82
+anthropic>=0.42.0
 sexpdata>=1.0.2
 python-dotenv>=1.0.0
-fastapi>=0.115.0
+# fastapi 0.115 caps starlette<0.39 but claude-agent-sdk pulled in
+# starlette 1.0.0. Pin to a fastapi line that accepts starlette 1.x when
+# server.py is rewired; until then, the agent CLI runs without fastapi.
+fastapi>=0.118.0
 uvicorn[standard]>=0.32.0
 python-multipart>=0.0.12
 truststore>=0.10.0
 jsonschema>=4.20.0
 networkx>=3.0
+langsmith>=0.2.0
+langgraph>=0.2.50
+langgraph-checkpoint-sqlite>=2.0.0

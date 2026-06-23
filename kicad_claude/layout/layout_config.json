@@ -362,50 +362,6 @@
     "parent_origin_y_mm": 20.0
   },
 
-  "local_wire_synthesis": {
-    "_comment": "P11 — short-range label-to-wire promotion. After the router emits labels for every signal net, this pass replaces labels with direct Manhattan wires when ALL pins on the net sit within `max_distance_mm` of each other. Long-haul nets (cross-page rails like 3V3 / GND / SDA) keep their labels. Shifts the wire-edges:label-edges ratio toward wires — the visual reason human schematics don't look like floating-label spaghetti.",
-    "enabled": true,
-    "max_distance_mm": 80.0,
-    "min_pins_per_net": 2
-  },
-
-  "pin_role_placement": {
-    "_comment": "P10 — pin-role aware placement. After the grid-based placer assigns coordinates, this post-pass moves 2-pin satellite passives (decoupling caps, pull-ups, biasing resistors, crystal load caps) to sit adjacent to the specific anchor IC pin they connect to. A decoupling cap that classifier put in MAIN_CONTROLLER role gets moved next to VCC pin, NOT just somewhere inside the MAIN_CONTROLLER grid cell.",
-    "enabled": true,
-    "offset_from_pin_mm": 5.08,
-    "max_passive_move_mm": 50.8,
-    "min_clearance_mm": 1.27
-  },
-
-  "community_partition": {
-    "_comment": "Connectivity-graph community detection that replaces the role-bucket hierarchy split. Weighted edges (wire=1.0 strong, label=0.6 medium, power=0.2 weak) feed Louvain modularity clustering; clusters are role-named by plurality vote of their members' classifier roles. Used by community_partition.partition_schematic — gated by `enabled` on the consumer side (hierarchical.py).",
-    "enabled": true,
-    "weights": {
-      "wire": 1.0,
-      "label": 0.6,
-      "power": 0.2
-    },
-    "detection": {
-      "algorithm": "louvain",
-      "seed": 42
-    },
-    "balance": {
-      "_comment": "Post-partition merging: communities below min_members absorb into the largest community; if more than max_sheets remain, smallest ones merge into a final MISC bucket.",
-      "min_members": 3,
-      "max_sheets": 8
-    },
-    "anchor_boost": {
-      "_comment": "Pre-Louvain weight boost on every edge from an anchor component (MCU / POWER_REGULATOR / SENSOR / WIRELESS / etc.) to its direct neighbours. Pulls the subsystem (anchor + decoupling + crystal + pull-ups) into one community even when the anchor also shares label-edges with other clusters. multiplier=2.5 keeps satellite caps glued to their parent IC.",
-      "enabled": true,
-      "multiplier": 2.5
-    },
-    "merge_duplicate_names": true,
-    "cross_cluster": {
-      "_comment": "When generating sheet pins on the parent, only signal-strength edges become hierarchical labels — power edges merge naturally via power-port symbols and would clutter the parent if exposed.",
-      "min_edge_weight_for_sheet_pin": 0.5
-    }
-  },
-
   "fallback_zones": {
     "_comment": "When two roles claim the same zone, the second one is bumped to the next unused entry in this order. Spillover roles that exhaust the list re-use the first entry (placer logs a warning).",
     "order": [

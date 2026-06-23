@@ -1,0 +1,196 @@
+{
+  "_about": "Net-class catalogue. Each entry defines per-class trace width, clearance, via geometry, and (for differential pairs) coupled-pair gap + width. Entries are written verbatim into `.kicad_pro -> net_settings.classes`. `assignment_patterns` is the regex-based net-name -> class mapping fed into `net_settings.netclass_patterns` so freshly imported nets snap to the right class without manual assignment.",
+  "_units": "all in mm. KiCad stores ohms only on the diff-pair side via geometry — actual impedance depends on the chosen stackup_profile, NOT this file. Pair this with stackup_profiles.json when picking diff_pair_width / diff_pair_gap.",
+  "_default_class": "Default",
+
+  "classes": {
+    "Default": {
+      "_comment": "Everything not matched by a more specific pattern. Conservative width chosen so DEFAULT nets pass on every fab profile in fab_profiles.json without bumping into min_track_width.",
+      "name": "Default",
+      "track_width_mm": 0.2,
+      "clearance_mm": 0.2,
+      "via_diameter_mm": 0.6,
+      "via_drill_mm": 0.3,
+      "diff_pair_width_mm": 0.15,
+      "diff_pair_gap_mm": 0.15,
+      "diff_pair_via_gap_mm": 0.25,
+      "microvia_diameter_mm": 0.3,
+      "microvia_drill_mm": 0.1,
+      "priority": 2147483647,
+      "pcb_color": "rgba(0, 0, 0, 0.000)",
+      "schematic_color": "rgba(0, 0, 0, 0.000)"
+    },
+
+    "POWER": {
+      "_comment": "Positive supply rails (VCC / VDD / +3V3 / +5V / VBUS / VBAT etc). 0.508 mm = 20 mil — matches the 'Power Trace Width 20 mil or more' rule. @ 1 oz copper carries ~1.4 A at 10 degC rise (IPC-2152). Project can override per-rail for higher current.",
+      "name": "POWER",
+      "track_width_mm": 0.508,
+      "clearance_mm": 0.2,
+      "via_diameter_mm": 0.8,
+      "via_drill_mm": 0.4,
+      "diff_pair_width_mm": 0.15,
+      "diff_pair_gap_mm": 0.15,
+      "diff_pair_via_gap_mm": 0.25,
+      "microvia_diameter_mm": 0.3,
+      "microvia_drill_mm": 0.1,
+      "priority": 100,
+      "pcb_color": "rgba(220, 50, 50, 0.700)",
+      "schematic_color": "rgba(220, 50, 50, 0.700)"
+    },
+
+    "GND": {
+      "_comment": "Ground / return nets. Track width matches POWER (20 mil = 0.508 mm) because GND traces (in 2-layer designs without a pour) carry the full return current; in 4+ layer with a pour this width is effectively unused — the zone handles routing.",
+      "name": "GND",
+      "track_width_mm": 0.508,
+      "clearance_mm": 0.2,
+      "via_diameter_mm": 0.8,
+      "via_drill_mm": 0.4,
+      "diff_pair_width_mm": 0.15,
+      "diff_pair_gap_mm": 0.15,
+      "diff_pair_via_gap_mm": 0.25,
+      "microvia_diameter_mm": 0.3,
+      "microvia_drill_mm": 0.1,
+      "priority": 100,
+      "pcb_color": "rgba(0, 0, 0, 0.500)",
+      "schematic_color": "rgba(0, 0, 0, 0.500)"
+    },
+
+    "HIGH_SPEED": {
+      "_comment": "Generic high-speed single-ended net (clock, fast control, RGMII single lines). Thinner trace and tighter spacing keep impedance reachable. Real Z0 target depends on stackup.",
+      "name": "HIGH_SPEED",
+      "track_width_mm": 0.15,
+      "clearance_mm": 0.2,
+      "via_diameter_mm": 0.45,
+      "via_drill_mm": 0.2,
+      "diff_pair_width_mm": 0.15,
+      "diff_pair_gap_mm": 0.15,
+      "diff_pair_via_gap_mm": 0.25,
+      "microvia_diameter_mm": 0.3,
+      "microvia_drill_mm": 0.1,
+      "priority": 200,
+      "pcb_color": "rgba(255, 165, 0, 0.700)",
+      "schematic_color": "rgba(255, 165, 0, 0.700)"
+    },
+
+    "CLOCK": {
+      "_comment": "Crystal lines, MCU clock outputs, oscillator nets. Narrow + isolated; needs ground guard or short routing. Treated separately from HIGH_SPEED because clock integrity is its own design problem.",
+      "name": "CLOCK",
+      "track_width_mm": 0.15,
+      "clearance_mm": 0.25,
+      "via_diameter_mm": 0.45,
+      "via_drill_mm": 0.2,
+      "diff_pair_width_mm": 0.15,
+      "diff_pair_gap_mm": 0.15,
+      "diff_pair_via_gap_mm": 0.25,
+      "microvia_diameter_mm": 0.3,
+      "microvia_drill_mm": 0.1,
+      "priority": 150,
+      "pcb_color": "rgba(255, 200, 0, 0.700)",
+      "schematic_color": "rgba(255, 200, 0, 0.700)"
+    },
+
+    "DIFF_USB": {
+      "_comment": "USB differential pair (D+/D-). 90 ohm Zdiff per USB 2.0 + 3.0 spec. Diff geometry assumes outer-layer microstrip on a 4-layer 1.6 mm FR4 stackup; recompute when stackup changes.",
+      "name": "DIFF_USB",
+      "track_width_mm": 0.15,
+      "clearance_mm": 0.2,
+      "via_diameter_mm": 0.45,
+      "via_drill_mm": 0.2,
+      "diff_pair_width_mm": 0.18,
+      "diff_pair_gap_mm": 0.1,
+      "diff_pair_via_gap_mm": 0.25,
+      "microvia_diameter_mm": 0.3,
+      "microvia_drill_mm": 0.1,
+      "priority": 250,
+      "pcb_color": "rgba(50, 100, 220, 0.700)",
+      "schematic_color": "rgba(50, 100, 220, 0.700)"
+    },
+
+    "DIFF_ETH": {
+      "_comment": "Ethernet differential pair (TX+/TX- and RX+/RX-) — 100 ohm Zdiff per 100BASE-TX. Same caveat as DIFF_USB: geometry tied to a specific stackup.",
+      "name": "DIFF_ETH",
+      "track_width_mm": 0.15,
+      "clearance_mm": 0.2,
+      "via_diameter_mm": 0.45,
+      "via_drill_mm": 0.2,
+      "diff_pair_width_mm": 0.15,
+      "diff_pair_gap_mm": 0.15,
+      "diff_pair_via_gap_mm": 0.25,
+      "microvia_diameter_mm": 0.3,
+      "microvia_drill_mm": 0.1,
+      "priority": 250,
+      "pcb_color": "rgba(50, 180, 100, 0.700)",
+      "schematic_color": "rgba(50, 180, 100, 0.700)"
+    },
+
+    "ANALOG": {
+      "_comment": "Op-amp inputs, ADC refs, sensor lines. Wider than HIGH_SPEED to reduce thermal noise, kept away from digital aggressors.",
+      "name": "ANALOG",
+      "track_width_mm": 0.25,
+      "clearance_mm": 0.25,
+      "via_diameter_mm": 0.6,
+      "via_drill_mm": 0.3,
+      "diff_pair_width_mm": 0.15,
+      "diff_pair_gap_mm": 0.2,
+      "diff_pair_via_gap_mm": 0.25,
+      "microvia_diameter_mm": 0.3,
+      "microvia_drill_mm": 0.1,
+      "priority": 300,
+      "pcb_color": "rgba(150, 50, 200, 0.700)",
+      "schematic_color": "rgba(150, 50, 200, 0.700)"
+    }
+  },
+
+  "assignment_patterns": {
+    "_comment": "Regex-style net-name -> class assignment. Patterns are wildcard-style (KiCad's netclass_patterns syntax: '*' matches any sequence, '?' matches one char). Order matters — earlier patterns win. Add custom rules at the top, fall back to the broad catch-all rules below. Pure data — no Python list of net names in code.",
+    "rules": [
+      {"pattern": "USB_D?", "class": "DIFF_USB"},
+      {"pattern": "USB_DP", "class": "DIFF_USB"},
+      {"pattern": "USB_DM", "class": "DIFF_USB"},
+      {"pattern": "DP",     "class": "DIFF_USB"},
+      {"pattern": "DM",     "class": "DIFF_USB"},
+      {"pattern": "ETH_TX*", "class": "DIFF_ETH"},
+      {"pattern": "ETH_RX*", "class": "DIFF_ETH"},
+      {"pattern": "MDI_*",  "class": "DIFF_ETH"},
+      {"pattern": "TRD_*",  "class": "DIFF_ETH"},
+      {"pattern": "*CLK*",  "class": "CLOCK"},
+      {"pattern": "XTAL*",  "class": "CLOCK"},
+      {"pattern": "OSC*",   "class": "CLOCK"},
+      {"pattern": "MCO*",   "class": "CLOCK"},
+      {"pattern": "GND",    "class": "GND"},
+      {"pattern": "AGND",   "class": "GND"},
+      {"pattern": "DGND",   "class": "GND"},
+      {"pattern": "PGND",   "class": "GND"},
+      {"pattern": "EGND",   "class": "GND"},
+      {"pattern": "SGND",   "class": "GND"},
+      {"pattern": "VSS",    "class": "GND"},
+      {"pattern": "+*",     "class": "POWER"},
+      {"pattern": "VCC*",   "class": "POWER"},
+      {"pattern": "VDD*",   "class": "POWER"},
+      {"pattern": "VBUS",   "class": "POWER"},
+      {"pattern": "VBAT",   "class": "POWER"},
+      {"pattern": "VIN",    "class": "POWER"},
+      {"pattern": "VOUT*",  "class": "POWER"},
+      {"pattern": "VSYS",   "class": "POWER"},
+      {"pattern": "VEE",    "class": "POWER"},
+      {"pattern": "AIN*",   "class": "ANALOG"},
+      {"pattern": "VREF*",  "class": "ANALOG"},
+      {"pattern": "ADC*",   "class": "ANALOG"}
+    ]
+  },
+
+  "preset_track_widths_mm": {
+    "_comment": "Track-width presets dropped into .kicad_pro -> board.design_settings.track_widths. KiCad's PCB Editor shows these as quick-pick buttons. The leading 0.0 is the 'use net class width' sentinel KiCad expects.",
+    "values": [0.0, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0]
+  },
+
+  "preset_via_dimensions_mm": {
+    "_comment": "Via-size presets dropped into .kicad_pro -> board.design_settings.via_dimensions. Pairs of (outer-diameter, drill).",
+    "pairs": [
+      {"diameter": 0.0, "drill": 0.0},
+      {"diameter": 0.45, "drill": 0.2},
+      {"diameter": 0.6,  "drill": 0.3},
+      {"diameter": 0.8,  "drill": 0.4}
+    ]
+  }
+}

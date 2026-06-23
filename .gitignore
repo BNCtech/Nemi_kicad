@@ -29,3 +29,13 @@ Thumbs.db
 # Secrets
 *.key
 
+# Generated demo circuits at repo root (not source)
+/*.kicad_pcb
+/*.kicad_pro
+/*.kicad_sch
+
+# Snapshots & temp output dumps
+.envil-snapshots/
+/_*out*.txt
+/_bms_*.txt
+

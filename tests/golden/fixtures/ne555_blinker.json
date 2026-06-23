@@ -1,0 +1,29 @@
+{
+  "name": "ne555_blinker",
+  "_about": "Known-good NE555 1Hz blinker IR, lifted verbatim from rebuild_all.make_ne555(). Single-IC flat circuit (blocks=[]). Pure data: the runner auto-decides render mode and applies the universal invariants from golden_config.json — nothing circuit-specific is asserted here.",
+  "ir": {
+    "name": "ne555",
+    "circuit_type": "ANALOG",
+    "components": [
+      {"ref": "U1", "lib_id": "Timer:NE555", "value": "NE555"},
+      {"ref": "R1", "lib_id": "Device:R", "value": "10k"},
+      {"ref": "R2", "lib_id": "Device:R", "value": "68k"},
+      {"ref": "R3", "lib_id": "Device:R", "value": "330"},
+      {"ref": "C1", "lib_id": "Device:C_Polarized", "value": "10u"},
+      {"ref": "C2", "lib_id": "Device:C", "value": "10n"},
+      {"ref": "C3", "lib_id": "Device:C", "value": "100n"},
+      {"ref": "D1", "lib_id": "Device:LED", "value": "LED"},
+      {"ref": "J1", "lib_id": "Connector:Conn_01x02_Pin", "value": "+5V"}
+    ],
+    "nets": [
+      {"name": "+5V", "pins": ["J1.1", "U1.4", "U1.8", "R1.1", "C3.1"], "is_power": true},
+      {"name": "GND", "pins": ["J1.2", "U1.1", "C1.2", "C2.2", "C3.2", "R3.2"], "is_power": true},
+      {"name": "DIS", "pins": ["U1.7", "R1.2", "R2.1"], "is_power": false},
+      {"name": "THR", "pins": ["U1.6", "U1.2", "R2.2", "C1.1"], "is_power": false},
+      {"name": "CV", "pins": ["U1.5", "C2.1"], "is_power": false},
+      {"name": "OUT", "pins": ["U1.3", "D1.1"], "is_power": false},
+      {"name": "N1", "pins": ["D1.2", "R3.1"], "is_power": false}
+    ],
+    "blocks": []
+  }
+}

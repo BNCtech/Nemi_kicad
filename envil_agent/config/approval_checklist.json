@@ -1,0 +1,21 @@
+{
+  "_about": "Phase 5 electrical-readiness / approval checklist — the engineer sign-off card shown BEFORE PCB handoff. Each item maps to the validate_ir issue CODES that would FAIL it: an item is FAIL if any of its codes appears as an ERROR, REVIEW if only as a WARNING, else PASS. GENERAL + config-driven: driven by the same codes validate emits across ALL domains; add an item or a code = one JSON edit, zero code. block_pcb_on_errors gates the overall READY verdict on zero errors.",
+  "enabled": true,
+  "block_pcb_on_errors": true,
+  "items": [
+    {"label": "All pins connected / no floating nets", "codes": ["NET_FLOATING", "POWER_PIN_FLOATING", "PIN_NOT_ON_SYMBOL", "PIN_IN_MULTIPLE_NETS", "PIN_UNKNOWN_REF", "PIN_MALFORMED"]},
+    {"label": "No duplicate refs / nets", "codes": ["REF_DUPLICATE", "NET_DUPLICATE"]},
+    {"label": "Power decoupling present", "codes": ["MCU_DECOUPLING_MISSING", "MCU_BULK_CAP_MISSING", "LDO_INPUT_CAP_MISSING", "LDO_OUTPUT_CAP_MISSING"]},
+    {"label": "Reset / boot straps", "codes": ["MCU_NO_RESET_PULLUP", "MCU_NO_RESET_BUTTON"]},
+    {"label": "Crystal load caps", "codes": ["CRYSTAL_LOAD_CAPS_MISSING", "CRYSTAL_LOAD_CAP_NO_GND"]},
+    {"label": "USB-C protection / CC pulldowns", "codes": ["USB_C_CC_PULLDOWN_MISSING", "USB_C_CC_PIN_UNCONNECTED", "USB_C_POLYFUSE_MISSING", "USB_C_ESD_MISSING"]},
+    {"label": "CAN bus termination + pins", "codes": ["CAN_TERMINATION_MISSING", "CAN_PIN_UNCONNECTED"]},
+    {"label": "Interrupts reach the MCU", "codes": ["ALERT_NET_NOT_CONNECTED"]},
+    {"label": "Current-sense shunt polarity", "codes": ["SHUNT_AMP_INPUTS_SHORTED", "SHUNT_AMP_INPUT_UNCONNECTED", "SHUNT_POLARITY_SUSPECT"]},
+    {"label": "LED current-limit resistor", "codes": ["LED_SERIES_RESISTOR_MISSING"]},
+    {"label": "No cross-block net collisions", "codes": ["CROSS_BLOCK_NET_COLLISION"]},
+    {"label": "All requested parts present", "codes": ["REQUIREMENT_PART_MISSING"]},
+    {"label": "Blocks well-formed", "codes": ["BLOCK_EMPTY", "COMPONENT_NOT_IN_ANY_BLOCK", "COMPONENT_IN_MULTIPLE_BLOCKS", "BLOCK_NOT_JUSTIFIED", "INCREMENTAL_BLOCK_SKIPPED"]},
+    {"label": "Board fully wired", "codes": ["BOARD_UNDER_WIRED"]}
+  ]
+}

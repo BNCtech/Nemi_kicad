@@ -1,0 +1,24 @@
+{
+  "name": "mcp1700_ldo_3v3",
+  "_about": "Known-good MCP1700 3V3 LDO IR, lifted verbatim from rebuild_all.make_mcp1700(). Single-IC flat circuit (blocks=[]). Pure data: render mode auto-decided, universal invariants from golden_config.json.",
+  "ir": {
+    "name": "mcp1700_ldo_3v3",
+    "circuit_type": "POWER_SUPPLY",
+    "components": [
+      {"ref": "U1", "lib_id": "Regulator_Linear:MCP1700-3.3", "value": "MCP1700-3.3"},
+      {"ref": "C1", "lib_id": "Device:C", "value": "1u"},
+      {"ref": "C2", "lib_id": "Device:C", "value": "1u"},
+      {"ref": "D1", "lib_id": "Device:LED", "value": "PWR_LED"},
+      {"ref": "R1", "lib_id": "Device:R", "value": "1k"},
+      {"ref": "J1", "lib_id": "Connector:Conn_01x02_Pin", "value": "VIN_5V"},
+      {"ref": "J2", "lib_id": "Connector:Conn_01x02_Pin", "value": "VOUT_3V3"}
+    ],
+    "nets": [
+      {"name": "+5V", "pins": ["U1.VI", "C1.1", "J1.1"], "is_power": true},
+      {"name": "+3V3", "pins": ["U1.VO", "C2.1", "R1.1", "J2.1"], "is_power": true},
+      {"name": "GND", "pins": ["U1.GND", "C1.2", "C2.2", "J1.2", "J2.2"], "is_power": true},
+      {"name": "LED_K", "pins": ["R1.2", "D1.1"], "is_power": false}
+    ],
+    "blocks": []
+  }
+}

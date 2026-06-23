@@ -1,0 +1,58 @@
+{
+  "_about": "Self-heal loop config. After build_graph renders the schematic and exports the preview SVG, the self_heal node runs ERC and tries to resolve any residual violations -- first with the deterministic erc_autofix tool, then by escalating remaining violations back to the architect as `feedback` so the LLM can produce a corrected IR. DRC self-heal is a follow-up; right now build_graph is schematic-only.",
+  "version": 1,
+
+  "enabled": false,
+  "_enabled_note_2026_06_02": "TEMPORARILY DISABLED for speed pass. Self-heal adds 30-60s per build (ERC + autofix + possible architect re-call). Re-enable once typical builds succeed without it. ERC errors will surface in chat for manual fix via apply_ops instead of automated repair.",
+  "max_fix_attempts": 1,
+  "summary_max_chars": 1800,
+
+  "_strategy": "Each erc_autofix violation type is classified as either (a) deterministic -- the existing Python autofix handles it; or (b) llm_only -- requires an IR-level redesign. If after the deterministic pass any residual violation belongs to the llm_only set, escalate to architect with a structured summary. Otherwise stop -- the architect cannot help with the same class of error we already tried and rolled back.",
+
+  "deterministic_violation_types": [
+    "unconnected_wire_endpoint",
+    "duplicate_reference",
+    "power_pin_not_driven"
+  ],
+
+  "llm_only_violation_types": [
+    "pin_not_connected",
+    "isolated_pin_label",
+    "multiple_net_names",
+    "missing_power_pin",
+    "power_pin_not_driven"
+  ],
+
+  "fix_hints": {
+    "BLOCK_EMPTY": "A block in blocks[] has empty component_refs[]. Either DELETE that block from blocks[] (if the topology doesn't actually need it) or MOVE the appropriate components into its component_refs[]. Symptom of leaving it: the engine renders an empty child sheet in the hierarchy.",
+    "COMPONENT_NOT_IN_ANY_BLOCK": "A component in components[] is not assigned to any block's component_refs[]. When blocks[] is non-empty every component must appear in exactly one block. Find the most-appropriate block for this component and add its ref to that block's component_refs[].",
+    "COMPONENT_IN_MULTIPLE_BLOCKS": "A component ref appears in more than one block's component_refs[]. A component belongs to exactly one block. Pick the most-appropriate one and remove the ref from the others.",
+    "BLOCK_REFS_UNKNOWN_COMPONENT": "A block's component_refs[] lists a ref that is not in components[]. Either add the component to components[] (with its lib_id, value, footprint) or remove the ref from component_refs[].",
+    "BLOCK_NO_ANCHOR": "A block has no anchor component (IC / connector / crystal / transformer with >= 3 pins). Blocks of only passives (R/C/L/D) are not self-standing. MOVE the appropriate anchor IC into this block's component_refs[], OR merge this block into a sibling that owns the anchor. Refdes letters considered anchors and the minimum pin count are configured in config/block_rules.json.",
+    "BLOCK_TOO_SMALL": "A block has fewer components than the configured minimum (default 2). Single-component blocks (one LED, one resistor) are visual noise. MERGE this block into a sibling, OR add more related components to it. Tune the minimum in config/block_rules.json:minimum_components_per_block.",
+    "BLOCK_NOT_JUSTIFIED": "A block is not justified by the user prompt or by any component lib_id. The classic mistake: emitting an RF block when the user never asked for wireless. REMOVE this block from blocks[] and reassign its components to a sibling, OR change the design to actually include the parts that justify the block. See config/sheet_planner_rules.json:block_justifications for which keywords / lib_id patterns each block requires.",
+    "BLOCK_NAME_DUPLICATE": "Two blocks share the same name. KiCad uses the sheet name as the per-sheet net-path prefix (e.g. /MCU/RESET), so duplicates collide. Rename one --- prefer adding a qualifier (MCU_LEFT vs MCU_RIGHT, AMP_CH1 vs AMP_CH2) over arbitrary suffixes.",
+    "BLOCK_NAME_NOT_IN_REGISTRY": "A block name is not in config/block_naming.json:blocks. The registry maps each name to its human-readable title for the title block. Either rename to one of the registered names (POWER, MCU, USB_PROTECTION, ICSP, CLOCK, RF, MOTOR_DRIVER, DISPLAY, AUDIO, COMM, BMS, CHARGER, ETHERNET, etc.) OR extend the registry with the new name before re-emitting.",
+    "USB_C_CC_PIN_UNCONNECTED": "USB-C CC1 / CC2 pins must be in a net. Add a net carrying the CC pin AND a 5.1k resistor whose other pin is GND.",
+    "USB_C_CC_PULLDOWN_MISSING": "USB-C UFP (sink) requires 5.1k from each CC pin to GND for power-role advertisement. Add two resistors with value 5.1k (R prefix), one for CC1 and one for CC2.",
+    "USB_C_POLYFUSE_MISSING": "USB-C VBUS should have a polyfuse (PTC, ~500 mA hold for sink) on the input line for overcurrent protection. Add a Device:Polyfuse or *PTC* part in series with VBUS.",
+    "USB_C_ESD_MISSING": "USB-C VBUS should have an ESD/TVS diode (e.g. SMBJ5.0A, PRTR5V0U2X) from VBUS to GND. Add a TVS diode component.",
+    "LDO_INPUT_CAP_MISSING": "Linear LDO input pin has no decoupling cap. Add a 10 uF ceramic from the LDO IN pin to GND.",
+    "LDO_INPUT_CAP_TOO_SMALL": "Linear LDO input cap is below datasheet minimum. Increase to >= 10 uF.",
+    "LDO_OUTPUT_CAP_MISSING": "Linear LDO output pin has no decoupling cap. Add a 10-22 uF ceramic from the LDO OUT pin to GND.",
+    "LDO_OUTPUT_CAP_TOO_SMALL": "Linear LDO output cap is below datasheet minimum. Increase to >= 10 uF (22 uF preferred for AMS1117).",
+    "CRYSTAL_LOAD_CAPS_MISSING": "Crystal needs two load capacitors. Add 2 caps (typical 20-22 pF for a 16 MHz crystal with 18 pF load), each with one pin on a crystal terminal and the other pin on GND.",
+    "CRYSTAL_LOAD_CAP_NO_GND": "Crystal load cap has no GND connection. The non-crystal pin of each load cap MUST go to GND.",
+    "MCU_NO_RESET_PULLUP": "MCU NRST / RESET pin has no pullup. Add a 10k from NRST to the MCU VDD rail (+3V3 or +5V) so the pin isn't floating.",
+    "MCU_NO_RESET_BUTTON": "MCU has no manual reset button to GND. Recommended for development boards: add a momentary push switch from NRST to GND (with optional series resistor + cap for debounce).",
+    "LED_SERIES_RESISTOR_MISSING": "LED has no series current-limit resistor. Add a resistor in series (typical 330R for 3.3 V rail, 1k for 5 V).",
+    "MCU_SWD_NO_HEADER": "MCU exposes SWDIO + SWCLK pins but no programming header was found. Add a 6-pin connector (Conn_01x06 or Tag-Connect) carrying VCC, SWDIO, SWCLK, NRST, GND, GND so the board is flashable.",
+    "pin_not_connected": "ERC sees a pin without a wire/label. Either add the pin to a net in your IR, or include the pin in a net that already has at least one driver -- KiCad's ERC requires every pin to be electrically driven.",
+    "isolated_pin_label": "A net label sits next to a pin that is not actually on that net. Re-check the net's pin list: `<ref>.<pin>` references must match the EXACT pin name from the pin catalog (case-sensitive). Common cause: writing `U1.VDD` when the catalog says `U1.VCC`.",
+    "multiple_net_names": "Two distinct labels collide on the same physical net. Pick ONE canonical name in your IR (usually the power-rail name like `+3V3`, `GND`, or the most descriptive signal name).",
+    "power_pin_not_driven": "A power rail has no power-output driver pin on its net. Either: (a) add the regulator output pin (e.g. `U1.VO` for AMS1117) to the same net as the IC's power pin; or (b) accept the warning -- if this is a board-edge input pin (USB-C VBUS, barrel jack), the engine will synthesize a PWR_FLAG automatically.",
+    "missing_power_pin": "A multi-unit IC has a power pin only on one unit but the IR didn't include it. Add the missing pin (often `VCC`, `AVCC`, `VDDIO`) to the appropriate power net.",
+    "unconnected_wire_endpoint": "A wire fragment terminates in empty space. Either remove the wire or extend the net so the endpoint lands on a real pin.",
+    "duplicate_reference": "Two components share the same refdes (e.g. `R1` appears twice). Renumber one of them -- R1 + R2, not R1 + R1."
+  }
+}

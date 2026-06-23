@@ -1,0 +1,106 @@
+{
+  "_about": "PCB stack-up profiles. Each entry defines the physical layer arrangement: which copper layers exist, their thickness, the dielectric between them, and the target single-ended (Z0) and differential (Zdiff) impedance. Values feed the `(stackup …)` block inside .kicad_pcb and the `diff_pair_dimensions` array in .kicad_pro. Pure data — adding a new stack-up means appending an entry, no Python change.",
+  "_units": "all thicknesses in mm. Z0 / Zdiff in ohms. epsilon_r is the relative permittivity (Dk) of the dielectric.",
+  "_layer_naming": "KiCad canonical layer names: F.Cu, B.Cu (signal); In1.Cu, In2.Cu, … (internal copper). Power/ground designation lives in `role` (signal|ground|power|mixed).",
+  "_default_profile": "two_layer_1mm6",
+
+  "profiles": {
+    "two_layer_1mm6": {
+      "_comment": "Default hobbyist/proto stack-up. Two copper layers, 1.6 mm FR4 core, 1 oz copper. Z0 50 ohm microstrip is impractical here (would need ~3 mm trace) — controlled-impedance work needs 4-layer.",
+      "name": "2-layer 1.6 mm FR4",
+      "copper_layer_count": 2,
+      "board_thickness_mm": 1.6,
+      "default_copper_weight_oz": 1.0,
+      "layers": [
+        {"name": "F.SilkS",       "type": "silk",       "thickness_mm": 0.0,    "role": "silk"},
+        {"name": "F.Paste",       "type": "paste",      "thickness_mm": 0.0,    "role": "paste"},
+        {"name": "F.Mask",        "type": "soldermask", "thickness_mm": 0.01,   "role": "mask",    "color": "Green"},
+        {"name": "F.Cu",          "type": "copper",     "thickness_mm": 0.035,  "role": "signal"},
+        {"name": "dielectric 1",  "type": "core",       "thickness_mm": 1.51,   "material": "FR4", "epsilon_r": 4.5, "loss_tangent": 0.02},
+        {"name": "B.Cu",          "type": "copper",     "thickness_mm": 0.035,  "role": "signal"},
+        {"name": "B.Mask",        "type": "soldermask", "thickness_mm": 0.01,   "role": "mask",    "color": "Green"},
+        {"name": "B.Paste",       "type": "paste",      "thickness_mm": 0.0,    "role": "paste"},
+        {"name": "B.SilkS",       "type": "silk",       "thickness_mm": 0.0,    "role": "silk"}
+      ],
+      "target_impedance": {
+        "_comment": "2-layer w/ 1.51 mm dielectric — single-ended 50 ohm needs ~3 mm trace, impractical. Diff 100 ohm needs >>2 mm gap. Use 4-layer for controlled impedance.",
+        "single_ended_50ohm_track_mm": 2.95,
+        "diff_100ohm_track_mm": 0.6,
+        "diff_100ohm_gap_mm": 0.15,
+        "_caveat": "Calculated but NOT recommended on 2-layer. The single-ended value is an order of magnitude wider than typical signal traces — sign that the geometry doesn't support clean 50 ohm. Promote to 4-layer for any net needing controlled Z."
+      }
+    },
+
+    "four_layer_1mm6": {
+      "_comment": "Industry default for any board with high-speed signals (USB, Ethernet, HDMI, anything >50 MHz). Sig / GND / PWR / Sig sandwich. Thin prepreg under F.Cu and above B.Cu gives microstrip impedance reachable at sane trace widths.",
+      "name": "4-layer 1.6 mm FR4 (Sig/GND/PWR/Sig)",
+      "copper_layer_count": 4,
+      "board_thickness_mm": 1.6,
+      "default_copper_weight_oz": 1.0,
+      "layers": [
+        {"name": "F.SilkS",       "type": "silk",       "thickness_mm": 0.0,   "role": "silk"},
+        {"name": "F.Paste",       "type": "paste",      "thickness_mm": 0.0,   "role": "paste"},
+        {"name": "F.Mask",        "type": "soldermask", "thickness_mm": 0.01,  "role": "mask",    "color": "Green"},
+        {"name": "F.Cu",          "type": "copper",     "thickness_mm": 0.035, "role": "signal"},
+        {"name": "dielectric 1",  "type": "prepreg",    "thickness_mm": 0.21,  "material": "FR4", "epsilon_r": 4.3, "loss_tangent": 0.02},
+        {"name": "In1.Cu",        "type": "copper",     "thickness_mm": 0.035, "role": "ground"},
+        {"name": "dielectric 2",  "type": "core",       "thickness_mm": 1.065, "material": "FR4", "epsilon_r": 4.5, "loss_tangent": 0.02},
+        {"name": "In2.Cu",        "type": "copper",     "thickness_mm": 0.035, "role": "power"},
+        {"name": "dielectric 3",  "type": "prepreg",    "thickness_mm": 0.21,  "material": "FR4", "epsilon_r": 4.3, "loss_tangent": 0.02},
+        {"name": "B.Cu",          "type": "copper",     "thickness_mm": 0.035, "role": "signal"},
+        {"name": "B.Mask",        "type": "soldermask", "thickness_mm": 0.01,  "role": "mask",    "color": "Green"},
+        {"name": "B.Paste",       "type": "paste",      "thickness_mm": 0.0,   "role": "paste"},
+        {"name": "B.SilkS",       "type": "silk",       "thickness_mm": 0.0,   "role": "silk"}
+      ],
+      "target_impedance": {
+        "single_ended_50ohm_track_mm": 0.32,
+        "diff_100ohm_track_mm": 0.15,
+        "diff_100ohm_gap_mm": 0.15,
+        "_caveat": "Computed for outer-layer microstrip referenced to In1.Cu (ground), 0.21 mm prepreg, Dk=4.3 — typical KiCad calculator output. Always re-verify with the actual fab's stack-up before tape-out."
+      }
+    },
+
+    "six_layer_1mm6": {
+      "_comment": "Six-copper-layer 1.6 mm stack — sig/gnd/sig/sig/pwr/sig. Adds a second internal signal pair for dense BGAs while keeping every signal layer adjacent to a reference plane.",
+      "name": "6-layer 1.6 mm FR4 (Sig/GND/Sig/Sig/PWR/Sig)",
+      "copper_layer_count": 6,
+      "board_thickness_mm": 1.6,
+      "default_copper_weight_oz": 1.0,
+      "layers": [
+        {"name": "F.SilkS",       "type": "silk",       "thickness_mm": 0.0,    "role": "silk"},
+        {"name": "F.Paste",       "type": "paste",      "thickness_mm": 0.0,    "role": "paste"},
+        {"name": "F.Mask",        "type": "soldermask", "thickness_mm": 0.01,   "role": "mask",    "color": "Green"},
+        {"name": "F.Cu",          "type": "copper",     "thickness_mm": 0.035,  "role": "signal"},
+        {"name": "dielectric 1",  "type": "prepreg",    "thickness_mm": 0.1,    "material": "FR4", "epsilon_r": 4.3, "loss_tangent": 0.02},
+        {"name": "In1.Cu",        "type": "copper",     "thickness_mm": 0.035,  "role": "ground"},
+        {"name": "dielectric 2",  "type": "core",       "thickness_mm": 0.36,   "material": "FR4", "epsilon_r": 4.5, "loss_tangent": 0.02},
+        {"name": "In2.Cu",        "type": "copper",     "thickness_mm": 0.035,  "role": "signal"},
+        {"name": "dielectric 3",  "type": "prepreg",    "thickness_mm": 0.5,    "material": "FR4", "epsilon_r": 4.3, "loss_tangent": 0.02},
+        {"name": "In3.Cu",        "type": "copper",     "thickness_mm": 0.035,  "role": "signal"},
+        {"name": "dielectric 4",  "type": "core",       "thickness_mm": 0.36,   "material": "FR4", "epsilon_r": 4.5, "loss_tangent": 0.02},
+        {"name": "In4.Cu",        "type": "copper",     "thickness_mm": 0.035,  "role": "power"},
+        {"name": "dielectric 5",  "type": "prepreg",    "thickness_mm": 0.1,    "material": "FR4", "epsilon_r": 4.3, "loss_tangent": 0.02},
+        {"name": "B.Cu",          "type": "copper",     "thickness_mm": 0.035,  "role": "signal"},
+        {"name": "B.Mask",        "type": "soldermask", "thickness_mm": 0.01,   "role": "mask",    "color": "Green"},
+        {"name": "B.Paste",       "type": "paste",      "thickness_mm": 0.0,    "role": "paste"},
+        {"name": "B.SilkS",       "type": "silk",       "thickness_mm": 0.0,    "role": "silk"}
+      ],
+      "target_impedance": {
+        "single_ended_50ohm_track_mm": 0.15,
+        "diff_100ohm_track_mm": 0.105,
+        "diff_100ohm_gap_mm": 0.15,
+        "_caveat": "Outer microstrip referenced to In1/In4 (ground/power). Internal stripline impedance differs — recompute per-layer with the fab's actual stack."
+      }
+    }
+  },
+
+  "auto_select": {
+    "_comment": "Heuristic rules the architect / set_design_rules tool uses to pick a stack-up automatically when the user doesn't name one. Order matters — first match wins. Pure data; the tool just iterates these rules and reads the named profile from `profiles`.",
+    "rules": [
+      {"if": {"has_high_speed_nets": true, "min_layers": 4}, "use": "four_layer_1mm6"},
+      {"if": {"has_diff_pair": true},                          "use": "four_layer_1mm6"},
+      {"if": {"component_count_gte": 80},                      "use": "four_layer_1mm6"},
+      {"default": true,                                         "use": "two_layer_1mm6"}
+    ]
+  }
+}

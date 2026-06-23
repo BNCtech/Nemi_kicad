@@ -1,0 +1,22 @@
+{
+  "geometry": {
+    "R16_cross_block_wires": 0,
+    "R2_body_crossings": 1
+  },
+  "netlist_tier1": "db54c3d6659d1bff",
+  "netlist_tier2": "e752994fdc46419b",
+  "render": {
+    "components_emitted": 9,
+    "junctions_emitted": 2,
+    "labels_emitted": 7,
+    "nc_flags_emitted": 0,
+    "nets": 7,
+    "power_ports_emitted": 9,
+    "wires_emitted": 40
+  },
+  "validation": {
+    "codes": [],
+    "error_count": 0,
+    "warning_count": 0
+  }
+}

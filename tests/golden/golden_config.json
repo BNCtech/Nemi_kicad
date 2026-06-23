@@ -1,0 +1,41 @@
+{
+  "_about": "Policy for the golden regression harness. Every threshold, param, and rule lives HERE — run_golden.py contains no hardcoded numbers or circuit-specific logic. Tune here, not in Python.",
+
+  "gate": {
+    "_about": "How invariant violations affect the exit code. 'regression' (default): the exit-code gate is BASELINE DRIFT only — a known-good snapshot is whatever the engine produces today, and any invariant violation already present in the committed baseline is reported as a KNOWN quality issue (loudly, at --update time) rather than blocking the net. 'strict': ANY invariant violation also fails the gate (use once the engine produces zero violations). This keeps the safety net seedable + green today while never silently blessing a defect.",
+    "mode": "regression"
+  },
+
+  "universal_invariants": {
+    "_about": "Quality bar applied to EVERY golden fixture (a golden fixture is, by definition, a known-good circuit). Under gate.mode='regression' a violation here is a reported KNOWN issue; under 'strict' it fails the gate. A fixture may relax/override any of these via its own optional 'expected' block (used by intentional-defect fixtures).",
+    "max_errors": 0,
+    "max_r2_body_crossings": 0,
+    "max_r16_cross_block_wires": 0,
+    "codes_absent": ["NET_DUPLICATE", "PIN_IN_MULTIPLE_NETS", "CROSS_BLOCK_NET_COLLISION", "PIN_NOT_ON_SYMBOL"]
+  },
+
+  "selector_params": {
+    "_about": "Geometry-selector kwargs. Mirrors config/lint_rules.json defaults; kept here so the harness is self-contained and tunable without touching the lint engine.",
+    "r2_margin_mm": 0.5
+  },
+
+  "canonicalize": {
+    "_about": "Keys dropped (at any nesting depth) from the render-stats snapshot before hashing/diffing — they carry absolute paths / per-run values that are not connectivity. Anything matching abs_path_regex is also dropped.",
+    "drop_keys": ["path", "project", "child_paths", "children_paths", "preview_svgs", "decision_log", "route", "repairs"],
+    "abs_path_regex": "^[A-Za-z]:[\\\\/]|^/"
+  },
+
+  "netlist_hash": {
+    "_about": "Two-tier connectivity fingerprint. Tier 1 = post-normalize IR net->pin adjacency (pure-python, always). Tier 2 = `kicad-cli sch export netlist` of the rendered file (the ground truth KiCad sees), enabled only when kicad-cli is discoverable on PATH.",
+    "tier1_enabled": true,
+    "tier2_kicad_cli_enabled": true,
+    "tier2_strip_patterns": [
+      "\\(tstamps[^)]*\\)",
+      "\\(tstamp[^)]*\\)",
+      "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+      "\\(date[^)]*\\)",
+      "\\(source[^)]*\\)",
+      "\\(tool[^)]*\\)"
+    ]
+  }
+}

@@ -235,9 +235,25 @@ class SchematicDocument:
         hide_ref = is_power
         hide_val = hide_value or is_power
 
+<<<<<<< Updated upstream
         if not footprint:
             from .footprint_resolver import resolve_footprint
             footprint = resolve_footprint(resolved_lib_id, value, reference)
+=======
+        # Power-port instances should terminate on a real pin tip or wire
+        # endpoint for KiCad's same-name net merge to fire. We do a
+        # best-effort snap here — within snap_search_mm, snap silently.
+        # Beyond that, place as-is; the post-apply normalize pass will
+        # snap/delete once all ops in this turn are applied (caps and
+        # wires that would have been the missing intermediate endpoints
+        # may not exist yet at this call site).
+        if is_power:
+            snap_cfg = _load_config("conventions").get("chat_snap", {})
+            snap_tol = float(snap_cfg.get("snap_search_mm", 5.08))
+            target = self._nearest_pin_or_wire_endpoint(x, y, snap_tol)
+            if target is not None:
+                x, y = target
+>>>>>>> Stashed changes
 
         self._snapshot()
         sym = [
@@ -727,11 +743,61 @@ class SchematicDocument:
         self.tree.append(node)
         return {"ok": True, "message": f"added wire with {len(points)} points"}
 
+    def _nearest_pin_or_wire_endpoint(
+        self, x: float, y: float, max_mm: float
+    ) -> Optional[Tuple[float, float]]:
+        """Return the world (x,y) of the closest pin tip or wire endpoint
+        within max_mm of (x,y). None if nothing in range.
+
+        Used to silently snap chat-emitted labels and power-port anchors
+        onto real connection points so KiCad's net-merge by coordinate
+        actually fires. Without this, every label Claude places "near" a
+        pin renders as `(no net)` in eeschema."""
+        candidates: List[Tuple[float, float]] = list(self._all_world_pin_positions())
+        for child in self.tree[1:]:
+            if not (isinstance(child, list) and _head(child) == "wire"):
+                continue
+            for sub in child[1:]:
+                if isinstance(sub, list) and _head(sub) == "pts":
+                    for xy in sub[1:]:
+                        if (isinstance(xy, list) and _head(xy) == "xy"
+                                and len(xy) >= 3):
+                            candidates.append((float(xy[1]), float(xy[2])))
+        best: Optional[Tuple[float, float]] = None
+        best_d2 = (max_mm + 0.01) ** 2
+        for (cx, cy) in candidates:
+            d2 = (cx - x) ** 2 + (cy - y) ** 2
+            if d2 < best_d2:
+                best_d2 = d2
+                best = (cx, cy)
+        return best
+
     def add_label(self, name: str, x: float, y: float, kind: str = "label") -> Dict[str, Any]:
         if kind not in ("label", "global_label", "hierarchical_label"):
             return {"ok": False, "message": f"unknown label kind: {kind}"}
+<<<<<<< Updated upstream
         if self._label_exists(name, x, y, kind):
             return {"ok": True, "message": f"{kind} '{name}' @ ({x},{y}) already exists; skipped duplicate"}
+=======
+        # Best-effort snap to nearest pin tip / wire endpoint so port-name
+        # merging fires. If nothing is within snap_search_mm at this call
+        # site, place as-is — the post-apply normalize pass will snap or
+        # delete once every op in this turn is applied (the connecting
+        # wire/cap may be queued for a later op in the same batch).
+        snap_cfg = _load_config("conventions").get("chat_snap", {})
+        snap_tol = float(snap_cfg.get("snap_search_mm", 5.08))
+        snap_note = ""
+        target = self._nearest_pin_or_wire_endpoint(x, y, snap_tol)
+        if target is not None:
+            d = ((target[0] - x) ** 2 + (target[1] - y) ** 2) ** 0.5
+            if d > 0.01:
+                snap_note = (f" (snapped from ({x:.2f},{y:.2f}) to "
+                             f"({target[0]:.2f},{target[1]:.2f}); "
+                             f"Δ={d:.2f}mm)")
+            x, y = target
+        if self._label_exists(name, x, y, kind):
+            return {"ok": True, "message": f"{kind} '{name}' @ ({x},{y}) already exists; skipped duplicate{snap_note}"}
+>>>>>>> Stashed changes
         self._snapshot()
         node = [
             _sym(kind),
@@ -746,7 +812,7 @@ class SchematicDocument:
             _gen_uuid_node(),
         ]
         self.tree.append(node)
-        return {"ok": True, "message": f"added {kind} '{name}' @ ({x},{y})"}
+        return {"ok": True, "message": f"added {kind} '{name}' @ ({x},{y}){snap_note}"}
 
     def add_junction(self, x: float, y: float) -> Dict[str, Any]:
         if self._junction_exists(x, y):

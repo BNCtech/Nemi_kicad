@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "enabled": true,
+  "block_id": "ina240_vs_decoupling",
+  "_doc": "Verified Vs supply decoupling for an INA240 current-sense amp (fires on ANY board that uses one — power meter, motor driver, charger, BMS...). Adds the datasheet-required 100nF local decoupling from the amp's V+ pin to GND, joining the anchor's EXISTING V+/GND rails (never a new rail, never a short). GENERAL mechanism: config only, any anchor part can get a verified block (config/verified_blocks/*.json), zero code. The shunt, the sense wiring, and OUT/REF stay with the architect — they live in the app-specific high-current power path, so V1 deliberately does NOT auto-inject them (additive-only completion can't do series insertion safely). Richer reference topologies (diff/CM input filter, multi-part blocks with namespaced internal nodes) are supported by the engine and proven in tests; author them per-part with datasheet review.",
+  "_real_pinout_note": "INA240A1 KiCad pins: '+' (IN+, pin8), '-' (IN-, pin1), 'V+' (supply, pin6), 'GND' (pins 2/4), 'REF1'/'REF2', OUT is pin 5 with an EMPTY name -> referenced only by number, never wired here.",
+
+  "anchor": {
+    "lib_id_patterns": ["*:INA240*"],
+    "value_patterns": [],
+    "anchor_role": "anchor"
+  },
+
+  "support_parts": [
+    { "role": "vs_decap", "ref_prefix": "C", "lib_id": "Device:C", "value": "100n" }
+  ],
+
+  "internal_nets": [],
+
+  "power_attach": [
+    { "support": "vs_decap.1", "follow_anchor_pin": "V+", "fallback_rail_pattern": "+5V|+3V3|VDD|VCC" },
+    { "support": "vs_decap.2", "follow_anchor_pin": "GND", "fallback_rail_role": "GND" }
+  ],
+
+  "boundary_pins": [
+    { "anchor_pin": "5",    "role_hint": "OUT -> MCU ADC (unnamed pin, by number)" },
+    { "anchor_pin": "REF1", "role_hint": "reference bias" },
+    { "anchor_pin": "REF2", "role_hint": "reference bias" },
+    { "anchor_pin": "+",    "role_hint": "IN+ sense (architect wires to shunt)" },
+    { "anchor_pin": "-",    "role_hint": "IN- sense (architect wires to shunt)" }
+  ],
+
+  "skip_if": {
+    "_doc": "No reliable proximity-based dedup for a rail decoupling cap (a shared rail already carries many caps), so V1 ships with no skip and relies on the default-OFF gate. A future refinement can dedup by placement proximity.",
+    "any_part_bridges": []
+  }
+}

@@ -1,12 +1,17 @@
 import json
 import re
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .claude_client import ClaudeClient
+from ._config_loader import load as _load_config
 from .rules import METHODOLOGY, render_for_prompt
 from .schematic_extractor import SchematicExtractor, format_dump_with_context
+<<<<<<< Updated upstream
 from .schematic_modifier import SchematicDocument, apply_operation
+=======
+from .schematic_modifier import SchematicDocument, _head, _to_str, apply_operation
+>>>>>>> Stashed changes
 
 
 # Compact connectivity-only retry. Fired by server._apply_pending when the
@@ -42,6 +47,51 @@ The user may describe ANY electronic circuit in natural language. Your job is
 to understand the circuit, automatically select correct KiCad symbols, and
 generate a professional, electrically correct schematic.
 
+================================================================
+TOP PRIORITY — READ BEFORE EMITTING ANY OPS
+================================================================
+For ANY schematic with >= 2 components, your reply MUST contain BOTH:
+  (1) `add_component` ops for every part, AND
+  (2) `add_wire` ops connecting every SIGNAL net (any net that is not a
+      power rail), AND
+  (3) `add_label` ops at pin tips for shared signal nets that need port-
+      name merging.
+
+A reply with only `add_component` ops and zero `add_wire` / `add_label`
+ops is ELECTRICALLY DISCONNECTED — every pin floats, the schematic fails
+ERC, and the file is useless. The dispatcher will flag your reply as
+broken. NEVER emit a reply that only adds components.
+
+POWER-RAIL nets (+, GND, VCC, VDD, VSS, VBUS, VBAT, AGND, DGND, AVDD,
++3V3, +5V, +12V, +24V, …) may use power-port symbols at pin tips +
+same-name port merging (no wire needed BETWEEN ports of the same rail).
+But every other net — TX/RX/SDA/SCL/MOSI/MISO/SCK/CS/RESET/EN/BOOT0/
+PA0..PG15/D+/D-/IRQ/INT/CLK/timing/feedback/output/input/anything else
+— REQUIRES `add_wire` between the EXACT pin endpoint coordinates from
+the PIN ENDPOINTS section of the dump.
+
+Concrete example — NE555 astable with R1, R2, C2 timing network:
+  // place parts
+  {{"op":"add_component","lib_id":"Timer:NE555","reference":"U1",...,"x":120,"y":100}}
+  {{"op":"add_component","lib_id":"Device:R","reference":"R1",...,"x":90,"y":80}}
+  {{"op":"add_component","lib_id":"Device:R","reference":"R2",...,"x":90,"y":95}}
+  {{"op":"add_component","lib_id":"Device:C","reference":"C2",...,"x":90,"y":110}}
+  // wire pin-to-pin (THIS IS MANDATORY — without it nothing connects)
+  {{"op":"add_wire","points":[[U1.pin7.x,U1.pin7.y],[R1.bottom.x,R1.bottom.y]]}}
+  {{"op":"add_wire","points":[[R1.bottom.x,R1.bottom.y],[R2.top.x,R2.top.y]]}}
+  {{"op":"add_wire","points":[[R2.top.x,R2.top.y],[U1.pin6.x,U1.pin6.y]]}}
+  {{"op":"add_wire","points":[[U1.pin2.x,U1.pin2.y],[U1.pin6.x,U1.pin6.y]]}}
+  {{"op":"add_wire","points":[[R2.bottom.x,R2.bottom.y],[C2.top.x,C2.top.y]]}}
+  // junction at the 3-wire convergence (pin6 / pin2 / R2-top all meet)
+  {{"op":"add_junction","x":U1.pin6.x,"y":U1.pin6.y}}
+  // power rail — port-merge is OK
+  {{"op":"add_component","lib_id":"power:+9V",...,"x":U1.pin8.x,"y":U1.pin8.y-12}}
+  {{"op":"add_wire","points":[[U1.pin8.x,U1.pin8.y],[U1.pin8.x,U1.pin8.y-12]]}}
+
+The wire ops above are NOT optional. Skipping them = broken schematic.
+================================================================
+
+
 FINAL GOAL: produce production-quality KiCad 8 schematics that are electrically
 valid, ERC-clean, datasheet-compliant, and readable — from a natural-language
 prompt. Think like a hardware engineer; correct incomplete user prompts
@@ -72,6 +122,22 @@ MANDATORY DIRECTIVES (apply in order, every turn):
      no dangling wires, no unconnected power pins. Verify SOURCE -> LOAD -> GND
      for every functional block. Use power-port symbols (power:GND, power:+3V3)
      instead of long wires across the page.
+
+  3a. WIRES vs PORT-MERGING — CRITICAL SCOPING RULE.
+      POWER-RAIL nets (anything starting with +, GND, VCC, VDD, VSS, VBUS,
+      VBAT, AGND, DGND, AVDD, +3V3, +5V, +12V, ...) → use SAME-NAME PORT
+      MERGING. Drop a power-port symbol AT each pin tip on that rail; do
+      not emit a horizontal/vertical wire between them.
+      EVERY OTHER NET (signals — TX/RX/SDA/SCL/MOSI/MISO/SCK/CS/RESET/EN/
+      BOOT0/PA0..PG15/D+/D-/IRQ/INT/CLK/DATA/timing/feedback/anything not
+      in the power list) → emit `add_wire` between EXACT pin endpoint
+      coordinates from the dump. The wire MUST start at one pin tip and
+      end at another pin tip (or at a label anchor that sits on a pin
+      tip). DO NOT rely on label-merging for signal nets unless the same
+      label name appears at BOTH ends ON TOP OF the actual pin tip.
+      Rule of thumb: count your ops. If `add_wire_count == 0` for a
+      schematic with >= 3 components and at least one non-power net, you
+      did it wrong — re-emit with wires for every signal.
 
   4. POWER — connect all VDD/VCC pins, connect all GND/VSS pins, add bypass
      caps adjacent to each IC power pin (visually, within ~5 mm), add bulk cap
@@ -313,6 +379,11 @@ ROUTING — read this whenever you emit add_wire or add_junction:
   to a pin, the wire MUST terminate at one of those exact coordinates. Guessing
   pin positions from the component anchor is wrong by ~2-5 mm and produces
   electrically disconnected nets that still LOOK connected on screen.
+- The SAME exact coordinates MUST be used for add_label and for power-port
+  add_component(lib_id=power:*) — labels and power ports placed even 1-2 mm
+  off a pin tip are auto-rejected by the dispatcher (no silent dangling
+  labels). Copy the coordinate straight from PIN ENDPOINTS — do not round
+  or shift it.
 - Before emitting add_wire, scan the existing wires in the dump. If a wire
   already runs between the two points (or on the same axis with overlap),
   do NOT emit a duplicate — that produces GEOM_WIRE_OVERLAP defects.
@@ -368,6 +439,7 @@ DESIGN PRINCIPLES & RULES (use these to judge what to add/change):
 
 
 from .json_utils import extract_json as _extract_json  # re-exported for server.py
+<<<<<<< Updated upstream
 
 
 _CONNECTIVITY_OP_NAMES = frozenset({"add_wire", "add_label", "add_junction"})
@@ -461,12 +533,207 @@ def run_connectivity_retry(
               f"{len(ops) - len(cleaned)} stray add_component op(s)",
               flush=True)
     return cleaned or None
+=======
+>>>>>>> Stashed changes
 
 
 def _format_op(op: Dict[str, Any]) -> str:
     name = op.get("op") or op.get("type") or "?"
     args = ", ".join(f"{k}={v!r}" for k, v in op.items() if k not in ("op", "type"))
     return f"{name}({args})"
+
+
+def _post_apply_normalize(doc: SchematicDocument) -> List[Dict[str, Any]]:
+    """Universal geometry pass — runs after every chat apply on EVERY
+    circuit. Three idempotent passes:
+      1. dedup_power_ports — collapse stacked power-port instances at
+         the same anchor (Claude often re-emits +3V3/GND on every column).
+      2. snap_dangling_labels — for labels whose anchor isn't on a pin
+         tip / wire endpoint, snap to nearest within snap_search_mm.
+         Beyond that, delete the label (it's truly dangling).
+      3. infer_junctions — add (junction ...) at every point where 3+
+         wire endpoints meet, so KiCad doesn't silently split the net.
+
+    All thresholds from conventions.chat_post_apply + chat_snap.
+    No per-circuit logic — purely geometry + graph.
+    """
+    cfg = _load_config("conventions").get("chat_post_apply") or {}
+    if not cfg.get("enabled", True):
+        return []
+    snap_cfg = _load_config("conventions").get("chat_snap") or {}
+    dedup_mm = float(snap_cfg.get("power_port_dedup_mm", 0.635))
+    snap_search_mm = float(snap_cfg.get("snap_search_mm", 5.08))
+    out: List[Dict[str, Any]] = []
+    dirty = False
+
+    # Pass 1 — dedup stacked power ports
+    if cfg.get("dedup_power_ports", True):
+        n = _dedup_power_ports(doc, dedup_mm)
+        if n:
+            dirty = True
+            out.append({"op": "(normalize:dedup_power_ports)", "ok": True,
+                        "message": f"removed {n} stacked power-port duplicate(s)"})
+
+    # Pass 2 — snap dangling labels (or delete if unreachable)
+    if cfg.get("snap_labels", True):
+        snapped, deleted = _snap_or_delete_dangling_labels(
+            doc, snap_search_mm,
+            delete=bool(cfg.get("delete_dangling_labels", True)),
+        )
+        if snapped:
+            dirty = True
+            out.append({"op": "(normalize:snap_labels)", "ok": True,
+                        "message": f"snapped {snapped} dangling label(s) to pin/wire endpoints"})
+        if deleted:
+            dirty = True
+            out.append({"op": "(normalize:delete_dangling_labels)", "ok": True,
+                        "message": f"deleted {deleted} unreachable dangling label(s)"})
+
+    # Pass 3 — add junctions at 3+ wire convergences
+    if cfg.get("infer_junctions", True):
+        n = _infer_missing_junctions(doc)
+        if n:
+            dirty = True
+            out.append({"op": "(normalize:infer_junctions)", "ok": True,
+                        "message": f"added {n} missing junction(s) at wire convergences"})
+
+    if dirty:
+        out.append({"op": "(normalize)", "ok": True,
+                    "message": "post-apply normalize complete"})
+    return out
+
+
+def _dedup_power_ports(doc: SchematicDocument, tol_mm: float) -> int:
+    """Same lib_id at same (x,y) within tol → keep one, delete the rest."""
+    seen: Dict[Tuple, list] = {}
+    to_remove: List[list] = []
+    for child in doc.tree[1:]:
+        if not (isinstance(child, list) and _head(child) == "symbol"):
+            continue
+        lib_id = ""
+        at_xy = None
+        for sub in child[1:]:
+            if isinstance(sub, list) and _head(sub) == "lib_id" and len(sub) > 1:
+                lib_id = _to_str(sub[1])
+            elif isinstance(sub, list) and _head(sub) == "at" and len(sub) >= 3:
+                at_xy = (float(sub[1]), float(sub[2]))
+        if not lib_id.startswith("power:") or at_xy is None:
+            continue
+        key = (lib_id, round(at_xy[0] / tol_mm), round(at_xy[1] / tol_mm))
+        if key in seen:
+            to_remove.append(child)
+        else:
+            seen[key] = child
+    for n in to_remove:
+        try:
+            doc.tree.remove(n)
+        except ValueError:
+            pass
+    return len(to_remove)
+
+
+def _snap_or_delete_dangling_labels(
+    doc: SchematicDocument, snap_search_mm: float, delete: bool,
+) -> Tuple[int, int]:
+    """Move every label whose anchor isn't on a pin tip / wire endpoint
+    to the nearest valid coord. Beyond snap_search_mm, delete it.
+
+    Returns (snapped_count, deleted_count)."""
+    pin_tips = list(doc._all_world_pin_positions())
+    wire_endpts: List[Tuple[float, float]] = []
+    for child in doc.tree[1:]:
+        if not (isinstance(child, list) and _head(child) == "wire"):
+            continue
+        for sub in child[1:]:
+            if isinstance(sub, list) and _head(sub) == "pts":
+                for xy in sub[1:]:
+                    if (isinstance(xy, list) and _head(xy) == "xy"
+                            and len(xy) >= 3):
+                        wire_endpts.append((float(xy[1]), float(xy[2])))
+    anchors = pin_tips + wire_endpts
+    snapped = 0
+    deleted = 0
+    to_remove: List[list] = []
+    for child in doc.tree[1:]:
+        if not isinstance(child, list):
+            continue
+        kind = _head(child)
+        if kind not in ("label", "global_label", "hierarchical_label"):
+            continue
+        at_node = None
+        at_xy: Optional[Tuple[float, float]] = None
+        for sub in child[1:]:
+            if isinstance(sub, list) and _head(sub) == "at" and len(sub) >= 3:
+                at_node = sub
+                at_xy = (float(sub[1]), float(sub[2]))
+                break
+        if at_xy is None or at_node is None:
+            continue
+        # Already on an anchor — leave alone
+        on_anchor = any(
+            abs(ax - at_xy[0]) <= 0.05 and abs(ay - at_xy[1]) <= 0.05
+            for (ax, ay) in anchors
+        )
+        if on_anchor:
+            continue
+        # Find nearest
+        best = None
+        best_d2 = (snap_search_mm + 0.01) ** 2
+        for (ax, ay) in anchors:
+            d2 = (ax - at_xy[0]) ** 2 + (ay - at_xy[1]) ** 2
+            if d2 < best_d2:
+                best_d2 = d2
+                best = (ax, ay)
+        if best is not None:
+            at_node[1] = best[0]
+            at_node[2] = best[1]
+            snapped += 1
+        elif delete:
+            to_remove.append(child)
+            deleted += 1
+    for n in to_remove:
+        try:
+            doc.tree.remove(n)
+        except ValueError:
+            pass
+    return snapped, deleted
+
+
+def _infer_missing_junctions(doc: SchematicDocument) -> int:
+    """Add (junction …) at every point where 3+ wire endpoints meet,
+    OR where a wire endpoint meets a pin tip plus at least one other
+    wire endpoint. KiCad treats a 4-way wire crossing without a junction
+    as 'crossing but not connected' (KLC CON_003). Universal."""
+    # Tally endpoint multiplicity per snapped coord
+    snap = lambda v: round(v / 0.01) * 0.01
+    counts: Dict[Tuple[float, float], int] = {}
+    existing_junctions: set = set()
+    for child in doc.tree[1:]:
+        if not isinstance(child, list):
+            continue
+        tag = _head(child)
+        if tag == "wire":
+            for sub in child[1:]:
+                if isinstance(sub, list) and _head(sub) == "pts":
+                    for xy in sub[1:]:
+                        if (isinstance(xy, list) and _head(xy) == "xy"
+                                and len(xy) >= 3):
+                            k = (snap(float(xy[1])), snap(float(xy[2])))
+                            counts[k] = counts.get(k, 0) + 1
+        elif tag == "junction":
+            for sub in child[1:]:
+                if isinstance(sub, list) and _head(sub) == "at" and len(sub) >= 3:
+                    existing_junctions.add(
+                        (snap(float(sub[1])), snap(float(sub[2])))
+                    )
+                    break
+    added = 0
+    for (x, y), cnt in counts.items():
+        if cnt >= 3 and (x, y) not in existing_junctions:
+            r = doc.add_junction(x, y)
+            if r.get("ok"):
+                added += 1
+    return added
 
 
 class ChatSession:
@@ -515,12 +782,18 @@ class ChatSession:
         framed = f"=== CURRENT SCHEMATIC ===\n{dump}\n\n=== USER ===\n{user_msg}"
         self.history.append({"role": "user", "content": framed})
         messages = self.history[-12:]
+<<<<<<< Updated upstream
         sys_arg = (
             [{"type": "text", "text": CHAT_SYSTEM_PROMPT,
               "cache_control": {"type": "ephemeral"}}]
             if self.client.cfg.enable_cache
             else CHAT_SYSTEM_PROMPT
         )
+=======
+        # Stream required: max_tokens of 16k+ exceeds the SDK's non-streaming
+        # 10-minute ceiling. get_final_message() returns the same Message we'd
+        # have gotten from .create(), so the rest of this function is unchanged.
+>>>>>>> Stashed changes
         with self.client.client.messages.stream(
             model=self.client.model,
             max_tokens=self.client.cfg.max_tokens,
@@ -530,6 +803,7 @@ class ChatSession:
             messages=messages,
         ) as stream:
             resp = stream.get_final_message()
+<<<<<<< Updated upstream
 
         truncated = getattr(resp, "stop_reason", None) == "max_tokens"
         parsed_msg = ""
@@ -555,6 +829,11 @@ class ChatSession:
             "truncated": truncated,
             "raw": raw_text,
         }
+=======
+        text = resp.content[0].text
+        self.history.append({"role": "assistant", "content": text})
+        return text
+>>>>>>> Stashed changes
 
     def turn(self, user_msg: str) -> Dict[str, Any]:
         return self._ask(user_msg)
@@ -563,8 +842,44 @@ class ChatSession:
         results = []
         for op in ops:
             results.append({"op": _format_op(op), **apply_operation(self.doc, op)})
+
+        # Post-apply normalize — universal geometry pass that runs on every
+        # chat turn regardless of circuit. Cleans up the 3 systematic
+        # failure modes Claude leaves behind:
+        #   (a) duplicate power-port stacks at the same anchor
+        #   (b) dangling labels that didn't snap during add_label
+        #   (c) missing junctions at 3+ wire convergences
+        try:
+            normalize_results = _post_apply_normalize(self.doc)
+            if normalize_results:
+                results.extend(normalize_results)
+        except Exception as e:
+            results.append({"op": "(post-apply-normalize)", "ok": False,
+                            "message": f"normalize raised {type(e).__name__}: {e}"})
+
         if any(r.get("ok") for r in results):
             self.doc.save()
+
+        # Orphan guard: ≥2 components added in one turn with zero connectivity
+        # ops produces a sheet of electrically isolated pins (LM317 failure mode
+        # — 26 symbols, 0 wires, 0 labels). The chat prompt instructs Claude to
+        # emit wires alongside components; when it doesn't, surface it so the
+        # caller can re-prompt instead of shipping a broken render.
+        op_kinds = [(op.get("op") or op.get("type")) for op in ops]
+        comp_adds = sum(1 for k, r in zip(op_kinds, results)
+                        if k == "add_component" and r.get("ok"))
+        connect_adds = sum(1 for k, r in zip(op_kinds, results)
+                           if k in ("add_wire", "add_label", "add_junction") and r.get("ok"))
+        if comp_adds >= 2 and connect_adds == 0:
+            results.append({
+                "op": "(orphan-check)",
+                "ok": False,
+                "message": (
+                    f"warning: {comp_adds} components added with 0 connectivity "
+                    "ops — every pin is electrically isolated. Re-prompt with "
+                    "explicit net intent (e.g. 'connect VIN of U1 to +12V')."
+                ),
+            })
         return results
 
     def normalize_connectivity(self) -> Dict[str, Any]:

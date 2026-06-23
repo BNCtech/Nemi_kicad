@@ -1,0 +1,226 @@
+{
+  "_about": "Declarative ERC violation taxonomy + Intent Confidence Layer. This is the SINGLE source of truth that routes every kicad-cli ERC violation into one of four tiers before any fix is attempted: safe_auto (deterministic Python may apply it), needs_reasoning (never auto-fixed; surface root cause + candidate fixes to the LLM/human), forbidden (a dangerous class the AI must NEVER touch even if a candidate exists), or ignore (handled elsewhere / benign — emit nothing). Keys are the EXACT KiCad ERC settings-key strings emitted by `kicad-cli sch erc` (from eeschema/erc/erc_item.cpp), NOT custom names. tools/erc_autofix.py reads this; no classification literals live in Python.",
+  "version": 1,
+  "enabled": true,
+  "_enabled_note": "When false (or this file missing/unparseable), erc_autofix falls straight through to the legacy per-type dispatch — behaviour is byte-stable. When true, the taxonomy router runs FIRST. Three executor kinds: executor=\"legacy\" passes through the original per-type strategies (unconnected_wire_endpoint, duplicate_reference, power_pin_not_driven) unchanged; executor=\"verb\" (2026-06-09: pin_not_connected, endpoint_off_grid, wire_dangling) builds concrete apply_ops from requires_verb + the ERC coords and APPLIES them (confidence-gated + regression-guarded) — gated globally by layout_config.json:erc_autofix.verb_executors; executor=\"diagnostic\" (or anything else) emits a structured root-cause + candidate-fix note without touching the schematic. Flip a single type back to \"diagnostic\" to stop auto-applying just that one.",
+
+  "default_fix_class": "needs_reasoning",
+  "_default_note": "Any KiCad ERC settings-key not listed in `classes` and not in `ignore_types` is treated as needs_reasoning — i.e. NEVER auto-fixed. Safe by construction: an unknown violation can only ever be escalated, never auto-applied.",
+
+  "ignore_types": [
+    "isolated_pin_label",
+    "lib_symbol_issues",
+    "lib_symbol_mismatch",
+    "footprint_link_issues",
+    "footprint_filter",
+    "unresolved_variable",
+    "undefined_netclass",
+    "field_name_whitespace",
+    "simulation_model_issue",
+    "unannotated",
+    "extra_units",
+    "missing_unit",
+    "similar_labels",
+    "similar_power",
+    "similar_label_and_power",
+    "single_global_label",
+    "stacked_pin_name",
+    "duplicate_sheet_names",
+    "no_connect_dangling",
+    "four_way_junction"
+  ],
+  "_ignore_note": "Types the engine already handles correctly (rail labelling, annotation), library/style hygiene nits, or things outside the schematic-repair scope. isolated_pin_label stays here to preserve the current silent-skip behaviour (the engine labels rails correctly). Move a type out of this list into `classes` to start surfacing it.",
+
+  "classes": {
+    "unconnected_wire_endpoint": {
+      "fix_class": "safe_auto",
+      "user_name": "Unconnected wire endpoint",
+      "strategy": "delete_wire_stub",
+      "executor": "legacy",
+      "confidence_required": false,
+      "_note": "Existing strategy in erc_autofix._propose_fixes. executor=legacy => router passes through unchanged (byte-stable)."
+    },
+    "duplicate_reference": {
+      "fix_class": "safe_auto",
+      "user_name": "Duplicate reference designator",
+      "strategy": "rename_duplicate",
+      "executor": "legacy",
+      "confidence_required": false,
+      "_note": "Existing strategy. executor=legacy => byte-stable pass-through."
+    },
+    "power_pin_not_driven": {
+      "fix_class": "safe_auto",
+      "user_name": "Power input not driven",
+      "strategy": "trace_then_flag",
+      "executor": "legacy",
+      "confidence_required": false,
+      "_note": "Existing strategy already runs its OWN trace_net-based confidence (already_driven => do nothing; missing_wire => draw wire; no_driver => PWR_FLAG). executor=legacy => byte-stable pass-through; do NOT double-gate with the generic confidence layer."
+    },
+
+    "wire_dangling": {
+      "fix_class": "safe_auto",
+      "user_name": "Wire not connected to anything",
+      "strategy": "delete_dangling_wire",
+      "executor": "verb",
+      "confidence_required": false,
+      "requires_verb": "delete_wire",
+      "_phase": "ACTIVE (2026-06-09): executor=verb routes this through the existing apply_ops delete_wire verb (tight delete_wire_tol_mm). Regression-guarded. Set executor back to 'diagnostic' to disable.",
+      "candidate_fixes": [
+        "Delete the dangling wire segment, OR extend it so its free end lands on a real pin/junction."
+      ]
+    },
+    "endpoint_off_grid": {
+      "fix_class": "safe_auto",
+      "user_name": "Pin or wire end off the connection grid",
+      "strategy": "snap_to_grid",
+      "executor": "verb",
+      "confidence_required": true,
+      "confidence_threshold": 0.8,
+      "requires_verb": "snap_endpoint",
+      "_phase": "ACTIVE (2026-06-09): executor=verb routes this through the apply_ops snap_endpoint verb (wire-ends only; a symbol pin off grid returns no-op and stays for manual review). Confidence-gated + regression-guarded. Set executor back to 'diagnostic' to disable.",
+      "candidate_fixes": [
+        "Snap the off-grid endpoint to the nearest 1.27 mm grid point so the wire/pin actually connects."
+      ]
+    },
+    "pin_not_connected": {
+      "fix_class": "safe_auto",
+      "user_name": "Pin not connected",
+      "strategy": "no_connect_flag",
+      "executor": "verb",
+      "confidence_required": true,
+      "confidence_threshold": 0.8,
+      "requires_verb": "add_no_connect",
+      "_phase": "ACTIVE (2026-06-09): executor=verb routes this through the apply_ops add_no_connect verb. Intent confidence: a genuinely-unused pin (no nearby wire/label) => HIGH => No-Connect flag applied; a pin with a wire/label a grid away => LOW => demoted to needs_reasoning (probable missing wire-snap, never auto-capped). Regression-guarded. Set executor back to 'diagnostic' to disable.",
+      "candidate_fixes": [
+        "HIGH confidence (no nearby net): add a No-Connect (X) flag — the pin is intentionally unused.",
+        "LOW confidence (wire/label one grid away): likely a missing wire-snap — extend the wire onto the pin instead of flagging it."
+      ]
+    },
+
+    "pin_not_driven": {
+      "fix_class": "needs_reasoning",
+      "user_name": "Input pin not driven by any output pins",
+      "candidate_fixes": [
+        "Add a driver (output / bidirectional / tri-state) onto this net.",
+        "If the input is meant to be tied to a level, add a pull-up or pull-down to the correct rail (design-dependent — do NOT guess the rail).",
+        "If the pin is genuinely unused, add a No-Connect flag."
+      ]
+    },
+    "different_unit_net": {
+      "fix_class": "needs_reasoning",
+      "user_name": "Shared multi-unit pin assigned to different nets",
+      "candidate_fixes": [
+        "A unit-0 (shared) pin of a multi-unit symbol is on two different nets. Decide the single correct net and remove the other connection.",
+        "Check the IR: the shared power/IO pin must appear in exactly one net's pin list."
+      ]
+    },
+    "multiple_net_names": {
+      "fix_class": "needs_reasoning",
+      "user_name": "More than one name given to this net/bus",
+      "candidate_fixes": [
+        "Two distinct labels collide on one physical net. Pick ONE canonical name (usually the power-rail name like +3V3/GND, or the most descriptive signal) and rename the others.",
+        "Verify the two labels are actually meant to be the same net before merging — they may indicate an accidental short."
+      ]
+    },
+    "duplicate_pins": {
+      "fix_class": "needs_reasoning",
+      "user_name": "Duplicate pins with different nets",
+      "candidate_fixes": [
+        "The symbol has duplicate pin numbers wired to different nets — a library symbol defect or a wrong net assignment. Fix the symbol pinout or the net membership."
+      ]
+    },
+    "ground_pin_not_ground": {
+      "fix_class": "needs_reasoning",
+      "user_name": "Ground pin not connected to a ground net",
+      "candidate_fixes": [
+        "A pin typed as ground is on a non-ground net. Route it to GND, OR correct the pin's electrical type in the library if mislabelled."
+      ]
+    },
+    "missing_power_pin": {
+      "fix_class": "needs_reasoning",
+      "user_name": "Symbol power-input pin not placed",
+      "candidate_fixes": [
+        "A multi-unit IC has a power-input pin (VCC/AVCC/VDDIO) that the IR never placed. Add the missing pin to the appropriate power net."
+      ]
+    },
+    "hier_label_mismatch": {
+      "fix_class": "needs_reasoning",
+      "user_name": "Hierarchical label / sheet pin mismatch",
+      "candidate_fixes": [
+        "A sheet pin has no matching hierarchical label inside the child sheet (or vice-versa). Align the names, or add the missing label/pin."
+      ]
+    }
+  },
+
+  "pin_to_pin_subclassifier": {
+    "_about": "KiCad emits a SINGLE settings-key `pin_to_pin` for every pin-conflict-matrix violation; the actual conflict (output-output, power-output short, etc.) lives ONLY in the human-readable description text (KiCad format is typically 'Pins of type <A> and <B> are connected'). This second stage reads (message + all location descrs), lowercased, and routes to a forbidden sub-class or to generic needs_reasoning. SAFETY: pin_to_pin is NEVER safe_auto, so a mis-route between forbidden and needs_reasoning is harmless — both refuse to auto-fix. Matching is purely additive labelling for the human/LLM. First matching rule wins. Token/phrase lists are lowercase substrings; tune them once real kicad-cli pin_to_pin descr strings are captured on this project.",
+    "default_fix_class": "needs_reasoning",
+    "default_subclass": "pin_conflict_generic",
+    "default_candidate_fixes": [
+      "A pin-type conflict was detected but the exact pair could not be sub-classified. Inspect both pins' electrical types and decide the correct topology — do NOT auto-connect."
+    ],
+    "pwr_flag_autofix": {
+      "_about": "SAFE auto-fix that runs BEFORE the forbidden power_output_conflict rule. A `pin_to_pin` Power-output conflict whose conflicting symbols are PWR_FLAG annotations (refs matching ref_prefixes, e.g. #FLG001/#FLG002) is a REDUNDANT duplicate flag, not a real short — a PWR_FLAG carries no current, it only asserts 'this rail is driven'. The strategy deletes the extra flag(s): if a real driver also shares the net every flag is removed, otherwise the first flag is kept and the rest deleted. Always re-validated by the regression guard, so a flag that was actually masking an undriven rail gets restored. Set enabled=false to revert to treating ALL power-output conflicts as forbidden.",
+      "enabled": true,
+      "ref_prefixes": ["#FLG"],
+      "candidate_fixes": [
+        "Delete the redundant PWR_FLAG(s); a single driver (real power_out or one flag) per rail is enough."
+      ]
+    },
+    "rules": [
+      {
+        "name": "power_output_conflict",
+        "fix_class": "forbidden",
+        "any_phrases": [
+          "power output and power output",
+          "power output and output",
+          "output and power output"
+        ],
+        "candidate_fixes": [
+          "Two power outputs are shorted on one net. REMOVE one driver, or isolate them (ORing diodes / load-switch). The AI must NOT auto-wire or pick a winner."
+        ]
+      },
+      {
+        "name": "vcc_gnd_short",
+        "fix_class": "forbidden",
+        "all_tokens": ["power", "ground"],
+        "candidate_fixes": [
+          "A power pin and a ground pin appear connected — a hard short. STOP. Human review required; never auto-fix."
+        ]
+      },
+      {
+        "name": "output_output_conflict",
+        "fix_class": "forbidden",
+        "any_phrases": ["output and output"],
+        "none_tokens": ["power"],
+        "candidate_fixes": [
+          "Two logic outputs drive one net. Insert a buffer/mux, add series isolation, or remove one source. The AI must NOT auto-connect."
+        ]
+      },
+      {
+        "name": "analog_signal_conflict",
+        "fix_class": "forbidden",
+        "all_tokens": ["passive"],
+        "_weak": "KiCad rarely flags passive-passive as a conflict; this rule is mostly documentation of intent. Harmless if it never matches (default is needs_reasoning, also no-auto-fix).",
+        "candidate_fixes": [
+          "A passive/analog conflict was reported. Verify the intended topology by hand — the AI must NOT auto-fix analog connections."
+        ]
+      }
+    ]
+  },
+
+  "confidence": {
+    "_about": "Intent Confidence Layer. Even a safe_auto violation is only auto-applied when its confidence score >= the type's confidence_threshold. Below the threshold the fix is demoted to a needs_reasoning diagnostic with the scoring factors surfaced, so a genuinely-unused pin gets a No-Connect flag while a pin with a wire one grid away is flagged as a probable missing snap instead of being blindly capped.",
+    "near_mm": 2.54,
+    "_near_note": "A wire endpoint or label within near_mm of a violation coord, but not ON the pin, signals a likely missing wire-snap — confidence drops to near_obstruction_score.",
+    "pin_not_connected": {
+      "unused_score": 0.9,
+      "near_obstruction_score": 0.2,
+      "trace_fail_score": 0.3
+    },
+    "endpoint_off_grid": {
+      "default_score": 0.85,
+      "_note": "Off-grid endpoints are mechanically safe to snap; high default. Real scoring (distance to nearest grid + whether a pin sits there) lands with the Phase 3 snap_endpoint verb."
+    }
+  }
+}

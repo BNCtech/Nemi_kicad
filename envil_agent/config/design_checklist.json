@@ -1,0 +1,289 @@
+{
+  "_about": "Design-checklist policy distilled from the user's hand-drawn reference spec (USB-C STM32G0 board review). Each rule encodes ONE professional must-have: USB-C UFP needs 5.1k CC pulldowns + input protection, every LDO needs input+output bulk caps, every MCU needs per-VDD-pin decoupling + bulk cap, every crystal needs 2 load caps to GND, every NRST pin needs a pullup + button, the SWD/JTAG/ICSP pinout is fixed, etc. Pure JSON -- every threshold, value, pin-pattern, and lib_id glob lives here. Adding a new IC family or fab tier = one entry, zero code.",
+  "version": 1,
+  "_source": "User-provided reference: STM32G0 USB-C BOARD - SCHEMATIC REVIEW & CORRECTIONS (2026-06-01)",
+
+  "enabled": true,
+
+  "rules": {
+
+    "usb_c_ufp": {
+      "_doc": "USB-C device (UFP / sink). CC1 + CC2 each need a 5.1k pulldown to GND. Required input protection: Polyfuse on VBUS (PTC ~500mA for sink) + ESD/TVS diode (SMBJ5.0A or similar) across VBUS-to-GND.",
+      "enabled": true,
+      "trigger_lib_id_patterns": ["Connector*:USB_C*", "*:USB_C*Receptacle*"],
+      "required_pulldowns": {
+        "pins": ["CC1", "CC2"],
+        "to_net_pattern": "GND",
+        "value": "5.1k",
+        "tolerance_pct": 5,
+        "refdes_prefix": "R"
+      },
+      "required_input_protection": {
+        "polyfuse": {
+          "required": true,
+          "rated_current_a": 0.5,
+          "value_pattern": "*500mA*",
+          "refdes_prefix": "F",
+          "lib_id_patterns": ["*:Polyfuse*", "Device:Polyfuse*", "*:PTC*"]
+        },
+        "esd_tvs": {
+          "required": true,
+          "lib_id_patterns": ["Diode*:*SMBJ*", "Diode*:*TVS*", "Device:D_TVS*", "*:PRTR5V0*", "*:ESD*"],
+          "refdes_prefix": "D"
+        }
+      },
+      "data_pin_no_connect_if_power_only": ["D+", "D-", "DP", "DM", "SBU1", "SBU2"]
+    },
+
+    "ldo_linear_regulator": {
+      "_doc": "Linear LDO (LM7805 / AMS1117 / LD1117 / LP2985 family). Datasheet minimums: input and output ceramic caps. AMS1117-3.3 needs >= 10 uF on both IN and OUT. Recommend >= 22 uF tantalum/MLCC on the regulated output rail.",
+      "enabled": true,
+      "trigger_lib_id_patterns": [
+        "Regulator_Linear:*",
+        "*:AMS1117*", "*:LD1117*", "*:LM7805*", "*:LM317*",
+        "*:LP2985*", "*:MCP1700*", "*:TPS73*"
+      ],
+      "required_input_cap": {
+        "min_uf": 10.0,
+        "preferred_uf": 10.0,
+        "refdes_prefix": "C",
+        "on_pin_patterns": ["VI", "VIN", "IN", "VBUS", "+5V"]
+      },
+      "required_output_cap": {
+        "min_uf": 10.0,
+        "preferred_uf": 22.0,
+        "refdes_prefix": "C",
+        "on_pin_patterns": ["VO", "VOUT", "OUT", "+3V3", "+3.3V"]
+      },
+      "_pwr_flag_rule": "PWR_FLAG belongs ONLY at the regulated output net, not at the input. Engine should skip auto-PWR_FLAG on the LDO input rail."
+    },
+
+    "mcu_decoupling": {
+      "_doc": "Every MCU power pin (VDD / VDDA / VDDIO / VBAT) needs a 100 nF ceramic adjacent. Per VDD pin OR per VDD bank, plus ONE bulk cap (4.7 uF or 10 uF) on the rail. STM32 reference: 100 nF per VDD pin + 4.7 uF bulk on VDD + 1 uF on VDDA + 100 nF on VDDA.",
+      "enabled": true,
+      "trigger_lib_id_patterns": [
+        "MCU_*:*", "MCU_ST_*:*", "MCU_Microchip_*:*",
+        "MCU_NXP_*:*", "MCU_Espressif_*:*", "MCU_Nordic_*:*",
+        "MCU_Renesas_*:*", "MCU_Silabs_*:*", "MCU_TI_*:*"
+      ],
+      "decoupling_per_vdd_pin": {
+        "required": true,
+        "value": "100n",
+        "refdes_prefix": "C"
+      },
+      "bulk_cap_per_rail": {
+        "required": true,
+        "min_uf": 4.7,
+        "preferred_uf": 4.7,
+        "refdes_prefix": "C",
+        "on_rails": ["+3V3", "+3.3V", "+5V", "VDD"]
+      },
+      "vddA_extra_decoupling": {
+        "required_when_pin_present": "VDDA",
+        "value": "1u",
+        "plus_value": "100n"
+      }
+    },
+
+    "crystal_oscillator": {
+      "_doc": "Quartz crystal needs 2 load caps (datasheet load capacitance / 2 minus stray). For 16 MHz 18 pF load: 22 pF typical. Both load caps return to GND.",
+      "enabled": true,
+      "trigger_lib_id_patterns": ["Device:Crystal*", "*:Crystal*", "*XTAL*"],
+      "required_load_caps": {
+        "count": 2,
+        "value_pattern": "*p",
+        "preferred_value": "22p",
+        "refdes_prefix": "C",
+        "must_connect_to_gnd": true,
+        "_doc": "Each load cap has one pin on a crystal terminal (XTAL_IN / XTAL_OUT / OSC_IN / OSC_OUT) and the other pin on GND. Engine validates both connections exist."
+      }
+    },
+
+    "reset_circuit": {
+      "_doc": "MCU NRST / RESET / MCLR pin needs a pullup to VCC + an optional reset push-button to GND. Without the button, soft reset still works via SWD, but hardware reset (e.g. after a brown-out) requires the button + RC option.",
+      "enabled": true,
+      "trigger_pin_name_patterns": ["NRST", "~{RESET}", "MCLR", "RESET"],
+      "required_pullup": {
+        "required": true,
+        "value": "10k",
+        "to_net_pattern": "+3V3|+5V|VDD|VCC",
+        "refdes_prefix": "R"
+      },
+      "required_button": {
+        "required": false,
+        "severity": "warning",
+        "refdes_prefix": "SW",
+        "lib_id_patterns": ["Switch:SW_Push*", "*:SW_PUSH*"]
+      }
+    },
+
+    "led_indicator_circuit": {
+      "_doc": "Every standalone LED needs a series current-limit resistor. For 3.3 V rail + standard 2 V Vf LED + 5 mA: ~260 Ω -> 330 Ω preferred. Refusal to render a bare LED without resistor.",
+      "enabled": true,
+      "trigger_lib_id_patterns": ["Device:LED*", "*:LED*"],
+      "required_series_resistor": {
+        "required": true,
+        "min_ohm": 100,
+        "preferred_value": "330",
+        "refdes_prefix": "R"
+      }
+    },
+
+    "swd_jtag_header": {
+      "_doc": "SWD programming header pinout (TC2030-IDC / 6-pin SWD): VCC, SWDIO, SWCLK, NRST, GND, GND. JTAG variant (20-pin) has VCC, TMS, TCK, TDO, TDI, NRST, GND...",
+      "enabled": true,
+      "swd_required_signals": ["VCC", "SWDIO", "SWCLK", "NRST", "GND"],
+      "swd_recommended_pinout_6": ["VCC", "SWDIO", "SWCLK", "NRST", "GND", "GND"],
+      "swd_connector_lib_id_patterns": [
+        "Connector_Generic:Conn_01x06*",
+        "Connector_Generic:Conn_01x10*",
+        "Connector:Tag-Connect*"
+      ],
+      "_recommendation": "When the MCU exposes SWDIO + SWCLK pins, a 6-pin header SHOULD exist that carries VCC + SWDIO + SWCLK + NRST + GND + GND. Without it the board is not programmable. Severity = warning when MCU has SWD pins but no SWD header is detected."
+    },
+
+    "boot_strap_pins": {
+      "_doc": "STM32 BOOT0 (and some families BOOT1) must be tied to a known logic level. Default boot-from-flash = BOOT0 = 0 -> pulldown to GND. Add an option for boot-from-system-memory via a strap resistor + 0R DNP or a 2-position header.",
+      "enabled": true,
+      "trigger_pin_name_patterns": ["BOOT0", "BOOT1", "BOOT", "PSEL0"],
+      "required_strap": {
+        "required": true,
+        "severity": "warning",
+        "to_net_pattern": "GND|+3V3|+5V|VDD|VCC",
+        "default_state": "pulled_low_for_flash_boot",
+        "value": "10k",
+        "refdes_prefix": "R"
+      }
+    },
+
+    "generic_pin_bypass": {
+      "_doc": "DYNAMIC, part-AGNOSTIC support derivation (the 'any prompt works' layer — no per-part templates). Scans EVERY IC's pins by NAME; a pin whose name matches a regulator-output / reference / charge-pump / internal-LDO pattern needs a local BYPASS CAP to GND, on ANY part that has such a pin. Fires by pin name alone (no lib_id), so it covers BQ76952 (REGIN/REG18/REG1/REG2/BREG/CP1), STM32 (VCAP), op-amps, PMICs, codecs, anything. Deliberately EXCLUDES bare VDD/VCC (the MCU/LDO decoupling rules own those) to avoid double-flagging. Warning-only; pairs with checklist_repair synthesis when complete_design_checklist is on.",
+      "enabled": true,
+      "severity": "warning",
+      "cap_refdes_prefix": "C",
+      "default_cap_value": "1u",
+      "bypass_pin_name_patterns": [
+        "^REGIN$", "^REG18$", "^REG1$", "^REG2$", "^REGOUT$", "^BREG$",
+        "^VCAP$", "^VCAP[0-9]$", "^VCAP_[0-9]$",
+        "^VREF$", "^VREFP$", "^VREFH$", "^VREF[0-9]$",
+        "^CP[0-9]$", "^VBOOT$", "^VLDO$", "^LDO_?OUT$", "^VREG$"
+      ],
+      "_pattern_note": "Anchored regexes on the exact pin NAME (case-insensitive). Each is a pin that the datasheet wants a local ceramic on. Add/remove a pattern = one JSON edit. NOT bare VDD/VDDA (decoupling rules cover those)."
+    },
+
+    "generic_bus_pullup": {
+      "_doc": "DYNAMIC, part-agnostic, datasheet-verified: an OPEN-DRAIN bus pin (I2C SCL/SDA, SMBus SMBC/SMBD) needs an external pull-up to a logic rail. Flagged/synthesized PER BUS NET, not per pin -- a shared I2C bus has many device pins but needs exactly ONE pull-up pair, so the rule keys on the NET. Detected by pin NAME on ANY IC. Warning (a dual-mode SCL/SPI_CLK pin used as SPI needs no pull-up, so the engineer judges).",
+      "enabled": true,
+      "severity": "warning",
+      "bus_pin_name_patterns": ["^SCL", "^SDA", "^SMBC", "^SMBD", "^I2C_SCL", "^I2C_SDA"],
+      "pullup_refdes_prefix": "R",
+      "pullup_value": "4.7k",
+      "rail_pattern": "+3V3|+5V|VDD|VCC"
+    },
+
+    "pwr_flag_placement": {
+      "_doc": "PWR_FLAG belongs on the REGULATED OUTPUT rail (the net the LDO drives), not on the input rail too. Two PWR_FLAGs on the same supply chain = noisy ERC. Engine should rule out auto-emitting a PWR_FLAG on a rail that is fed by a power_output pin of another component.",
+      "enabled": true,
+      "rule": "emit_only_on_terminal_output",
+      "severity": "warning"
+    },
+
+    "can_bus_termination": {
+      "_doc": "Datasheet rule — part-triggered, fires on ANY board that contains a CAN transceiver (CAN logger, motor controller, gateway, BMS, ...), NOT BMS-specific. A CAN node at a physical bus END needs a 120-ohm termination across CANH-CANL (or split: two ~60-ohm + a cap to GND). A MID-bus stub must NOT be terminated, and one schematic can't tell which it is, so a missing 120-ohm is a WARNING (add only if this board is a bus end). A FLOATING CANH/CANL transceiver pin is always wrong -> error.",
+      "enabled": true,
+      "trigger_lib_id_patterns": ["Interface_CAN_LIN:*", "*:TJA1051*", "*:TJA1042*", "*:TJA1057*", "*:TJA1044*", "*:MCP2551*", "*:MCP2561*", "*:MCP2562*", "*:SN65HVD*", "*:TCAN*", "*:ADM3053*", "*:ISO1050*"],
+      "can_high_pin_patterns": ["CANH", "CAN_H"],
+      "can_low_pin_patterns": ["CANL", "CAN_L"],
+      "termination": {
+        "value": "120",
+        "tolerance_pct": 5,
+        "refdes_prefix": "R",
+        "severity": "warning",
+        "split_value": "60",
+        "split_tolerance_pct": 10
+      }
+    },
+
+    "alert_interrupt_connected": {
+      "_doc": "Datasheet rule — part-triggered, fires on ANY board where a peripheral raises an interrupt (sensors, ADCs, PMICs, AFEs, RTCs, ...), NOT BMS-specific. A PERIPHERAL's ALERT / nFAULT / DRDY output must land on an MCU GPIO, else the interrupt is dead (e.g. a BQ76952 ALERT must reach the MCU, but the rule is fully part-agnostic). Warning: the board still renders. Only NON-MCU components are treated as the interrupt SOURCE; the destination net must carry a pin of a DIFFERENT MCU component.",
+      "enabled": true,
+      "source_pin_name_patterns": ["ALERT", "NFAULT", "FAULT", "DRDY", "NDRDY", "IRQ"],
+      "mcu_lib_id_patterns": ["MCU_*:*", "MCU_ST_*:*", "MCU_Microchip_*:*", "MCU_NXP_*:*", "MCU_Espressif_*:*", "MCU_Nordic_*:*", "MCU_Renesas_*:*", "MCU_Silabs_*:*", "MCU_TI_*:*"],
+      "_pattern_note": "Deliberately CONSERVATIVE — excludes the bare token 'INT' (overloaded: an MCU's own external-interrupt input, a connector pin, etc.) to avoid false positives. ALERT/nFAULT/DRDY are unambiguous peripheral interrupt outputs.",
+      "severity": "warning"
+    },
+
+    "current_shunt_amplifier": {
+      "_doc": "Datasheet rule — part-triggered, fires on ANY board with a current-sense amplifier (INA240/226/219/181/190 — power meters, motor drivers, chargers, BMS, ...), NOT BMS-specific. IN+ and IN- must connect to the TWO ends of the SAME low-value shunt resistor. Inputs on the same net (error) or floating (error) are always wrong; a missing shunt straddling the inputs is a polarity-suspect WARNING (direction can't be proven from topology). The rule inspects ONLY resistors already on an IN+/IN- net, so it never mis-fires on unrelated parts.",
+      "enabled": true,
+      "trigger_lib_id_patterns": ["*:INA240*", "*:INA226*", "*:INA219*", "*:INA181*", "*:INA190*", "*:INA138*", "*:INA169*", "Amplifier_Current:*"],
+      "in_plus_pin_patterns": ["IN+", "VIN+", "INP", "IN_P", "VINP", "+"],
+      "in_minus_pin_patterns": ["IN-", "VIN-", "INN", "IN_N", "VINN", "-"],
+      "_pin_name_note": "Real KiCad INA240A1 names the inputs '+' and '-' (not 'IN+'/'IN-') and supply 'V+'. The bare '+'/'-' aliases are matched by EXACT pin-name via _ir_nets_for_pin and only on a part already matched as a current-sense amp, so they can't mis-fire elsewhere.",
+      "shunt_max_ohm": 1.0,
+      "severity": "warning"
+    },
+
+    "generic_sense_filter": {
+      "_doc": "Datasheet rule — DYNAMIC / pin-name keyed, fires on ANY IC with a low-side current-sense pair (BQ76952 SRP/SRN, coulomb counters, AFEs, gauges — CSP/CSN, ISP/ISN, VSP/VSN, SENSEP/SENSEN). The sense resistor connects to the pair through an external RC filter: a DIFFERENTIAL cap belongs ACROSS the two sense nets, and the datasheet FORBIDS caps from these pins to VSS/GND. Three codes: SENSE_NO_SHUNT (no low-value R straddles the pair — detect-only, the shunt value/placement is the architect's call), SENSE_NO_DIFF_FILTER (no cap across the pair — warn + AUTO-ADD the diff cap), SENSE_CAP_TO_GND (a cap ties a sense net to GND — datasheet anti-pattern, detect-only, can't safely auto-delete). The series filter R on each line is SERIES insertion (re-points the pin) so it is left to the architect, never auto-synthesised. INA-style IN+/IN- amps are DELIBERATELY excluded: a differential input cap there can wreck common-mode rejection (TI does not universally recommend it), so it is the architect's decision — covered separately by current_shunt_amplifier.",
+      "enabled": true,
+      "sense_pin_pairs": [
+        {"p": "^SRP$", "n": "^SRN$"},
+        {"p": "^CSP", "n": "^CSN"},
+        {"p": "^ISP", "n": "^ISN"},
+        {"p": "^VSP", "n": "^VSN"},
+        {"p": "^SENSE_?P$", "n": "^SENSE_?N$"}
+      ],
+      "shunt_max_ohm": 1.0,
+      "diff_cap_value": "100n",
+      "cap_refdes_prefix": "C",
+      "flag_cap_to_gnd": true,
+      "severity": "warning"
+    },
+
+    "generic_thermistor": {
+      "_doc": "Datasheet rule — DYNAMIC / pin-name keyed, DETECT-ONLY (no auto-synthesis). A thermistor temperature input (pin name TS / TSx / THERM* / NTC* on any IC) should carry an EXTERNAL sensing element (an NTC and/or its bias resistor); a bare net with only the IC pin on it -> TEMP_SENSE_NO_THERMISTOR (warning). NOT auto-fixed by design: the bias is part- and voltage-dependent. BQ76952-class AFEs bias the NTC with an INTERNAL factory-trimmed pull-up (ratiometric vs REG18) and the datasheet warns that an EXTERNAL pull-up draws continuous power and must not exceed REG18 / be tied to REG1 — so auto-adding a pull-up would be HARMFUL. On a generic MCU a thermistor ADC pin is indistinguishable from any other ADC pin by name, so the divider must come from the architect. The rule only SURFACES a bare thermistor input for the engineer; it never invents the divider.",
+      "enabled": true,
+      "thermistor_pin_patterns": ["^TS[0-9]*$", "^THERM", "^NTC", "^TEMP_?SENSE"],
+      "severity": "warning"
+    }
+  },
+
+  "wire_label_decision_tree": {
+    "_doc": "When to use wire vs net label vs hierarchical label. Used by validators and surfaced in the architect prompt verbatim per the user's spec (the bottom row of the reference image).",
+    "wire_when": [
+      "same sheet",
+      "short distance (under wire_max_length_mm)",
+      "components are physically near (within 3 grid cells)",
+      "no obstacles between the two endpoints"
+    ],
+    "net_label_when": [
+      "same project, same sheet, but the two endpoints are far apart",
+      "the direct wire would cross a component body",
+      "the direct wire would cross >= 2 other wires",
+      "the signal is named (SWDIO, LED_STATUS, UART_TX, etc.)"
+    ],
+    "hierarchical_label_when": [
+      "the signal crosses sheet boundaries",
+      "the parent sheet has a corresponding sheet pin",
+      "the design uses block decomposition"
+    ],
+    "_cross_sheet_note": "In the multi-SHEET (hierarchy) render path the engine carries cross-sheet signals with GLOBAL labels by default (multi_block.cross_sheet_label_kind='global'): same-named global labels bond across all sibling child sheets with no parent wiring. 'hierarchical_label_when' above describes the alternative Model A (cross_sheet_label_kind='hierarchical', pairs with a parent sheet pin) which additionally needs a parent-wiring pass that is not implemented yet. The architect never emits the label kind directly — it only names the cross-sheet net and lists both endpoints; the engine selects the kind.",
+    "ratio_targets": {
+      "wire_pct": 70,
+      "net_label_pct": 25,
+      "hierarchical_label_pct": 5
+    }
+  },
+
+  "design_checklist_summary": {
+    "_doc": "Reference for the chat reply / build report. Each entry maps to a validator code emitted by validate.py.",
+    "no_unconnected_pins": "ERC catches via unconnected_wire_endpoint / pin_not_connected -- handled in erc_check + erc_autofix.",
+    "all_power_pins_decoupled": "MCU_DECOUPLING_MISSING / MCU_BULK_CAP_MISSING",
+    "erc_zero_errors": "Handled by self_heal_node.",
+    "clear_net_labels": "Architect prompt rule 2 (descriptive net names).",
+    "power_flow_chain": "USB_C_NO_PROTECTION / LDO_INPUT_CAP_MISSING / LDO_OUTPUT_CAP_MISSING -> guarantees VBUS -> 3V3 chain.",
+    "swd_header_present": "MCU_SWD_NO_HEADER",
+    "reset_circuit_present": "MCU_NO_RESET_PULLUP / MCU_NO_RESET_BUTTON (warning)"
+  }
+}

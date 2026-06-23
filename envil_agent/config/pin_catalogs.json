@@ -1,0 +1,94 @@
+{
+  "_comment": "All pin-name and net-name string catalogs for rules.py. Lowercase; substring match unless noted. Edit here to support new IC families without touching code.",
+
+  "reset_pin_names": [
+    "nrst", "reset", "~reset", "/reset", "mclr", "~mclr",
+    "rst", "~rst", "/rst", "reset_n", "rstn", "nreset",
+    "por", "por_n", "porb", "resetb", "xres"
+  ],
+
+  "gnd_pin_names": [
+    "gnd", "vss", "vee", "agnd", "dgnd", "pgnd", "egnd",
+    "vssa", "vssd", "gndpwr", "gnda", "gndd", "gnd_pwr",
+    "ep", "epad", "exposed_pad"
+  ],
+
+  "i2c": {
+    "scl_names": ["scl", "i2c_scl", "sclk_i2c", "scl0", "scl1", "i2cscl", "twi_scl"],
+    "sda_names": ["sda", "i2c_sda", "sda0", "sda1", "i2csda", "twi_sda"]
+  },
+
+  "regulator": {
+    "vout_names": ["vout", "out", "vo", "v_out", "vreg", "output", "vout1", "lxout", "sw"],
+    "vin_names":  ["vin", "in", "vi", "v_in", "input", "vin1", "vbat_in", "vsup"]
+  },
+
+  "analog_supply_pin_names": [
+    "avdd", "vdda", "avcc", "vddana", "vdd_ana", "vdd_a", "adc_avdd",
+    "vddadc", "avdd18", "avdd33", "vdda_1v8", "vdda_3v3",
+    "avdd1", "avdd2", "avccio", "avcca"
+  ],
+
+  "vbat_pin_names": [
+    "vbat", "vbatt", "vbat_mcu", "vreg_vbat", "vbk", "vbackup",
+    "vdd_rtc", "vrtc", "v_batt"
+  ],
+
+  "vref_pin_names": [
+    "vref", "vref+", "vrefh", "vref_p", "vref_pos", "aref", "adc_ref",
+    "vrefint+", "vref_out", "vrefbuf_out", "vrefinp",
+    "vref_a", "vref_adc", "adcvref", "ref", "vref_hi"
+  ],
+
+  "usb": {
+    "dp_names": ["d+", "dp", "usb_dp", "usb_d+", "usbdp", "dm_p", "data+", "usbp"],
+    "dm_names": ["d-", "dm", "usb_dm", "usb_d-", "usbdm", "dm_n", "data-", "usbm"]
+  },
+
+  "debug": {
+    "swd_pin_names":  ["swdio", "swclk", "swo", "tck", "tms", "tdi", "tdo", "vtref", "vref", "traceclk"],
+    "srst_names":     ["srst", "nsrst", "reset", "nreset", "~reset", "/reset", "nrst", "trst"],
+    "vtref_names":    ["vtref", "vcc", "vdd", "vref", "3v3", "+3v3", "vccref", "vio"]
+  },
+
+  "strap_pin_names": [
+    "boot", "boot0", "boot1", "bootsel", "mode", "strap", "test",
+    "gpio0", "gpio2", "gpio12", "gpio15",
+    "en", "chip_pu",
+    "cfg0", "cfg1", "cfg2",
+    "addr0", "addr1",
+    "isp", "prog"
+  ],
+
+  "comm_bus_patterns": [
+    "swdio", "swclk", "swo", "nrst",
+    "tdi", "tdo", "tck", "tms", "trst",
+    "tx", "rx", "uart", "usart",
+    "sda", "scl", "i2c",
+    "mosi", "miso", "sck", "ss", "cs",
+    "spi",
+    "usb", "d+", "d-", "dp", "dn",
+    "can", "cantx", "canrx", "canh", "canl",
+    "eth", "mdio", "mdc",
+    "sdio", "sdclk", "sdcmd"
+  ],
+
+  "positive_rail_hints": [
+    "vcc", "vdd", "+3v3", "+5v", "+1v8", "+2v5", "+12v",
+    "vbat", "vbus", "vin", "+vdc", "+9v", "+15v", "+24v",
+    "v3v3", "v5v", "v12v", "v1v8",
+    "3v3", "5v", "12v", "1v8", "2v5",
+    "vdd_core", "vdd_io", "vdd_pll", "vdd_usb"
+  ],
+
+  "negative_rail_hints": [
+    "gnd", "vss", "agnd", "dgnd", "pgnd", "egnd",
+    "gnda", "gndd", "gnd_pwr", "chassis_gnd", "earth",
+    "-12v", "-5v", "-15v"
+  ],
+
+  "gnd_family_rails": [
+    "GND", "VSS", "GNDA", "GNDD", "AGND", "DGND", "PGND", "EGND", "EARTH",
+    "GND_PWR", "CHASSIS_GND", "GNDPWR"
+  ]
+}

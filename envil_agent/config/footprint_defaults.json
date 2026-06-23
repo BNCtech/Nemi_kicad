@@ -1,0 +1,69 @@
+{
+  "_comment": "Default footprint resolver. Consulted by _emit_symbol_instance when the IR's component.footprint is empty. Two layers (checked in order): by_lib_id exact match, then by_prefix longest-match. If both miss, the engine falls back to the symbol's own (property Footprint) field from the lib_symbol — many KiCad symbols ship with a sensible default. Edit this file to extend coverage; no Python changes needed.",
+  "_rule": "Per user rule feedback_dynamic_universal_quality + feedback_no_hardcode_json_config: all defaults live here in JSON, not in Python.",
+
+  "package_preference_hint": "THT",
+
+  "by_lib_id": {
+    "_comment": "Exact lib_id -> footprint. Use for parts where the prefix rule below would pick the wrong family.",
+    "Timer:NE555P":   "Package_DIP:DIP-8_W7.62mm",
+    "Timer:LM555xN":  "Package_DIP:DIP-8_W7.62mm",
+    "Timer:NE556":    "Package_DIP:DIP-14_W7.62mm",
+    "Regulator_Linear:LM317_3PinPackage": "Package_TO_SOT_THT:TO-220-3_Vertical",
+    "Regulator_Linear:LM317L":            "Package_TO_SOT_THT:TO-92_Inline",
+    "Regulator_Linear:AMS1117-3.3":       "Package_TO_SOT_SMD:SOT-223-3_TabPin2",
+    "Regulator_Linear:AP2112K-3.3":       "Package_TO_SOT_SMD:SOT-23-5",
+    "Regulator_Linear:TLV70033_SC70-5":   "Package_TO_SOT_SMD:SOT-353_SC-70-5",
+    "Amplifier_Operational:TL072":        "Package_DIP:DIP-8_W7.62mm",
+    "Amplifier_Operational:LM358":        "Package_DIP:DIP-8_W7.62mm",
+    "Amplifier_Operational:LM324":        "Package_DIP:DIP-14_W7.62mm",
+    "MCU_Microchip_ATmega:ATmega328P-PU": "Package_DIP:DIP-28_W7.62mm",
+    "MCU_Microchip_ATmega:ATmega328P-AU": "Package_QFP:TQFP-32_7x7mm_P0.8mm",
+    "MCU_ST_STM32G0:STM32G030C8Tx":       "Package_QFP:LQFP-48_7x7mm_P0.5mm",
+    "MCU_ST_STM32G0:STM32G030F6Px":       "Package_SO:TSSOP-20_4.4x6.5mm_P0.65mm",
+    "MCU_ST_STM32F1:STM32F103C8Tx":       "Package_QFP:LQFP-48_7x7mm_P0.5mm",
+    "RF_Module:ESP32-WROOM-32":           "RF_Module:ESP32-WROOM-32",
+    "Interface_UART:CP2102N-A02-GQFN24":  "Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm_EP2.6x2.6mm",
+    "Sensor_Temperature:BME280":          "Package_LGA:Bosch_LGA-8_2.5x2.5mm_P0.65mm_ClockwisePinNumbering"
+  },
+
+  "by_prefix": {
+    "_comment": "Longest-prefix match. Fallback when no exact entry above. Defaults bias to THT (breadboard / prototype) — flip the file's package_preference_hint and swap these values for an SMD-first project.",
+
+    "Device:R_Pack":           "Resistor_THT:R_Array_SIP9",
+    "Device:R_Network":        "Resistor_THT:R_Array_SIP9",
+    "Device:R":                "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P10.16mm_Horizontal",
+    "Device:C_Polarized":      "Capacitor_THT:CP_Radial_D5.0mm_P2.50mm",
+    "Device:C":                "Capacitor_THT:C_Disc_D3.0mm_W1.6mm_P2.50mm",
+    "Device:L":                "Inductor_THT:L_Axial_L5.3mm_D2.2mm_P2.54mm_Vertical_Vishay_IM-1",
+    "Device:LED":              "LED_THT:LED_D3.0mm",
+    "Device:D_Schottky":       "Diode_THT:D_DO-41_SOD81_P10.16mm_Horizontal",
+    "Device:D_Zener":          "Diode_THT:D_DO-35_SOD27_P7.62mm_Horizontal",
+    "Device:D":                "Diode_THT:D_DO-41_SOD81_P10.16mm_Horizontal",
+    "Device:Q_NPN":            "Package_TO_SOT_THT:TO-92_Inline",
+    "Device:Q_PNP":            "Package_TO_SOT_THT:TO-92_Inline",
+    "Device:Q_NMOS":           "Package_TO_SOT_THT:TO-220-3_Vertical",
+    "Device:Q_PMOS":           "Package_TO_SOT_THT:TO-220-3_Vertical",
+    "Device:Crystal":          "Crystal:Crystal_HC49-U_Vertical",
+
+    "Switch:SW_Push":          "Button_Switch_THT:SW_PUSH_6mm",
+    "Switch:SW_DIP":           "Button_Switch_THT:SW_DIP_SPSTx04_Slide_9.78x12.34mm_W7.62mm_P2.54mm",
+    "Switch:SW_SPDT":          "Button_Switch_THT:SW_Slide_SPDT_Straight_CK_OS102011MS2Q",
+
+    "Connector:Conn_01x02_Pin":     "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+    "Connector:Conn_01x02":         "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+    "Connector:Conn_01x03":         "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
+    "Connector:Conn_01x04":         "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
+    "Connector:Conn_01x05":         "Connector_PinHeader_2.54mm:PinHeader_1x05_P2.54mm_Vertical",
+    "Connector:Conn_01x06":         "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+    "Connector:Conn_01x08":         "Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical",
+    "Connector:Conn_01x10":         "Connector_PinHeader_2.54mm:PinHeader_1x10_P2.54mm_Vertical",
+    "Connector:Screw_Terminal_01x02": "TerminalBlock_Phoenix:TerminalBlock_Phoenix_MKDS-1,5-2_1x02_P5.00mm_Horizontal",
+    "Connector_Audio:AudioJack2":   "Connector_Audio:Jack_3.5mm_PJ320D_Horizontal",
+    "Connector_Audio:AudioJack3":   "Connector_Audio:Jack_3.5mm_CUI_SJ1-3525N_Horizontal",
+    "Connector:USB_C_Receptacle":   "Connector_USB:USB_C_Receptacle_HRO_TYPE-C-31-M-12",
+    "Connector:Barrel_Jack":        "Connector_BarrelJack:BarrelJack_Wuerth_6941xx301002",
+
+    "power:":                  ""
+  }
+}

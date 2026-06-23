@@ -28,6 +28,7 @@ from fastapi import FastAPI, File, Form, UploadFile, WebSocket, WebSocketDisconn
 from fastapi.responses import JSONResponse
 
 from ._config_loader import load as _load_config
+<<<<<<< Updated upstream
 from .chat import (
     CHAT_SYSTEM_PROMPT,
     _count_component_add_ops,
@@ -35,11 +36,15 @@ from .chat import (
     _extract_json,
     run_connectivity_retry,
 )
+=======
+from .chat import CHAT_SYSTEM_PROMPT, _extract_json
+>>>>>>> Stashed changes
 from .claude_client import ClaudeClient
 from .schematic_extractor import SchematicExtractor, format_dump_with_context
 from .schematic_modifier import SchematicDocument, apply_operation
 
 
+<<<<<<< Updated upstream
 def _schematic_edge_count(schematic_path: str) -> Tuple[int, int]:
     """Build the layout connectivity graph and return (edge_count, node_count).
     Pre-flight gate for the layout post-step: if a schematic has placed
@@ -58,6 +63,8 @@ def _schematic_edge_count(schematic_path: str) -> Tuple[int, int]:
         return (-1, -1)
 
 
+=======
+>>>>>>> Stashed changes
 HISTORY_TURNS = int(_load_config("conventions").get("chat", {}).get("history_turns", 12))
 
 
@@ -668,6 +675,7 @@ async def _apply_pending(ws: WebSocket, room: ChatRoom) -> None:
     applied = sum(1 for r in results if r.get("ok"))
     chat_path = Path(str(room.doc.path))
     display_path = chat_path  # default: show whatever chat wrote
+<<<<<<< Updated upstream
 
     # Two-phase recovery for components-placed-but-disconnected sheets.
     # Phase 1: deterministic geometric snap — moves off-pin wire endpoints
@@ -859,6 +867,100 @@ async def _apply_pending(ws: WebSocket, room: ChatRoom) -> None:
                       f"({type(_layout_exc).__name__}: {_layout_exc}); "
                       f"falling back to {chat_path.name}", flush=True)
 
+=======
+    if applied:
+        # Heal a stub / missing .kicad_pro before anything else. Without
+        # this, envilcad's project manager can't find the schematic and
+        # prompts "untitled.kicad_sch does not exist; create it?". The
+        # function is a no-op if the project file is already populated.
+        try:
+            healed_pro = _ensure_kicad_pro(chat_path)
+            if healed_pro:
+                print(f"[chat] healed stub .kicad_pro → {Path(healed_pro).name}",
+                      flush=True)
+        except Exception as _pro_exc:
+            print(f"[chat] kicad_pro heal skipped ({type(_pro_exc).__name__}: "
+                  f"{_pro_exc})", flush=True)
+        # Step 2: post-process through the kicad_layout pipeline so the new
+        # placer / router / labels / dynamic zone titles / pin-number layout
+        # take effect. Writes a sibling `<name>_layout.kicad_sch` next to the
+        # chat-edited file; the original is left untouched as a fallback.
+        # The pipeline is best-effort — any exception or quality.error count
+        # falls back to opening the chat's own output (zero regression risk).
+        # Disable via ENVIL_LAYOUT_POST=0 if needed.
+        layout_post_enabled = os.environ.get(
+            "ENVIL_LAYOUT_POST", "1").strip() not in {"0", "false", "no", ""}
+        if layout_post_enabled:
+            try:
+                from kicad_claude.layout.api import run_layout as _run_layout
+                from kicad_claude.layout import load_config as _layout_load_config
+                # Respect hierarchical_split.enabled in layout_config.json.
+                # Falls back to skip=True (single-sheet) only when the config
+                # entry is missing or explicitly disabled — never hardcoded.
+                try:
+                    _h_cfg = _layout_load_config("layout_config").get(
+                                "hierarchical_split") or {}
+                    skip_h = not bool(_h_cfg.get("enabled", False))
+                except Exception:
+                    skip_h = True
+                layout_out_dir = chat_path.parent / "_layout"
+                layout_result = await asyncio.to_thread(
+                    _run_layout, str(chat_path), str(layout_out_dir),
+                    skip_hierarchical=skip_h,
+                    skip_quality=False,
+                    auto_display=False,       # we own the broadcast below
+                )
+                if not layout_result.has_errors:
+                    # Overwrite the chat-written sheet with the FLAT laid-out
+                    # version so subsequent chat-apply passes operate on a
+                    # consistent base sheet (the chat agent edits chat_path
+                    # in place — incremental edits need it to be the latest
+                    # full schematic).
+                    layout_p = Path(layout_result.schematic)
+                    import stat as _stat
+                    shutil.copy(layout_p, chat_path)
+                    try:
+                        chat_path.chmod(chat_path.stat().st_mode
+                                         | _stat.S_IWUSR | _stat.S_IWGRP
+                                         | _stat.S_IWOTH)
+                    except OSError:
+                        pass
+                    # If hierarchy fired, point envilcad at the PARENT sheet
+                    # instead of the flat one — the user prompted a circuit
+                    # that crossed the hierarchical threshold, they should
+                    # SEE the multi-sheet view. chat_path stays as the flat
+                    # base for back-compat with future chat edits.
+                    h_info = (layout_result.hierarchical or {})
+                    h_parent = h_info.get("parent_path")
+                    if h_parent and Path(h_parent).exists():
+                        display_path = Path(h_parent)
+                        try:
+                            display_path.chmod(display_path.stat().st_mode
+                                                | _stat.S_IWUSR | _stat.S_IWGRP
+                                                | _stat.S_IWOTH)
+                        except OSError:
+                            pass
+                        print(f"[chat] hierarchical view → {display_path.name} "
+                              f"(children={h_info.get('stats', {}).get('children', '?')})",
+                              flush=True)
+                    else:
+                        print(f"[chat] layout post-step ok → overwrote "
+                              f"{chat_path.name} from {layout_p.name} "
+                              f"(warnings={layout_result.quality_totals.get('warning', 0)})",
+                              flush=True)
+                else:
+                    print(f"[chat] layout post-step had errors; "
+                          f"falling back to chat output {chat_path.name}",
+                          flush=True)
+            except Exception as _layout_exc:
+                # Never let the layout step kill chat-apply. Surface the
+                # cause to the server log so we can investigate, then fall
+                # through to the chat-only display path.
+                print(f"[chat] layout post-step failed "
+                      f"({type(_layout_exc).__name__}: {_layout_exc}); "
+                      f"falling back to {chat_path.name}", flush=True)
+
+>>>>>>> Stashed changes
         # Send open_file first — if eeschema has no file open (or a different
         # file open), this loads the just-written one. THEN send revert — if
         # eeschema already has this file open, OpenProjectFiles short-circuits
@@ -874,7 +976,11 @@ async def _apply_pending(ws: WebSocket, room: ChatRoom) -> None:
     # post-step succeeded, that's the layout output; otherwise the chat's
     # own output. `source_file_path` is always the chat's source so the
     # panel can distinguish the two when needed.
+<<<<<<< Updated upstream
     applied_payload: Dict[str, Any] = {
+=======
+    await ws.send_json({
+>>>>>>> Stashed changes
         "kind": "applied",
         "session_id": room.session_id,
         "count": applied,

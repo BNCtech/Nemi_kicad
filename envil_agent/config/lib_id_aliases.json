@@ -1,0 +1,12 @@
+{
+  "_comment": "Manual alias overrides for cases the fuzzy resolver in symbol_geom.py CAN'T figure out automatically. Verify_aliases.py confirms each entry here is still needed after a KiCad library update. Add ONLY when fuzzy genuinely fails — most lib_id variants (Timer:NE555 -> Timer:NE555P, Regulator_Linear:MCP1700-3.3 -> Regulator_Linear:MCP1700x-330xxTO) are handled dynamically by token-overlap scoring.",
+  "aliases": {
+    "Sensor_Temperature:LM35DZ": "Sensor_Temperature:LM35-LP",
+    "Regulator_Linear:LM317_3PinPackage": "Regulator_Linear:LM317_TO-220",
+    "Regulator_Linear:LM317L": "Regulator_Linear:LM317L_TO92",
+    "MCU_Microchip_ATmega:ATmega328P-AU": "MCU_Microchip_ATmega:ATmega328P-A",
+    "Sensor_Temperature:BME280": "Sensor:BME280",
+    "Driver_Motor:ULN2003A": "Transistor_Array:ULN2003A",
+    "Device:L_Core_Iron": "Device:L_Iron"
+  }
+}

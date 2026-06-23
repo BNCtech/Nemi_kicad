@@ -1,0 +1,109 @@
+{
+  "_about": "Auto-detect the render mode (flat / single-sheet-block-diagram / multi-sheet-hierarchy) from the user's natural-language prompt when the agent did NOT pass an explicit force_hierarchy / force_single_sheet flag. Decision order: (1) explicit prompt phrases win, (2) recommended-block count from sheet_planner_rules.json drives a threshold-based pick, (3) fall through to engine size-based auto. Everything tunable in JSON.",
+  "version": 1,
+  "enabled": true,
+
+  "explicit_single_sheet_phrases": [
+    "single sheet",
+    "single-sheet",
+    "one page",
+    "one sheet",
+    "one-page",
+    "single page",
+    "block diagram",
+    "block-diagram",
+    "block diagram style",
+    "overview style",
+    "overview sheet",
+    "one screen",
+    "flat schematic",
+    "single schematic",
+    "compact schematic"
+  ],
+
+  "explicit_multi_sheet_phrases": [
+    "multi-sheet",
+    "multi sheet",
+    "multiple sheets",
+    "split sheets",
+    "split into sheets",
+    "hierarchical",
+    "hierarchy",
+    "multi-page",
+    "multi page",
+    "separate sheets",
+    "separate pages",
+    "child sheets",
+    "subsheets",
+    "sub-sheets",
+    "modular schematic"
+  ],
+
+  "block_count_thresholds": {
+    "_doc": "Number of distinct functional blocks (from sheet_planner.recommend_blocks(prompt)) that pushes the auto-decision into each tier. MUST stay aligned with layout_config.json:sheet_decision.single_sheet_max_blocks (=5): SINGLE_SHEET_BLOCKS holds 3-5 functional groups on ONE A3 sheet; 6+ groups go HIERARCHY. Set 2026-06-03 to match the engine override (n_blk > 5 -> hierarchy) so the pre-architect decision, the architect's block emission, and the user-facing render_mode_decision all agree instead of the engine silently re-deciding post-architect.",
+    "hierarchy_when_blocks_at_least": 6,
+    "single_sheet_blocks_when_blocks_at_least": 3
+  },
+
+  "component_estimate_signals": {
+    "_doc": "Optional secondary signal: rough component-count contribution per keyword. Summed and combined with the block count. Helps catch dense circuits whose keyword footprint is large even if block count is small (e.g. esp32 + lora + display = 30+ parts under 3 blocks).",
+    "stm32": 8, "stm8": 6,
+    "esp32": 12, "esp8266": 10,
+    "atmega": 8, "attiny": 4,
+    "rp2040": 10, "nrf52": 10, "nrf51": 8,
+    "samd21": 8, "samd51": 10,
+    "pic": 6,
+
+    "usb-c": 6, "usb c": 6, "usb type-c": 6, "type-c": 6,
+    "usb": 4, "micro-usb": 4, "mini-usb": 4,
+    "ethernet": 10, "rj45": 8, "w5500": 6, "lan8720": 6,
+    "lora": 6, "sx1276": 6, "sx1278": 6,
+    "wifi": 6, "wi-fi": 6,
+    "bluetooth": 5, "ble": 5,
+
+    "lcd": 6, "oled": 5, "tft": 8, "display": 5, "e-paper": 6, "epd": 6,
+    "ssd1306": 4, "ili9341": 6, "st7789": 6,
+
+    "motor": 6, "stepper": 8, "h-bridge": 6, "drv8": 4, "tb6612": 4, "l298": 4,
+    "bldc": 8,
+
+    "sensor": 3, "i2c sensor": 3, "spi sensor": 3,
+    "bme280": 3, "bmp280": 3, "mpu6050": 4, "sht3": 3, "ds18b20": 2,
+    "ina219": 3, "ads1115": 3,
+
+    "i2c": 2, "spi": 2, "uart": 2, "can": 4, "rs485": 4, "rs232": 4, "modbus": 4,
+
+    "swd": 3, "jtag": 4, "icsp": 3, "prog": 2,
+
+    "led": 2, "rgb": 4, "ws2812": 4, "sk6812": 4,
+    "button": 2, "switch": 2, "buzzer": 2, "relay": 4, "ssr": 4, "fan": 3,
+
+    "battery": 4, "li-ion": 4, "lipo": 4, "lifepo4": 4, "bms": 8,
+    "charger": 6, "tp4056": 4, "bq24": 6,
+
+    "ldo": 4, "ams1117": 4, "ld1117": 4, "lm7805": 3, "lm317": 3,
+    "buck": 6, "boost": 6, "smps": 8,
+    "polyfuse": 1, "tvs": 2, "esd": 2,
+
+    "crystal": 3, "16mhz": 3, "32khz": 3, "tcxo": 3, "oscillator": 3,
+
+    "audio": 5, "amp": 4, "speaker": 3, "microphone": 3, "i2s mic": 4,
+
+    "isolation": 4, "optocoupler": 3, "pc817": 3,
+
+    "sd card": 5, "micro sd": 5,
+    "flash": 4, "eeprom": 3,
+
+    "antenna": 2, "matching network": 4, "balun": 3
+  },
+
+  "complexity_thresholds": {
+    "_doc": "Same decision as block_count_thresholds, but on the sum-of-keyword-weights instead of distinct-block-count. Raised 2026-06-02 from 40/15 to 65/12 because a typical USB-C STM32 dev board (the user's reference image) scores ~40 complexity but belongs in single-sheet-block-diagram --- not hierarchy. Hierarchy is reserved for genuinely dense designs (multi-MCU + many peripherals).",
+    "hierarchy_when_complexity_at_least": 65,
+    "single_sheet_blocks_when_complexity_at_least": 12
+  },
+
+  "_decision_logic_doc": "HIERARCHY: blocks >= hierarchy_when_blocks_at_least OR complexity >= hierarchy_when_complexity_at_least. EITHER strong signal is enough -- dense circuits need multi-sheet even if block names are sparse, and many distinct functional groups need multi-sheet even at lower density. SINGLE_SHEET_BLOCKS: blocks >= single_sheet_blocks_when_blocks_at_least AND complexity >= single_sheet_blocks_when_complexity_at_least. BOTH must agree -- block-count alone over-promotes simple discrete circuits (USB lamp keyword hits 4 blocks but only ~9 parts), complexity alone over-promotes single-IC dense circuits (MCU + many passives, no real groups). FLAT (default): everything below the SINGLE_SHEET_BLOCKS thresholds -- discrete circuits like USB lamps, NE555 blinkers, single op-amp filters, single LDOs.",
+
+  "fallback_when_disabled": "flat"
+}

@@ -1,0 +1,152 @@
+{
+  "_about": "P0 Intake Brain (Stages 1-3): classify a NEW whole-circuit build request into a project_type + risk profile, score how much required info the prompt actually provided, and pick a 3-way decision BEFORE generating. Reuses sheet_planner.recommend_blocks (blocks), decide_render_mode._estimate_complexity (complexity/size) and pin_catalog.resolve_lib_ids_from_prompt (named parts) - this file adds ONLY the per-domain type/risk/required-fields layer. Adding a domain or a required field = one JSON edit, zero code.",
+  "version": 1,
+  "enabled": true,
+
+  "ask_threshold_pct": 40,
+  "arch_threshold_pct": 80,
+  "min_fields_for_score": 1,
+  "high_risk_levels": ["high", "critical"],
+  "safety_force_architecture": true,
+  "direct_generate_complexity": ["Low"],
+  "max_questions": 4,
+
+  "_always_ask_assumptions_doc": "Cursor-style 'ask before assuming' (2026-06-22, user: circuit design should INTERACT/ask the user, not silently assume). When true (default), the agent asks ONE round of 2-4 clickable chip-questions about the design choices it would otherwise ASSUME (supply voltage, package/footprint, indicator/connector, key values like frequency/current) BEFORE showing the build preview -- EVEN for simple/complete prompts that assess_request would PROCEED on (which is why the NE555 blinker silently 'Assumed 5V'). The model picks the questions that matter for THIS circuit (general, no hardcoded param list) and offers a 'use defaults' one-tap skip. Read by agent.py:_ask_assumptions_enabled, which appends ASK_ASSUMPTIONS_RULE to the build system prompt. Set false to restore the old behaviour (Low-complexity prompts build on one confirm with assumed defaults).",
+  "always_ask_assumptions": true,
+
+  "requirement_conformance": {
+    "_doc": "Phase 3 drift/conformance check (validate._check_requirement_conformance). A part the USER explicitly named in the build prompt MUST appear in the generated circuit -- the architect must not silently DROP or SUBSTITUTE it. GENERAL: any part-number token, any domain, any prompt -- not BMS-specific. token_pattern finds part-number-shaped tokens (>=2 letters then >=2 digits, e.g. BQ76952/STM32G474/TJA1051/INA240/NE555); a token is SATISFIED if any component's lib_id OR value contains it (case-insensitive, so a package suffix like BQ7695201PFBR still matches BQ76952). token_exclude drops protocol/bus names that look like part numbers. Warning severity (the architect may have a valid reason to substitute -- surface it, don't hard-fail). No-op when the prompt is empty (e.g. the golden harness), so byte-stable there.",
+    "enabled": true,
+    "severity": "warning",
+    "token_pattern": "[A-Za-z]{2,}[0-9]{2,}[A-Za-z0-9-]*",
+    "min_token_len": 4,
+    "token_exclude": ["RS485", "RS232", "RS422", "USB2", "USB3", "CAN20", "I2C", "I2S", "SPI4", "MIPI", "LVDS", "DDR3", "DDR4", "A123", "M2", "M3"]
+  },
+
+  "_decision_doc": "Order: (1) SAFETY OVERRIDE - safety_critical OR risk_level in high_risk_levels never returns PROCEED; forced to ARCHITECTURE_FIRST (or ASK_QUESTIONS first if a field is missing) so a BMS / inverter / motor / charger is never silently generated even at a high score. (2) LOW-COMPLEXITY DIRECT GENERATE - a Low-complexity, low-risk request (complexity in direct_generate_complexity) goes straight to PROCEED regardless of score; honours the user rule 'IF Complexity = Low THEN Direct Generate' so a simple STM32-LED board is not needlessly questioned. (3) COMPLETENESS 3-WAY - everything else: score < ask_threshold_pct -> ASK_QUESTIONS; ask..arch_threshold_pct -> ARCHITECTURE_FIRST; > arch_threshold_pct -> PROCEED.",
+
+  "project_types": [
+    {
+      "type": "bms",
+      "label": "Battery Management System",
+      "keywords": ["bms", "battery management", "cell balanc", "cell monitor", "pack monitor", "bq769", "bq76", "ltc68", "afe"],
+      "complexity": "High",
+      "risk": {"safety_critical": true, "power_electronics": true, "risk_level": "high"},
+      "required_fields": [
+        {"id": "cell_count", "label": "cell count (S-count)", "satisfied_regex": "\\b\\d+\\s?s\\b", "satisfied_keywords": ["cell", "series"], "question": "How many cells in series (e.g. 13S)?"},
+        {"id": "afe", "label": "battery monitor / AFE", "satisfied_by_named_part": true, "satisfied_keywords": ["bq769", "bq76", "ltc68", "afe", "analog front"], "question": "Which battery monitor / AFE (e.g. BQ76952)?"},
+        {"id": "pack_voltage", "label": "pack voltage", "satisfied_regex": "\\b\\d{1,3}\\s?v\\b", "question": "What is the pack voltage (e.g. 48V)?"},
+        {"id": "balancing", "label": "balancing type", "satisfied_keywords": ["balanc"], "question": "Passive or active cell balancing?"},
+        {"id": "protection", "label": "protection (MOSFET/contactor/fuse)", "satisfied_keywords": ["mosfet", "contactor", "fuse", "disconnect", "relay"], "question": "Protection method - MOSFETs, contactor, or fuse?"},
+        {"id": "comms", "label": "host comms", "satisfied_keywords": ["can", "uart", "smbus", "i2c", "isospi", "rs485"], "question": "Host comms - CAN, UART, or SMBus?"}
+      ]
+    },
+    {
+      "type": "inverter",
+      "label": "Power Inverter / VFD",
+      "keywords": ["inverter", "vfd", "three-phase inverter", "3-phase inverter", "traction inverter", "grid-tie", "spwm"],
+      "complexity": "Critical",
+      "risk": {"safety_critical": true, "power_electronics": true, "risk_level": "critical"},
+      "required_fields": [
+        {"id": "topology", "label": "inverter topology", "satisfied_keywords": ["single-phase", "single phase", "three-phase", "three phase", "3-phase", "half-bridge", "full-bridge", "h-bridge"], "question": "Topology - single-phase or three-phase?"},
+        {"id": "bus_voltage", "label": "DC bus voltage", "satisfied_regex": "\\b\\d{1,4}\\s?v\\b", "question": "What is the DC bus voltage?"},
+        {"id": "power_rating", "label": "output power", "satisfied_regex": "\\b\\d{1,4}\\s?(kw|w)\\b", "satisfied_keywords": ["watt", "kilowatt"], "question": "Output power rating (e.g. 1kW)?"},
+        {"id": "switches", "label": "switching device", "satisfied_keywords": ["igbt", "mosfet", "sic", "gan"], "question": "Switch type - IGBT, MOSFET, or SiC?"},
+        {"id": "gate_driver", "label": "gate driver", "satisfied_by_named_part": true, "satisfied_keywords": ["gate driver", "ir2110", "ucc", "ir21", "1edn"], "question": "Which gate driver IC?"},
+        {"id": "control", "label": "control method", "satisfied_keywords": ["foc", "spwm", "svpwm", "dsp", "mcu", "stm32"], "question": "Control method - SPWM or FOC?"}
+      ]
+    },
+    {
+      "type": "motor_driver",
+      "label": "Motor Driver",
+      "keywords": ["motor driver", "motor controller", "h-bridge", "bldc", "stepper driver", "esc", "gate driver", "foc", "servo drive"],
+      "complexity": "High",
+      "risk": {"safety_critical": true, "power_electronics": true, "risk_level": "high"},
+      "required_fields": [
+        {"id": "motor_type", "label": "motor type", "satisfied_keywords": ["bldc", "stepper", "brushed", "pmsm", "servo"], "question": "Motor type - BLDC, stepper, or brushed?"},
+        {"id": "voltage", "label": "supply voltage", "satisfied_regex": "\\b\\d{1,3}\\s?v\\b", "question": "Motor supply voltage?"},
+        {"id": "current", "label": "phase current", "satisfied_regex": "\\b\\d{1,3}\\s?a\\b", "satisfied_keywords": ["amp"], "question": "Phase / continuous current?"},
+        {"id": "driver_ic", "label": "driver IC", "satisfied_by_named_part": true, "satisfied_keywords": ["drv8", "tb6612", "l298", "a4988", "tmc2", "tmc5"], "question": "Which driver IC (e.g. DRV8301, TB6612)?"},
+        {"id": "control", "label": "control interface", "satisfied_keywords": ["pwm", "step", "dir", "spi", "foc"], "question": "Control interface - PWM, STEP/DIR, or SPI?"},
+        {"id": "mcu", "label": "controller MCU", "satisfied_by_named_part": true, "satisfied_keywords": ["stm32", "esp32", "mcu", "microcontroller"], "question": "Controller MCU?"}
+      ]
+    },
+    {
+      "type": "charger",
+      "label": "Battery Charger",
+      "keywords": ["charger", "charging", "tp4056", "bq24", "bq25", "mcp7383", "cc/cv", "cc cv"],
+      "complexity": "Medium",
+      "risk": {"safety_critical": true, "power_electronics": true, "risk_level": "high"},
+      "required_fields": [
+        {"id": "chemistry", "label": "battery chemistry", "satisfied_keywords": ["li-ion", "lipo", "lifepo4", "lead acid", "nimh", "li-po", "lithium"], "question": "Battery chemistry - Li-ion, LiPo, or LiFePO4?"},
+        {"id": "cell_count", "label": "cell count", "satisfied_regex": "\\b\\d+\\s?s\\b", "satisfied_keywords": ["cell", "single cell"], "question": "How many cells (e.g. 1S, 3S)?"},
+        {"id": "charge_current", "label": "charge current", "satisfied_regex": "\\b\\d+(\\.\\d+)?\\s?a\\b", "satisfied_keywords": ["amp", "ma"], "question": "Charge current?"},
+        {"id": "input", "label": "input source", "satisfied_keywords": ["usb", "usb-c", "5v", "12v", "adapter", "barrel"], "satisfied_regex": "\\b\\d{1,3}\\s?v\\b", "question": "Input source - USB, 5V, or 12V adapter?"}
+      ]
+    },
+    {
+      "type": "power_supply",
+      "label": "Power Supply",
+      "keywords": ["power supply", "psu", "smps", "buck", "boost", "buck-boost", "ldo", "regulator", "dc-dc", "dc dc", "flyback"],
+      "complexity": "Medium",
+      "risk": {"safety_critical": false, "power_electronics": true, "risk_level": "med"},
+      "required_fields": [
+        {"id": "vin", "label": "input voltage", "satisfied_regex": "\\b\\d{1,3}\\s?v\\b", "question": "Input voltage?"},
+        {"id": "vout", "label": "output voltage", "satisfied_regex": "\\b\\d{1,2}(\\.\\d)?\\s?v\\b", "question": "Output voltage?"},
+        {"id": "iout", "label": "output current", "satisfied_regex": "\\b\\d{1,3}\\s?(a|ma)\\b", "satisfied_keywords": ["amp"], "question": "Output current?"},
+        {"id": "topology", "label": "linear vs switching", "satisfied_keywords": ["ldo", "linear", "buck", "boost", "switching", "smps", "flyback"], "question": "Linear or switching regulator?"}
+      ]
+    },
+    {
+      "type": "can_logger",
+      "label": "CAN / Data Logger",
+      "keywords": ["can logger", "can data logger", "can bus logger", "obd logger", "obd2", "data logger", "canbus logger"],
+      "complexity": "Medium",
+      "risk": {"safety_critical": false, "power_electronics": false, "risk_level": "med"},
+      "required_fields": [
+        {"id": "mcu", "label": "MCU", "satisfied_by_named_part": true, "satisfied_keywords": ["stm32", "esp32", "atmega", "rp2040", "mcu", "microcontroller"], "question": "Which MCU (e.g. STM32F405, ESP32)?"},
+        {"id": "storage", "label": "storage", "satisfied_keywords": ["sd card", "micro sd", "microsd", "spi flash", "w25q", "eeprom", "emmc", "flash"], "question": "Where should it log - micro-SD card or onboard flash?"},
+        {"id": "power_input", "label": "power input", "satisfied_keywords": ["usb", "12v", "24v", "battery", "barrel", "ldo", "buck"], "satisfied_regex": "\\b\\d{1,3}\\s?v\\b", "question": "Power input - USB, 12V, or battery?"},
+        {"id": "can_speed", "label": "CAN bit-rate", "satisfied_keywords": ["125k", "250k", "500k", "1mbit", "1 mbps", "kbps", "mbps", "bit-rate", "baud"], "question": "CAN bit-rate (e.g. 250k, 500k, 1 Mbit)?"},
+        {"id": "rtc", "label": "RTC / timestamp", "satisfied_keywords": ["rtc", "ds3231", "pcf85", "timestamp", "real-time clock", "real time clock"], "question": "Do you need a timestamp/RTC (e.g. DS3231)?"},
+        {"id": "transceiver", "label": "CAN transceiver", "satisfied_by_named_part": true, "satisfied_keywords": ["tja10", "sn65hvd", "mcp255", "mcp256", "transceiver"], "question": "Which CAN transceiver (e.g. SN65HVD230, TJA1051)?"}
+      ]
+    },
+    {
+      "type": "embedded_system",
+      "label": "Embedded System",
+      "keywords": ["gateway", "gps tracker", "tracker", "iot", "data acquisition", "daq", "telemetry", "logger", "monitor"],
+      "complexity": "Medium",
+      "risk": {"safety_critical": false, "power_electronics": false, "risk_level": "low"},
+      "required_fields": [
+        {"id": "mcu", "label": "MCU", "satisfied_by_named_part": true, "satisfied_keywords": ["stm32", "esp32", "atmega", "rp2040", "mcu", "microcontroller"], "question": "Which MCU?"},
+        {"id": "power_input", "label": "power input", "satisfied_keywords": ["usb", "battery", "12v", "5v", "ldo", "buck", "solar"], "satisfied_regex": "\\b\\d{1,3}\\s?v\\b", "question": "Power input - USB, battery, or DC?"},
+        {"id": "connectivity", "label": "connectivity", "satisfied_keywords": ["wifi", "wi-fi", "ble", "bluetooth", "lora", "can", "ethernet", "gps", "cellular", "lte", "usb"], "question": "Connectivity - WiFi, BLE, LoRa, CAN, or Ethernet?"},
+        {"id": "io", "label": "main I/O", "satisfied_keywords": ["sensor", "relay", "display", "sd", "storage", "adc", "input", "output"], "question": "Main I/O - sensors, display, or storage?"}
+      ]
+    },
+    {
+      "type": "mcu_board",
+      "label": "MCU / Dev Board",
+      "keywords": ["stm32", "esp32", "esp8266", "atmega", "attiny", "rp2040", "arduino", "nrf52", "samd", "dev board", "devboard", "breakout", "microcontroller", "mcu board"],
+      "complexity": "Low",
+      "risk": {"safety_critical": false, "power_electronics": false, "risk_level": "low"},
+      "required_fields": [
+        {"id": "mcu", "label": "MCU", "satisfied_by_named_part": true, "satisfied_keywords": ["stm32", "esp32", "esp8266", "atmega", "attiny", "rp2040", "nrf52", "samd", "pic", "mcu"], "question": "Which MCU?"},
+        {"id": "power_input", "label": "power input", "satisfied_keywords": ["usb", "usb-c", "3v3", "3.3v", "5v", "ldo", "battery", "buck"], "question": "Power input - USB, 3.3V, or battery?"},
+        {"id": "programming", "label": "programming header", "satisfied_keywords": ["swd", "icsp", "jtag", "usb", "uart", "bootloader", "tag-connect"], "question": "Programming - SWD, ICSP, or USB bootloader?"}
+      ]
+    },
+    {
+      "type": "generic",
+      "label": "Generic Circuit",
+      "keywords": [],
+      "complexity": "Low",
+      "risk": {"safety_critical": false, "power_electronics": false, "risk_level": "low"},
+      "required_fields": [
+        {"id": "main_part", "label": "main IC / function", "satisfied_by_named_part": true, "question": "What is the main IC or function?"},
+        {"id": "power_input", "label": "power source", "satisfied_keywords": ["usb", "battery", "ldo", "buck", "5v", "3v3", "3.3v", "12v"], "satisfied_regex": "\\b\\d{1,3}\\s?v\\b", "question": "Power source / voltage?"}
+      ]
+    }
+  ]
+}

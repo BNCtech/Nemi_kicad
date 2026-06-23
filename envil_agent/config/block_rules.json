@@ -1,0 +1,59 @@
+{
+  "_about": "Structural rules every IRBlock must satisfy. Validated by intent/validate.py BEFORE render — failures fire as `error` severity so the architect-retry loop catches them. Every threshold here is config-driven so a project can loosen / tighten without code changes. Adding a new constraint = one JSON key + one validator branch.",
+  "version": 1,
+
+  "anchor_refdes_prefixes": [
+    "U", "J", "Y", "SW", "K", "T", "BT", "F", "FB", "L"
+  ],
+
+  "connector_refdes_prefixes": ["J", "P", "CN"],
+  "_connector_refdes_doc": "Refdes letters used for connectors (jacks, headers, sockets, plugs). Per ASME Y14.44 / IEEE 315 the canonical letter is 'J' (jack); some projects use 'P' (plug) for cable-side or 'CN' for sub-classified connectors. Consumed by the single_connector_blocks exemption --- a block on the single_connector_blocks list with exactly ONE component whose refdes letter is in this list AND with pin count >= minimum_anchor_pin_count is exempt from BLOCK_TOO_SMALL. Add new refdes letters here when a project uses an unusual convention; no Python edit required.",
+  "_anchor_refdes_doc": "Refdes letters whose components are considered structural anchors of a block (per ASME Y14.44 / IEEE 315). A block must contain at least one component whose refdes letter is in this list AND whose pin count is >= minimum_anchor_pin_count. Single-pin parts (test points, mounting holes) do not count. Tune for a project that uses unusual refdes letters.",
+
+  "passives_only_blocks": [
+    "INDICATOR",
+    "POWER_RAILS",
+    "DECOUPLING",
+    "FILTER",
+    "RESET",
+    "USER_INTERFACE",
+    "INPUT",
+    "OUTPUT",
+    "CLOCK",
+    "OSCILLATOR",
+    "BOOT",
+    "BOOT_CONFIG"
+  ],
+  "_passives_only_blocks_doc": "Block names that are legitimately ALLOWED to contain only passives / 2-pin parts (R / C / L / D / crystal) without a multi-pin (>= minimum_anchor_pin_count) IC anchor. Examples: INDICATOR (LED + series R), CLOCK (Y1 crystal + 2 load caps --- crystals are 2-pin by definition so they fail the >=3 pin anchor rule even though they ARE the anchor of a CLOCK block), RESET (R pullup + switch + decoupling cap). Adding a name here exempts it from BLOCK_NO_ANCHOR. To restore strict anchor enforcement for any block, remove its name from this list. The size check (BLOCK_TOO_SMALL) still applies --- block must have >= minimum_components_per_block parts.",
+
+  "single_connector_blocks": [
+    "ICSP",
+    "PROG",
+    "SWD",
+    "JTAG",
+    "USB",
+    "USB_PROTECTION",
+    "UART",
+    "CAN",
+    "RS485",
+    "RS232",
+    "ETHERNET"
+  ],
+  "_single_connector_blocks_doc": "Block names that are legitimately ALLOWED to contain only ONE component when that component is a multi-pin connector (refdes prefix J). SWD/ICSP/JTAG programming headers are 6-pin connectors that constitute a self-contained functional block on their own --- without this exemption, a board with just one SWD header forces the architect to dump it into a neighbouring block (CLOCK / MCU / etc.), visually splitting unrelated sections. Bypass: a block whose name is in this list AND whose component_refs[] contains exactly one J* component with >= minimum_anchor_pin_count pins is exempt from BLOCK_TOO_SMALL.",
+
+  "minimum_anchor_pin_count": 3,
+  "_minimum_anchor_pin_count_doc": "Smallest pin count for an anchor component. 3 = SOT-23 transistor / 3-pin LDO / 3-pin connector. Raise to 4-6 for boards whose 'anchor' should always be a chip, lower to 2 for very loose hierarchies.",
+
+  "minimum_components_per_block": 2,
+  "_minimum_components_per_block_doc": "Smallest block that's worth a child sheet. Single-component blocks (e.g. INDICATOR containing only D1) are noise; merge them into siblings. Set to 1 to allow them.",
+
+  "single_component_blocks_allowed": false,
+  "_single_component_blocks_allowed_doc": "Quick override of minimum_components_per_block. When true, any block with >= 1 component passes BLOCK_TOO_SMALL. When false (default), the minimum applies.",
+
+  "enforce_anchor_check": true,
+  "enforce_size_check": true,
+  "enforce_justification_check": true,
+  "enforce_name_uniqueness": true,
+  "enforce_name_in_registry": true,
+  "_gates_doc": "Per-check toggles. Set any to false to disable that validator branch without code changes (e.g. tutorial circuits where INDICATOR-only blocks are pedagogical)."
+}

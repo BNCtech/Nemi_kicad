@@ -1,0 +1,2094 @@
+{
+  "_about": "Universal layout-engine config. All thresholds, conventions, and weights live here. No circuit names or component-specific logic \u2014 edits to this file change behavior across every circuit class without code changes.",
+  "unified_chat": {
+    "_comment": "One-AI mode (2026-06-18, user policy 'now only one ai'). When enabled the chat exposes ALL tools (schematic + PCB) and a unified system prompt regardless of which editor opened the panel, so a single assistant runs the whole flow (build/edit schematic -> ERC -> PCB place/route -> DRC -> Gerber) and edits an existing design OR creates one from scratch. Read by agent.py:_unified_chat_enabled. Set enabled=false to restore the legacy per-editor page-scoped behaviour (eeschema panel = schematic tools only, pcbnew panel = PCB tools only). 2026-06-21: user reverted to page-scoped. 2026-06-22: user RE-ENABLED -- wants ONE COMMON AI for the whole KiCad ('appadi illa common ai for whole kicad'), not sch-page=sch-prompt / pcb-page=pcb-prompt. This also removes the stale-PCB-scope-blocks-build problem since the prompt+tools no longer depend on the panel's reported page.",
+    "enabled": true
+  },
+  "build_flow": {
+    "_comment": "Cursor / coding-agent build flow (2026-06-22, user: 'first folder create pannitu tha circuit create panna permission kekkanum ... appadi thana cursor claude eppadi work aakuthu'). When folder_first=true (default), a NEW whole-circuit request runs: (1) ask Project name -> (2) call create_project to make the EMPTY project folder+files (loads in Project Files, ALWAYS succeeds) -> (3) ask the design questions -> (4) build_circuit with out_path=<the created .kicad_sch> to fill the circuit INTO that project. The workspace exists before its contents, so a circuit with doubts/errors never costs the user the folder. Read by agent.py:_folder_first_enabled, which appends FOLDER_FIRST_RULE and SUPPRESSES the one-step ASK_ASSUMPTIONS_RULE + PROJECT_NAMING_RULE (whose ordering would contradict it). Set false to restore the legacy one-step flow (ask design questions, then build folder+circuit together in one build_circuit call).",
+    "folder_first": true
+  },
+  "project_naming": {
+    "_comment": "Cursor-style project naming (2026-06-21, user request: 'cursor folder structure ku user-kitta kekkuma, athu maathiri kicad-layum venum'). When enabled the agent proposes a project name + folder path INSIDE the NEW-circuit build preview (a 'Project:' and 'Folder:' line just above 'Want me to build it?'), and the user can override the name/folder before confirming -- exactly like Cursor showing the file tree before it writes. The agreed name flows build_circuit(project_name=...) -> RouterState.project_name -> graphs/nodes/render.py, which sets ir.name so the per-circuit folder, the .kicad_sch basename, the child sheet files and the title block all follow the user's chosen name instead of the architect's auto ir.name. Read by agent.py:_project_naming_enabled (appends PROJECT_NAMING_RULE to the system prompt) and render_node (the ir.name override, only when project_name is set AND out_path is empty). Set enabled=false (propose_in_preview=false) to restore the fully-automatic naming -- byte-stable: the prompt prefix drops the suffix and, with no project_name in state, render_node is unchanged. Ignored when overwriting an open file (out_path set keeps that file's name).",
+    "propose_in_preview": true
+  },
+  "sheet_decision": {
+    "_comment": "Phase 14. Auto-decision: single sheet vs single+blocks vs multi-sheet hierarchy. Three regimes: SMALL = no blocks (just flat); MEDIUM = single sheet with block rectangles; LARGE = hierarchical multi-sheet (parent + child .kicad_sch files). Tune per project here \u2014 no hardcoded thresholds in engine.py.",
+    "small_max_components": 20,
+    "large_min_components": 50,
+    "hierarchy_min_blocks": 3,
+    "single_sheet_max_blocks": 5,
+    "post_architect_relayout": true,
+    "_post_architect_relayout_comment": "User policy (2026-06-05): the pre-architect 'Choose layout' node guesses the 3-way mode (FLAT / SINGLE_SHEET_BLOCKS / HIERARCHY) from PROMPT KEYWORDS only, which is unstable -- the same 'design a complete CAN logger' prompt scored complexity 69 -> HIERARCHY on one run and 54 -> FLAT on the next, flipping the layout for an identical board. When true (default), render_node re-decides the 3-way from the ACTUAL block count the architect emitted (SINGLE_SHEET_BLOCKS if blocks>=hierarchy_min_blocks, HIERARCHY if blocks>single_sheet_max_blocks), so the layout follows the real board, not the prompt phrasing. Only overrides an AUTO decision -- an explicit user 'single sheet' / 'hierarchy' request is left untouched. Set false to trust the pre-architect prompt-keyword guess.",
+    "_single_sheet_max_blocks_comment": "User policy (2026-06-03, set back to 5): single-sheet-with-blocks holds up to this many functional blocks; ABOVE it render() forces multi-sheet hierarchy (A2 is NOT allowed). 6+ functional groups (e.g. the STM32+CAN+microSD data logger: POWER_INPUT/5V_REG/3V3_REG/MCU/CAN/SD/PROTECTION/INDICATORS...) go multi-sheet. Driven by the ACTUAL block count the architect emitted, not the pre-architect prompt-keyword estimate.",
+    "size_override_beats_single_sheet": true,
+    "_size_override_beats_single_sheet_comment": "User policy (2026-06-03): part COUNT is the second physical limit on one A3 sheet. When true, a force_single_sheet design (auto- OR user-requested 'make it single sheet') that stays UNDER single_sheet_max_blocks but emits > large_min_components in >= 2 blocks is rendered multi-sheet hierarchy instead — same as the n_blk > single_sheet_max_blocks term, but on component count. Catches dense boards that fit the block cap yet overflow the sheet (STM32 + CAN + microSD data logger ~60 parts in 7-9 blocks). Set false to restore legacy behaviour where force_single_sheet always wins below the block cap.",
+    "escalate_on_geometric_overflow": true,
+    "_escalate_on_geometric_overflow_comment": "HARD RULE ([[feedback_layout_within_sheet]]) — the authoritative, geometry-based backstop to the COUNT proxies above. After render_flat lays out a single-sheet-with-blocks board AND grows the page to the size cap (A3; A2/A1 banned, L12), it measures the REAL content bbox; if it still exceeds the usable area (page minus margins minus title-block reserve) on either axis, the board is split into a multi-sheet hierarchy instead of being top/left-aligned with the surplus spilling off the bottom-right border (the 'circuit outside the sheet' defect). Block/part COUNT only approximates 'fits one sheet'; a 64-pin STM32 + full decoupling + dual crystals passes both count gates (~30 parts, 5 blocks) yet overflows A3. Fires only when the layout genuinely does not fit, so boards that DO fit are byte-identical (non-breaking). Set false to restore the legacy count-only decision (an over-large flat board then renders off-sheet).",
+    "geometric_overflow_tol_mm": 1.0,
+    "_geometric_overflow_tol_mm_comment": "Slack (mm, ~1 grid step) before the geometric-overflow split fires, so a layout that fits within a hair of the usable area is not split needlessly.",
+    "_rule": "use_hierarchy = force_hierarchy OR (n_blk > single_sheet_max_blocks) OR (n_comp > large_min AND n_blk >= 2) OR (n_blk >= hierarchy_min_blocks AND n_comp > small_max). BOTH the (n_blk > single_sheet_max_blocks) term AND the (n_comp > large_min AND n_blk >= 2) term override a force_single_sheet flag (the latter gated by size_override_beats_single_sheet). force_hierarchy comes from build_circuit's flag (user explicitly asks 'as multi-sheet')."
+  },
+  "recenter_content": {
+    "_comment": "Page-aware re-centring. The placer anchors everything at the fixed module constant SHEET_CENTRE (148.59, 105.41) = A4 centre. When the dynamic paper picker chooses A3+ for a multi-block single sheet, content built around the A4 centre clusters in the TOP-LEFT corner of the bigger sheet (the 'oorama' / corner bug). After placement, this pass measures the content bounding box and translates EVERY component so the bbox centre lands on the real paper centre. Purely additive: positions only; wires/labels/junctions are derived downstream from component positions so they follow automatically. Disable (enabled=false) for byte-identical legacy output.",
+    "enabled": false,
+    "snap_grid_mm": 1.27,
+    "clear_title_block": false,
+    "_clear_title_block_note": "When true, the vertical target is the centre of the band ABOVE the bottom-right title block (page_h - title_block_h)/2 instead of the geometric page centre, biasing content up so large designs never overlap the title block. Default false keeps A4 single-IC output centred on the true page centre (delta ~0 -> unchanged).",
+    "min_shift_mm": 1.27,
+    "_min_shift_note": "Skip the shift entirely when both |dx| and |dy| are below this — keeps already-centred renders (A4 single-IC) byte-identical."
+  },
+  "keep_inside_sheet": {
+    "_comment": "HARD RULE ([[feedback_layout_within_sheet]]): the finished design must stay INSIDE the printable sheet border and clear of the bottom-right title block. Runs dead-last in render_flat + child-sheet render, AFTER every placement + relocation pass (decoupling/crystal hug, connector-edge snap, block reflow + title-block lift) — those passes move individual parts to satisfy local rules and can push the content bbox past the page edge the initial grid centring kept it inside (the 'components cross the red border' defect). This pass measures the FINAL content bbox and, when it crosses a border, rigidly TRANSLATES the whole design (positions only; wires/labels/junctions derive from pin positions downstream so they follow) the minimum on-grid distance to bring it back in-bounds. CLAMP, not centre: a design already inside the border is left byte-identical (the common A4 single-IC case is a no-op), so it is safe to leave on. Set enabled=false for legacy byte-identical output. A margin_mm edge omitted falls back to placement.page_margin_mm; the 12.7 mm (500 mil) default is looser than the placer's 18 mm so the net only fires on a real crossing.",
+    "enabled": true,
+    "margin_mm": {
+      "left": 12.7,
+      "right": 12.7,
+      "top": 12.7,
+      "bottom": 12.7
+    },
+    "clear_title_block": true,
+    "_clear_title_block_note": "When true, the bottom usable edge is pulled up to the title-block top (page_h - title_block_h) so content is clamped clear of the bottom-right title block. When false, only the page margins bound the clamp.",
+    "include_field_text": true,
+    "_include_field_text_note": "When true (default), the clamp measures each part's field-text-aware bbox (_abs_bbox_with_fields) instead of the body-only outer bbox, so a part whose BODY is in-bounds but whose RefDes/Value text spills across the border or onto the title block is still pulled back. Set false for byte-identical body-only legacy measurement.",
+    "grow_page_if_overflow": true,
+    "_grow_page_if_overflow_note": "When true (default), if the FINISHED content is larger than the chosen page's usable area, the page is grown to the next size in hierarchy_layout.page_size_priority that fits (A4->A3) BEFORE the clamp top/left-aligns it — measured on real post-placement geometry. Bounded by the priority list (never A2/A1 per L12). Set false to keep the legacy behaviour where an over-large flat sheet is shoved off the bottom-right edge instead of growing.",
+    "snap_grid_mm": 1.27
+  },
+  "decoupling_auto_add": {
+    "_comment": "Phase 12. add_decoupling verb auto-adds HF + bulk caps on every VDD-like pin of a target IC. All values + pin patterns config-driven so per-project tuning needs ZERO code changes.",
+    "hf_cap_value": "100n",
+    "bulk_cap_value": "10u",
+    "hf_cap_lib_id": "Device:C",
+    "bulk_cap_lib_id": "Device:C_Polarized",
+    "include_bulk": true,
+    "vdd_pin_name_patterns": [
+      "VCC",
+      "VDD",
+      "AVDD",
+      "DVDD",
+      "VBAT",
+      "VDDA",
+      "VDDIO",
+      "VSYS",
+      "VREF",
+      "V+",
+      "+VS",
+      "VS+"
+    ]
+  },
+  "erc_check": {
+    "_comment": "Phase 19a. kicad-cli wrapper for ERC. Severity-all so we surface warnings too. Disable by setting enabled=false if kicad-cli isn't on PATH.",
+    "enabled": true,
+    "kicad_cli_command": "F:/Ki_CAD/kicad-source-mirror/build/install/msvc-win64-release/bin/kicad-cli.exe",
+    "severity": "all",
+    "timeout_seconds": 30,
+    "run_on_copy": true,
+    "_run_on_copy_note": "Fix (2026-06-08) for the ERC-timeout-while-open bug. When KiCad has the project open it holds a `~<name>.kicad_sch.lck`, and kicad-cli HANGS reading the locked file (measured: locked original times out at 30s vs an unlocked COPY finishing in 10s — a LOCK, not slowness, so a bigger timeout won't help). When true, erc_check copies the whole project (all .kicad_sch + .kicad_pro + any local *-lib-table) into a throwaway temp dir and runs ERC there, then persists the report next to the original — so ERC + the erc_autofix regression guard work WHILE the file is open in KiCad. Set false to run directly on the original (legacy; times out on a locked file)."
+  },
+  "export_docs": {
+    "_comment": "Phase 21. One-call doc pack: schematic PDF + SVG + PCB 3D PNGs + BOM CSV + README.md. All written into <sch_dir>/docs/. Universal. Toggle stages via `include_*` flags or per-call args.",
+    "enabled": true,
+    "kicad_cli_command": "F:/Ki_CAD/kicad-source-mirror/build/install/msvc-win64-release/bin/kicad-cli.exe",
+    "dirname": "docs",
+    "bw": false,
+    "include_3d": true,
+    "include_bom": true,
+    "bom_preset": "altium",
+    "readme_notes": "",
+    "timeout_seconds": 90
+  },
+  "ship_design": {
+    "_comment": "Phase 18e. One-prompt finisher \u2014 runs ERC, BOM, DRC, Gerbers, 3D render in sequence and returns a single report. Disable any stage by setting `enabled: false` inside its `steps` entry. Set `strict: true` on DRC to fail the report on any DRC error (default is lenient because empty/un-routed boards report 'no Edge.Cuts' which is expected).",
+    "enabled": true,
+    "steps": {
+      "erc": {
+        "enabled": true
+      },
+      "bom": {
+        "enabled": true,
+        "preset": "altium"
+      },
+      "drc": {
+        "enabled": true,
+        "strict": false
+      },
+      "gerbers": {
+        "enabled": true
+      },
+      "render_3d": {
+        "enabled": true
+      }
+    }
+  },
+  "render_pcb_3d": {
+    "_comment": "Phase 18d. kicad-cli pcb render -> PNG 3D views. Default top+bottom @1600x900 'basic' quality (fast, ~2-3 sec each). Use 'high' for marketing screenshots (~30 sec). Universal.",
+    "enabled": true,
+    "kicad_cli_command": "F:/Ki_CAD/kicad-source-mirror/build/install/msvc-win64-release/bin/kicad-cli.exe",
+    "sides": [
+      "top",
+      "bottom"
+    ],
+    "width": 1600,
+    "height": 900,
+    "quality": "basic",
+    "background": "opaque",
+    "perspective": false,
+    "floor": false,
+    "timeout_seconds": 90
+  },
+  "drc_check": {
+    "_comment": "Phase 19c. kicad-cli wrapper for PCB Design Rules Check. Universal \u2014 works for any .kicad_pcb. Pairs with erc_check (schematic-side). Reports clearance violations, unrouted nets, hole-to-edge clearance, etc. Set schematic_parity=true to also verify the PCB matches the schematic netlist.",
+    "enabled": true,
+    "kicad_cli_command": "F:/Ki_CAD/kicad-source-mirror/build/install/msvc-win64-release/bin/kicad-cli.exe",
+    "units": "mm",
+    "all_track_errors": false,
+    "schematic_parity": false,
+    "timeout_seconds": 60,
+    "timeout_per_footprint_ms": 200,
+    "timeout_max_seconds": 600,
+    "_timeout_scaling_comment": "P3.1 (2026-05-26). Actual DRC timeout = max(timeout_seconds, timeout_seconds + footprint_count * timeout_per_footprint_ms / 1000), capped at timeout_max_seconds. kicad-cli's DRC scales roughly linearly with footprint + track count; the original fixed 60 s killed runs on anything over ~100 footprints. Set timeout_per_footprint_ms=0 to restore the fixed-budget behaviour."
+  },
+  "route_pcb_simple": {
+    "_comment": "Phase 25 v1. Best-effort L-shaped Manhattan router for SHORT nets — connects 2-to-N-pad nets on a single layer (F.Cu by default) using a minimum spanning tree of L-shaped traces. NOT a replacement for a real autorouter (FreeRouting) — it does no via insertion, no multi-layer routing, no length matching, no diff-pair handling. Intended for the easy cases: decoupling caps to IC pins, short pull-ups, simple connector fanout. Long / complex nets are SKIPPED and reported in the result so the user knows to route them manually or via a real autorouter. GND-like nets default to SKIP because they're served by the auto_zones_pcb copper pour.",
+    "enabled": true,
+    "layer": "F.Cu",
+    "max_pads_per_net": 6,
+    "_max_pads_comment": "Skip nets with more pads than this. A 12-pad MCU power net is best left to a real router (or the GND pour).",
+    "max_net_span_mm": 0.0,
+    "_max_net_span_comment": "Skip a net when the bounding box of its pads exceeds this on either axis. Stops the simple router from drawing kilometre-long zig-zags across the whole board. Set to 0 (default) for AUTO — scaled to the board's actual pad-bbox diagonal via max_net_span_diag_factor. The old 60 mm fixed cap silently dropped legitimate power rails on any board > 80 mm wide.",
+    "max_net_span_diag_factor": 1.0,
+    "_max_net_span_diag_factor_comment": "P2.1 (2026-05-26). Multiplier on the pad-bbox diagonal when max_net_span_mm=0. 1.0 = full diagonal (allow any rail that fits on the board). Lower to skip nets spanning more than X% of the board.",
+    "default_track_width_mm": 0.25,
+    "_track_width_comment": "Used when the net's class doesn't define one and no override is passed. Net-class width (from set_design_rules) is preferred when available.",
+    "clearance_mm": 0.2,
+    "skip_nets": ["GND", "AGND", "DGND", "PGND", "EGND", "SGND", "VSS", "0", ""],
+    "_skip_nets_comment": "Net names that should NEVER be routed as discrete traces. Ground nets are handled by auto_zones_pcb's copper pour; the unconnected '' entry stops us from routing the implicit no-net pad.",
+    "use_net_class_width": true,
+    "obstacle_inflate_mm": 0.5,
+    "_obstacle_inflate_comment": "Pad bbox of OTHER footprints is inflated by this much when checking whether an L-shape crosses a body. Bigger = safer but skips more routes.",
+    "skip_pad_overlap_mm": 0.05,
+    "_skip_pad_overlap_comment": "When the L-segment passes within this distance of the segment endpoints' OWN pad bbox we keep it (it should overlap the pads it connects to). Otherwise we'd reject every valid route.",
+    "preview_only": false,
+    "_preview_only_comment": "When true, return the route list WITHOUT mutating the .kicad_pcb. Useful as a dry-run before committing tracks.",
+    "replace_existing": false,
+    "_replace_existing_comment": "When true, delete every existing track segment on `layer` before routing. Off by default — the user may have manual tracks they want kept.",
+
+    "enable_z_detour": true,
+    "_enable_z_detour_comment": "v2 (2026-05-26): when both L-shape candidates fail (other-net pads in the way), try Z-shape (3-segment) detours that bend AROUND obstacles. Searches outward from the y-midpoint in `z_step_mm` increments up to `z_max_offset_mm`. Closes many simple-block routes that v1 was skipping.",
+    "z_step_mm": 2.54,
+    "z_max_offset_mm": 25.0,
+
+    "enable_vias": true,
+    "_enable_vias_comment": "v2: when L AND Z fail, drop a via at the L-corner and finish the route on the back layer. Cap per net via `max_vias_per_net`. Useful for boards where the front layer has too many obstacles for a flat route.",
+    "back_layer": "B.Cu",
+    "via_drill_mm": 0.3,
+    "via_size_mm": 0.6,
+    "max_vias_per_net": 4,
+    "_max_vias_per_net_comment": "Hard cap on via insertions per net so one dense net can't fill the board with stitching. 4 is enough for short signal nets; bump for power distribution if needed.",
+    "_max_vias_per_class_comment": "R1.3 (2026-05-26). Per-net-class via budget override. Power and GND nets often need 8-16 stitching vias to bridge zone returns and are starved by the global max_vias_per_net=4. Net class is looked up from .kicad_pro's netclass_patterns; any class not listed here uses max_vias_per_net.",
+    "max_vias_per_class": {
+      "Power": 16,
+      "POWER": 16,
+      "GND": 16
+    },
+
+    "layer_axis_policy": {
+      "F.Cu": "h",
+      "B.Cu": "v"
+    },
+    "_layer_axis_policy_comment": "R1.2 (2026-05-26). Per-layer preferred routing axis. F.Cu defaults to 'h' (horizontal-first L-shape) and B.Cu to 'v' (vertical-first) — standard two-layer PCB convention. When both L candidates clear the obstacle list, the policy-preferred one wins. Set 'any' to keep the legacy [h, v] order. Universal — works for any board; project can override per layer (e.g. 4-layer with In1.Cu signals horizontal, In2.Cu power, etc.).",
+
+    "enable_astar": true,
+    "_enable_astar_comment": "R1.1 (2026-05-26). When L + Z + via all fail, fall through to A* Manhattan-grid search. Pure-Python heapq; only the residual ~5% of edges reach this tier so cost is bounded. Set false to disable and skip those edges instead.",
+    "astar_step_mm": 1.27,
+    "_astar_step_mm_comment": "Grid pitch for A*. 1.27 mm = 50 mil, matches the schematic-side KiCad grid. Smaller = finer routing but exponentially more nodes; larger = coarser but faster.",
+    "astar_bounds_margin_mm": 8.0,
+    "_astar_bounds_margin_mm_comment": "Search bbox is the rect (a + b) inflated by this margin on each side. Bounds the search so A* never wanders the entire board for a short edge. Bump if obstacles force long detours.",
+    "astar_max_nodes": 50000,
+    "_astar_max_nodes_comment": "Hard cap on nodes explored per call. Hitting the cap returns None and the caller skips the edge — prevents A* from spinning on truly unroutable edges. 50k handles ~150 mm × 150 mm boards at 1.27 mm grid.",
+
+    "corner_chamfer_mm": 0.5,
+    "_corner_chamfer_mm_comment": "R2.3 (2026-05-27). 45° bevel length on right-angle corners — per rule 'Avoid 90-degree bends; use 45-degree bends'. Each 90° L-corner gets replaced with two perpendicular segments meeting via a chamfer_mm-long diagonal. Rejected per corner when the diagonal would clip an obstacle (kept square). Set 0 to disable; bump to 1.0 for more visible bevels on wider boards."
+  },
+
+  "pcb_verify": {
+    "_comment": "Phase 27. Composite 'after-every-PCB-mutation' verifier. Runs drc_check + render_pcb_3d in sequence and returns ONE compact card the chat can render inline. Mirrors the schematic-side render-then-ERC workflow ([[feedback_render_erc_chat_workflow]]). The agent is taught (system prompt) to call pcb_verify automatically after any PCB-mutating tool so the user always sees the post-change state without typing.",
+    "enabled": true,
+    "steps": {
+      "drc": {
+        "enabled": true,
+        "strict": false,
+        "_strict_comment": "When true, ANY DRC error fails the verify; when false (default) we report the count but still mark verify as 'ok' if the board is just unrouted. Mirrors ship_design.steps.drc.strict."
+      },
+      "render": {
+        "enabled": true,
+        "_comment": "Optional: skip the 3D render if the user is iterating quickly and the render delay (~3s) feels chatty. The DRC line still ships either way."
+      },
+      "silkscreen": {
+        "_comment": "R2.4 (2026-05-27). Pre-fab check: flags silkscreen items (fp_text / fp_line / fp_poly) that overlap pads of the same footprint — per rule 'Avoid silkscreen on pads'. Bboxes are inflated by `pad_inflate_mm` so silk that grazes the pad edge is still flagged.",
+        "enabled": true,
+        "strict": false,
+        "layers": ["F.SilkS", "B.SilkS"],
+        "pad_inflate_mm": 0.05
+      }
+    },
+    "card_template": {
+      "_comment": "Wording for the per-stage line of the verify card. {n} = error count, {w} = warning count, {img_top} / {img_bottom} = render file basenames.",
+      "drc_clean":      "DRC clean (0 errors, {w} warnings)",
+      "drc_errors":     "DRC: {n} errors, {w} warnings",
+      "render_done":    "rendered top + bottom (3D)",
+      "render_skipped": "render skipped"
+    }
+  },
+
+  "auto_mounting_holes_pcb": {
+    "_comment": "Phase 26a. Drop N NPTH mounting holes on a .kicad_pcb, inset from the corners of the Edge.Cuts outline. Universal — works on any board once auto_outline_pcb has produced an outline. Pure data: change the hole size by editing diameter_mm; M3 default (3.2 mm clearance for an M3 screw with washer). `inset_mm` is the corner-to-hole-center distance. `corner_strategy=4` places one hole at each of the 4 corners (standard); set to 2 to place only diagonally opposite holes for small boards.",
+    "enabled": true,
+    "diameter_mm": 3.2,
+    "inset_mm": 5.0,
+    "corner_strategy": 4,
+    "library_id": "MountingHole:MountingHole_3.2mm",
+    "exclude_from_pos_files": true,
+    "replace_existing": true,
+    "_replace_existing_comment": "When true, remove any pre-existing mounting-hole footprints (lib_id matching `library_id`) before placing new ones. Off if user manually positioned mounting holes and wants them kept."
+  },
+  "auto_fiducials_pcb": {
+    "_comment": "Phase 26b. Place fiducial markers on a .kicad_pcb so pick-and-place machines can register the board. Default: 3 fiducials at bottom-left, top-left, top-right corners (asymmetric pattern lets the P&P decide board orientation). 2-fiducial mode for small boards: just bottom-left + top-right. Pad geometry follows the standard 1 mm copper / 2 mm mask opening per IPC-7351.",
+    "enabled": true,
+    "count": 3,
+    "inset_mm": 5.0,
+    "pad_diameter_mm": 1.0,
+    "mask_opening_mm": 2.0,
+    "library_id": "Fiducial:Fiducial_1mm_Mask2mm",
+    "exclude_from_pos_files": true,
+    "replace_existing": true,
+    "_strategy_comment": "3-fiducial layout: BL + TL + TR (skip BR — asymmetric so P&P can detect orientation). 2-fiducial layout: BL + TR (diagonal). Set count=2 or 3."
+  },
+  "auto_thermal_vias_pcb": {
+    "_comment": "Phase 26c. Add a stitched-via array under exposed-pad (thermal paddle) pads to dump heat from power ICs into internal/back-side copper. Universal: scans every footprint for a pad whose number matches `paddle_pad_numbers`; for each match, drops a configurable via grid centered on the pad. Use after F8 + auto_place_pcb so the paddle pad position is correct.",
+    "enabled": true,
+    "paddle_pad_numbers": ["EP", "99", "11", "PAD", "ePAD", "Thermal"],
+    "_paddle_comment": "Pad-number conventions vary: QFN often uses 'EP' or the highest pin number; SOT-223 + DPAK use '2'; ATmega/STM32 QFN sometimes 'PAD'. The default list covers the common conventions — add new ones here when a fab silently skips the paddle.",
+    "via_drill_mm": 0.3,
+    "via_diameter_mm": 0.6,
+    "grid_pitch_mm": 1.0,
+    "min_pad_size_mm": 2.0,
+    "_min_pad_comment": "Skip vias under pads smaller than this — a 1 mm pad doesn't need thermal stitching and crowding small SMD pads with vias causes solder wicking.",
+    "ref_filter": "",
+    "_ref_filter_comment": "Empty = process every footprint. Set to a regex (e.g. 'U[0-9]+' or '^U[12]$') to limit thermal vias to specific refs.",
+    "replace_existing": true,
+    "_replace_existing_comment": "When true, delete previously-emitted thermal vias (vias inside any paddle pad bbox) before adding the new grid — idempotent re-run."
+  },
+  "auto_zones_pcb": {
+    "_comment": "Phase 18g. Adds GND copper pour zones on F.Cu + B.Cu. Eliminates ~90% of manual GND track routing. The zone polygon comes from Edge.Cuts (preferred) or the footprint bounding box (fallback). `replace_existing=true` clears prior zones on the same net so re-running the tool doesn't stack pours.",
+    "enabled": true,
+    "default_net": "GND",
+    "ground_net_names": [
+      "GND",
+      "AGND",
+      "DGND",
+      "PGND",
+      "EGND",
+      "SGND",
+      "VSS",
+      "0"
+    ],
+    "layers": [
+      "F.Cu",
+      "B.Cu"
+    ],
+    "inset_mm": 0.5,
+    "pad_clearance_mm": 0.2,
+    "min_thickness_mm": 0.25,
+    "thermal_gap_mm": 0.5,
+    "thermal_bridge_mm": 0.5,
+    "hatch_pitch_mm": 0.5,
+    "footprint_bbox_inflate_mm": 5.0,
+    "replace_existing": true
+  },
+  "auto_outline_pcb": {
+    "_comment": "Phase 18f. Draws a rectangular Edge.Cuts outline around the placed footprints. Fixes KiCad's `invalid_outline` DRC error which every fresh post-F8 board has. `replace_existing=true` clears any existing Edge.Cuts items first so re-running this tool doesn't stack outlines on top of each other.",
+    "enabled": true,
+    "margin_mm": 3.0,
+    "stroke_mm": 0.1,
+    "footprint_radius_mm": 4.0,
+    "replace_existing": true,
+    "copper_to_edge_min_mm": 0.25,
+    "_copper_to_edge_min_mm_comment": "R2.2 (2026-05-27). IPC-2221 minimum copper-to-edge distance. Most fabs (JLCPCB, PCBWay, OSHPark) reject boards below this. The actual outline margin is forced up to (fp_radius + copper_to_edge_min_mm) so even a project that sets margin_mm=0 still respects the fab minimum. Bump to 0.5 mm for tight V-cut panels."
+  },
+  "auto_place_pcb": {
+    "_comment": "Phase 18c. After Update PCB from Schematic (F8), components land stacked at origin (0,0). This tool arranges them in a grid grouped by refdes prefix. Universal \u2014 works for any board. Tune cell pitch + group ordering here without touching Python.",
+    "enabled": true,
+    "origin_x_mm": 60.0,
+    "origin_y_mm": 60.0,
+    "cell_pitch_x_mm": 12.0,
+    "cell_pitch_y_mm": 8.0,
+    "group_gap_x_mm": 8.0,
+    "_group_order_note": "Refdes-prefix priority left-to-right on the board. Unknown prefixes go to the end. Edit to change layout order.",
+    "group_order": [
+      "U",
+      "Q",
+      "D",
+      "J",
+      "R",
+      "C",
+      "L",
+      "Y",
+      "TP",
+      "FB",
+      "SW"
+    ],
+    "board_w_mm": 100.0,
+    "board_h_mm": 80.0,
+    "ic_anchor": {
+      "_comment": "P1.2 (2026-05-26). When no envil-blocks sidecar exists and the PCB has a clear IC (a single footprint with >= min_anchor_pads pads), place the IC at the board centre and fan satellites outward along the pin they share a net with. Decoupling caps on power nets land within decoupling_radius_mm; other passives at cluster_radius_mm. Connectors snap to sheet edges via the same regex set as connector_edge_placement. Falls back to the legacy refdes-grouped grid when the heuristic can't find a unique anchor (multiple equal candidates) or the board is too big (> max_components). Mirror of the schematic-side _place_components anchor-first path so the PCB layout matches the .kicad_sch.",
+      "enabled": true,
+      "min_anchor_pads": 3,
+      "max_components": 15,
+      "decoupling_radius_mm": 4.0,
+      "cluster_radius_mm": 8.0,
+      "edge_inset_mm": 6.0,
+      "stack_step_mm": 4.0
+    },
+    "refine": {
+      "_comment": "P24 (2026-06-23). Placement-quality post-pass run by layout/place_refine.py after the chosen placement mode. (1) De-collision: each footprint's bbox (its *.CrtYd courtyard when present, else pad extents + pad_bbox_margin_mm) is pushed apart from every overlapping neighbour until they clear clearance_mm. (2) Wirelength refine: a few conservative force-directed sweeps nudge each movable part toward the centroid of the pads it connects to, accepting a move ONLY when it strictly shortens that part's net half-perimeter wirelength and adds no new overlap. Parts whose refdes prefix is in fixed_ref_prefixes (mounting holes, fiducials) never move. Set enabled=false for byte-stable pre-refine placement.",
+      "enabled": true,
+      "clearance_mm": 0.5,
+      "use_courtyard": true,
+      "pad_bbox_margin_mm": 0.25,
+      "max_overlap_iters": 60,
+      "max_push_mm": 25.0,
+      "fixed_ref_prefixes": ["H", "MH", "FID", "MK", "NT", "REF"],
+      "wirelength_refine": true,
+      "wl_iters": 3,
+      "wl_max_step_mm": 5.0,
+      "wl_skip_ref_prefixes": ["J", "P"]
+    }
+  },
+  "bom_export": {
+    "_comment": "Phase 18b. kicad-cli wrapper for BOM CSV. NAMED PRESETS \u2014 pick via the `preset` arg on the export_bom tool call. Add new presets here without touching Python. Each preset specifies fields (the KiCad property names, including ${QUANTITY} / ${ITEM_NUMBER} / ${DNP} / ${EXCLUDE_FROM_BOM} / ${EXCLUDE_FROM_BOARD} virtual fields), labels (the column headers shown in the CSV), group_by, sort_field, delimiters, exclude_dnp, and an optional extra_blank_columns list for fab-house templates that expect empty pricing cells.",
+    "enabled": true,
+    "kicad_cli_command": "F:/Ki_CAD/kicad-source-mirror/build/install/msvc-win64-release/bin/kicad-cli.exe",
+    "default_preset": "altium",
+    "timeout_seconds": 30,
+    "presets": {
+      "altium": {
+        "_comment": "Professional fab/assembly BOM format (matches the Altium reference template the user provided). Pricing columns optional via extra_blank_columns.",
+        "fields": "${ITEM_NUMBER},Value,Reference,Description,Manufacturer,MPN,Footprint,${QUANTITY}",
+        "labels": "S.No,Name,Designator,Description,Manufacturer,Manufacturer Part Number,Footprint,Quantity",
+        "group_by": "Value,Footprint",
+        "sort_field": "Value",
+        "field_delimiter": ",",
+        "string_delimiter": "\"",
+        "ref_delimiter": ",",
+        "ref_range_delimiter": "-",
+        "extra_blank_columns": [],
+        "exclude_dnp": false
+      },
+      "kicad_default": {
+        "_comment": "Eeschema's default BOM columns plus the rich metadata fields (Description / Manufacturer / MPN) the engine now populates from parts_database.json \u2014 fully populated columns by default.",
+        "fields": "Reference,${QUANTITY},Value,Description,Manufacturer,MPN,Footprint,Datasheet,${DNP}",
+        "labels": "Reference,Qty,Value,Description,Manufacturer,MPN,Footprint,Datasheet,DNP",
+        "group_by": "Value,Footprint",
+        "sort_field": "Reference",
+        "field_delimiter": ",",
+        "string_delimiter": "\"",
+        "ref_delimiter": ",",
+        "ref_range_delimiter": "-",
+        "extra_blank_columns": [],
+        "exclude_dnp": false
+      },
+      "minimal": {
+        "_comment": "Three columns only \u2014 useful for quick part-count summary.",
+        "fields": "Reference,Value,${QUANTITY}",
+        "labels": "Refs,Value,Qty",
+        "group_by": "Value",
+        "sort_field": "Value",
+        "field_delimiter": ",",
+        "string_delimiter": "\"",
+        "ref_delimiter": ",",
+        "ref_range_delimiter": "-",
+        "extra_blank_columns": [],
+        "exclude_dnp": true
+      },
+      "verbose": {
+        "_comment": "Every KiCad field + every common custom property. Use when populating the schematic with full manufacturing metadata.",
+        "fields": "${ITEM_NUMBER},Reference,Value,Description,Manufacturer,MPN,Footprint,Datasheet,${QUANTITY},${DNP}",
+        "labels": "S.No,Designator,Value,Description,Manufacturer,Manufacturer Part Number,Footprint,Datasheet,Quantity,DNP",
+        "group_by": "Value,Footprint,MPN",
+        "sort_field": "Reference",
+        "field_delimiter": ",",
+        "string_delimiter": "\"",
+        "ref_delimiter": ",",
+        "ref_range_delimiter": "-",
+        "extra_blank_columns": [],
+        "exclude_dnp": false
+      },
+      "fab_with_pricing": {
+        "_comment": "Altium-style + empty pricing columns the user fills in after parts-house quote.",
+        "fields": "${ITEM_NUMBER},Value,Reference,Description,Manufacturer,MPN,Footprint,${QUANTITY}",
+        "labels": "S.No,Name,Designator,Description,Manufacturer,Manufacturer Part Number,Footprint,Quantity",
+        "group_by": "Value,Footprint",
+        "sort_field": "Value",
+        "field_delimiter": ",",
+        "string_delimiter": "\"",
+        "ref_delimiter": ",",
+        "ref_range_delimiter": "-",
+        "extra_blank_columns": [
+          "Supplier Unit Price",
+          "Supplier Subtotal"
+        ],
+        "exclude_dnp": false
+      }
+    }
+  },
+  "pcb_export": {
+    "_comment": "Phase 18. kicad-cli wrapper for PCB manufacturing files (Gerbers + drill + pick-and-place). Universal \u2014 works for any .kicad_pcb. Add/remove layers in `gerber_layers` to control what gets plotted; never hardcode in code.",
+    "enabled": true,
+    "kicad_cli_command": "F:/Ki_CAD/kicad-source-mirror/build/install/msvc-win64-release/bin/kicad-cli.exe",
+    "gerber_layers": "F.Cu,B.Cu,F.Paste,B.Paste,F.Silkscreen,B.Silkscreen,F.Mask,B.Mask,Edge.Cuts,F.Courtyard,B.Courtyard,F.Fab,B.Fab",
+    "drill_format": "excellon",
+    "drill_units": "mm",
+    "pos_units": "mm",
+    "pos_format": "csv",
+    "include_pdf": false,
+    "include_step": false,
+    "zip": true,
+    "timeout_seconds": 60
+  },
+  "schematic_preview": {
+    "_comment": "Phase 9. Auto-export an SVG preview after every build so the chat can show the rendered schematic inline. Universal \u2014 takes any .kicad_sch path, no circuit-specific logic. Disable by enabled=false to skip the kicad-cli step entirely (useful if you don't have kicad-cli on PATH).",
+    "enabled": false,
+    "kicad_cli_command": "F:/Ki_CAD/kicad-source-mirror/build/install/msvc-win64-release/bin/kicad-cli.exe",
+    "exclude_drawing_sheet": true,
+    "no_background_color": false,
+    "black_and_white": false,
+    "pages": "",
+    "timeout_seconds": 30
+  },
+  "block_rect": {
+    "_comment": "Dashed block-rectangle drawing policy for the single-sheet zoned layout. Padding controls breathing room around the tightest component bbox; min_size enforces a floor so sparse blocks (few components) don't draw a tiny rect next to a dense MCU block. `deoverlap` separates two block boxes that would otherwise draw on top of each other by clipping the shared edge to the midline of the gap between their components (contents are never clipped). Pure data-driven \u2014 no per-circuit logic.",
+    "padding_mm": 10.16,
+    "min_size_mm": {
+      "w": 60.0,
+      "h": 50.0
+    },
+    "deoverlap": false,
+    "separate_overlapping_blocks": false,
+    "_separate_comment": "When two functional blocks' COMPONENTS physically overlap (not just their padded boxes), `deoverlap` alone can't fix it because it never clips contents. This pass runs BEFORE deoverlap/recenter: it pushes the whole overlapping block (all its components, rigidly) apart along the axis of least penetration until each pair of content bboxes has a clear `separation_gap_mm` between them. Fixes 'block on top of block' when a tall IC (e.g. ATmega) overflows its zone cell into a stacked neighbour. Grid-snapped; bounded by separation_max_iters. Disable for legacy output.",
+    "separation_gap_mm": 22.0,
+    "separation_max_iters": 40
+  },
+
+  "text_placement": {
+    "_comment": "Reference/Value field placement, pin-side aware \u2014 reproduces the reference 'name above, value below; keep text off the wire' convention. Text goes on the body edge that carries NO pins: parts with pins on left/right (ICs, regulators, diodes, horizontal passives) get RefDes centred ABOVE + Value centred BELOW; vertical 2-pin passives (R, C, L with pins top/bottom) get RefDes+Value stacked to the RIGHT, left-justified, clear of the through-wire. gap_mm = distance from body edge to text; line_gap_mm = half the vertical spacing between the stacked ref/value of a side-placed part. Set enabled=false to fall back to each symbol library's own field offsets (legacy, byte-stable). Set vertical_side_placement=false to keep the above/below rule for verticals too.",
+    "enabled": true,
+    "gap_mm": 1.27,
+    "line_gap_mm": 1.27,
+    "vertical_side_placement": true,
+    "_comment_avoid_pin_columns": "Nudge a body-centred RefDes/Value horizontally so its text box clears any vertical pin-stub column on that edge (an IC power pin exiting top/bottom drops a wire straight down through the centred Value — the 'value sits on the wire' defect). Steps in 50-mil increments toward the shorter shift; clearance_mm is extra gap each side of the text box; max_steps bounds the search (if pins span both sides wider than the text the field stays centred, no worse than before). Set avoid_pin_columns=false for byte-identical centred placement.",
+    "avoid_pin_columns": true,
+    "pin_column_clearance_mm": 0.64,
+    "pin_column_max_steps": 24,
+    "font_size_mm": 1.27
+  },
+  "combine_sheets": {
+    "_comment": "Safety thresholds for the combine_sheets tool. `max_combined_components` refuses merges that would produce too-large a sheet (industry-standard EDA recommendation is to KEEP hierarchy for designs past 25-30 components per sheet). `require_shared_net` blocks merges of sheets with no electrical bridge between them (combining unrelated circuits onto one page just clusters them — doesn't connect them). `lateral_gap_mm` is the horizontal gap between adjacent merged source blocks.",
+    "max_combined_components": 30,
+    "require_shared_net":      true,
+    "lateral_gap_mm":          25.4
+  },
+
+  "cross_block_guard": {
+    "_comment": "Phase 0.2 (BMS roadmap). Stops two DISTINCT signals silently shorting via same-named GLOBAL labels across sibling sheets. THREE independently-revertible layers. The DEFAULT cure is Layer C (proactive prompt rule, ON): the architect gives every inter-block signal a globally-unique descriptive name, so no collision ever forms. Layers A and B are OPT-IN safety nets (default OFF) because a generic name spanning two blocks is fundamentally ambiguous — a 2026-06-11 adversarial review showed a bare 'ALERT'/'RST'/'EN' is OFTEN a LEGITIMATE single shared signal (e.g. BQ76952 ALERT -> MCU), so flagging/renaming it by name alone produces false positives. Enable A/B per-project only after a golden BMS fixture validates them.",
+    "validate_collision_check": false,
+    "_validate_collision_check_comment": "Layer A — a heuristic post-merge LINT (warning) that flags a non-power net spanning >=2 blocks whose name matches weak_signal_name_patterns. OPT-IN (default false): a merged IR has no per-block origin to prove intent, so on a real BMS this flags legitimate shared signals as noise. Turn on only as a diagnostic.",
+    "collision_severity": "warning",
+    "weak_signal_name_patterns": ["^D[0-9]+$", "^A[0-9]+$", "^IO[0-9]+$", "^GPIO[0-9]+$", "^Q[0-9]+$", "^Y[0-9]+$"],
+    "_weak_signal_name_patterns_comment": "Anchored regexes for BARE BUS-INDEX tokens only (D5/A3/IO7/GPIO2/Q1/Y0) — the canonical 'each block has its own D0..D7' accidental-collision shape. DELIBERATELY EXCLUDES functional signal names (ALERT/RST/RESET/EN/INT/FAULT/RDY/READY/...) AND protocol buses (SPI*/I2C*/UART*/CAN*/SCL/SDA/MOSI/MISO/TX/RX): those are commonly LEGITIMATE single shared signals across blocks, so renaming/flagging them by name is wrong. A descriptive name (MCU_BQ_ALERT, CAN_TX) never matches -> Layer B unions it (connection preserved), never splits it. Tighten/loosen here, never in code.",
+    "splice_rename_incidental": false,
+    "_splice_rename_incidental_comment": "Layer B — the structural guard in block_repair.splice_block. When a regenerated block net's name matches an existing net that is NOT a declared boundary, neither side is a power rail, AND the name matches weak_signal_name_patterns (so it is a bare bus-index, almost never a deliberate shared signal), RENAME it instead of unioning. The weak-name gate is what makes this safe: a descriptive emergent shared signal is unioned, not split. DEFAULT OFF until a BMS golden fixture validates it.",
+    "splice_rename_suffix": "__{block}",
+    "prompt_unique_names_rule": true
+  },
+
+  "chat_ui": {
+    "_comment": "Status-banner wording shown during a chat turn. Professional EE/PCB-engineering vocabulary (replacing the generic 'Thinking...'). Edit either string here to re-word without touching server.py — restart the chat server to pick up changes.",
+    "status_messages": {
+      "initial":        "Analyzing circuit design...",
+      "build_circuit":  "Compiling design..."
+    },
+    "heartbeat": {
+      "_comment": "Keeps the chat WebSocket alive during long (multi-minute) circuit builds. Between the build_circuit tool_use and its tool_result no frames flow, so the socket sits idle for minutes; uvicorn's keepalive or the client then drops it, and the finished build (file already written) is lost because the reply + eeschema-reload never get sent. This sends a real frame every interval_seconds during idle gaps so the socket stays warm and a dead client is detected within one interval. enabled=false restores the plain async-for loop (byte-stable).",
+      "enabled": true,
+      "interval_seconds": 10,
+      "text": "Still working — generating the schematic ({elapsed}s elapsed)…"
+    }
+  },
+
+  "page_summary": {
+    "_comment": "Page-scoped on-open summary cards. When the chat panel opens, server.py reads the current file (.kicad_sch for the eeschema panel, .kicad_pcb for the pcbnew panel) and emits a `page_summary` WS event using these templates. NO LLM call — purely deterministic. All wording lives here so a project can re-tone the greeting without code changes. Disable by enabled=false (server then sends NO page_summary on hello and the chat starts blank like before). DISABLED 2026-06-23: in the unified single-window shell the shared AI panel re-hellos on every tab focus flip (schematic<->pcb), so app_ctx flips, the per-connection dedupe key changes, and a new card is emitted each time -> the chat spams repeated 'Current PCB' / 'Current schematic' context cards + 'Open PCB' buttons (no frontend dedupe). Turned off to stop the noise; re-enable once emission is project-scoped (dedupe key without app_ctx) + frontend renders only the first.",
+    "enabled": false,
+
+    "detection": {
+      "_comment": "Pattern rules the deep schematic analyzer uses to classify components. Pure data — add a new regulator family or MCU vendor by appending to the list, no Python edit. Matches are case-insensitive regex against the component Value (and lib_id for connectors/crystals).",
+      "regulator_value_patterns": [
+        "^LM78\\d+", "^LM79\\d+", "^L78\\d+", "^L79\\d+",
+        "^LM1117", "^LM117", "^LM317", "^LM337",
+        "^AMS1117", "^AMS1086", "^AP2112", "^AP7361",
+        "^MCP1700", "^MCP1702", "^MCP1755",
+        "^TPS\\d+", "^TPS7", "^LP5907", "^LP2950",
+        "^NCP\\d+", "^XC6206", "^TLV70033", "^TLV62\\d+",
+        "^RT9080", "^RT9166", "^HT7333", "^HT7833",
+        "^AOZ\\d+", "^TL431"
+      ],
+      "mcu_value_patterns": [
+        "^STM32", "^STM8", "^STM-?G\\d+",
+        "^ATmega", "^ATtiny", "^ATSAM", "^AT89",
+        "^ESP32", "^ESP8266", "^ESP-?WROOM",
+        "^RP\\d+", "^RA[46]",
+        "^PIC\\d+", "^dsPIC", "^MSP430",
+        "^nRF52", "^nRF53", "^nRF91", "^MAX78",
+        "^MSPM0", "^CH32V", "^GD32"
+      ],
+      "connector_lib_id_prefixes": [
+        "Connector:", "Connector_USB:", "Connector_JST:",
+        "Connector_PinHeader:", "Connector_PinSocket:",
+        "Connector_Generic:", "Connector_Molex:",
+        "Connector_RJ45:", "Connector_Wago:",
+        "Connector_RaspberryPi", "Connector_Arduino"
+      ],
+      "crystal_lib_id_prefixes": [
+        "Device:Crystal", "Device:Resonator",
+        "Oscillator:"
+      ],
+      "voltage_extraction": {
+        "_comment": "Exact-match value-string -> output-voltage map. Substring fallback handled in code. Add new lines as new regulators show up.",
+        "LM7805":     "+5V",
+        "LM7812":     "+12V",
+        "LM7815":     "+15V",
+        "LM7905":     "-5V",
+        "LM7912":     "-12V",
+        "AMS1117-1.8": "+1V8",
+        "AMS1117-2.5": "+2V5",
+        "AMS1117-3.3": "+3V3",
+        "AMS1117-5.0": "+5V",
+        "AP2112-3.3":  "+3V3",
+        "AP2112K-3.3": "+3V3",
+        "MCP1700-3302E": "+3V3",
+        "MCP1700-5002E": "+5V",
+        "MCP1702-3302E": "+3V3",
+        "LP5907-3.3":  "+3V3",
+        "LP5907-1.8":  "+1V8",
+        "TLV70033":    "+3V3",
+        "XC6206-3.3":  "+3V3",
+        "HT7333":      "+3V3",
+        "HT7833":      "+3V3",
+        "LM317":       "(adjustable)",
+        "LM337":       "(adjustable, negative)",
+        "LM1117":      "(adjustable)",
+        "LM2596":      "(adjustable, buck)"
+      },
+      "regulator_voltage_suffix_regex": "[-_](\\d+(?:\\.\\d+)?)(?:V)?$",
+      "_regulator_voltage_suffix_comment": "Last-resort heuristic: extracts a trailing voltage number from the value string. Catches families like 'AP7361-XX' where -XX is the voltage code. Disable by setting to empty string.",
+
+      "power_net_patterns": [
+        "^\\+\\d", "^VCC", "^VDD", "^VBUS", "^VBAT",
+        "^VIN", "^VOUT", "^VSYS", "^VEE",
+        "^\\-\\d", "GND$", "^GND", "^AGND", "^DGND", "^PGND"
+      ],
+      "input_voltage_priority": [
+        "VBUS", "VIN", "VSYS", "VBAT",
+        "\\+12V", "\\+5V", "\\+24V", "\\+9V"
+      ],
+
+      "circuit_type_rules": [
+        {"if": {"min_mcus": 1, "min_connectors": 1, "min_regulators": 1},
+         "type": "MCU board with power section and connectors"},
+        {"if": {"min_mcus": 1, "min_connectors": 1},
+         "type": "MCU board with connectors"},
+        {"if": {"min_mcus": 1},
+         "type": "MCU-centric circuit"},
+        {"if": {"min_regulators": 1, "max_mcus": 0, "min_components": 4},
+         "type": "Power-supply circuit"},
+        {"if": {"min_connectors": 2, "max_mcus": 0, "max_regulators": 0},
+         "type": "Connector / breakout board"},
+        {"if": {"min_components": 1, "max_mcus": 0, "max_regulators": 0},
+         "type": "Analog / discrete circuit"}
+      ]
+    },
+    "schematic": {
+      "empty": {
+        "title": "New schematic",
+        "body": "This schematic is empty. Describe the circuit you want and I'll build it.",
+        "_suggestions_comment": "Chips removed at user request 2026-05-26. Re-add entries here to bring them back; renderer hides the 'Try one of these:' hint automatically when this list is empty.",
+        "suggestions": []
+      },
+      "populated": {
+        "title": "Current schematic",
+        "_legacy_body_template_comment": "Old flat template — used as fallback when the deep-analysis path returns nothing. Kept here so a project that deletes the deep block still gets a card.",
+        "body_template": "Top parts: {top_parts}.",
+        "top_parts_limit": 4,
+        "_deep_body_template_comment": "User-facing card body — terse 'circuit type + main components' summary per user request 2026-05-26 ('not like 17 components, just type + main parts'). Placeholders: {circuit_type} {power_line} {key_parts}. {power_line} is built by server: 'Input X → Output Y.' / 'Input X.' / 'Output Y.' / '' depending on what was detected. The raw counts, per-sheet breakdown, and totals stay in the payload.deep field so the AI can reference them when the user asks — they just aren't printed in the card.",
+        "deep_body_template": "**{circuit_type}**. {power_line}Main parts: {key_parts}.",
+        "power_line_both":   "{input_voltage} → {output_voltages}. ",
+        "power_line_input":  "Input {input_voltage}. ",
+        "power_line_output": "Output {output_voltages}. ",
+        "power_line_none":   "",
+        "key_parts_limit": 5,
+        "_suggestions_comment": "Chips removed at user request 2026-05-26.",
+        "suggestions": []
+      }
+    },
+    "pcb": {
+      "empty_no_file": {
+        "title": "No PCB yet",
+        "body": "There is no .kicad_pcb for this project. Open the Schematic Editor, finish the schematic, then run File → Update PCB from Schematic (F8) to create the board.",
+        "suggestions": []
+      },
+      "empty_pcb": {
+        "title": "Empty board",
+        "body": "The .kicad_pcb exists but has no footprints. Run File → Update PCB from Schematic (F8) in the Schematic Editor, then come back here to place and route.",
+        "_suggestions_comment": "Chips removed at user request 2026-05-26.",
+        "suggestions": []
+      },
+      "populated": {
+        "title": "Current PCB",
+        "body_template": "{footprints} footprints, {tracks} tracks, {vias} vias, {zones} copper zones. Outline: {outline}. Layers in use: {layers}.",
+        "outline_yes": "yes (Edge.Cuts present)",
+        "outline_no": "MISSING — fab houses will reject this until Edge.Cuts is added",
+        "layers_none": "none yet (no tracks)",
+        "_suggestions_comment": "Chips removed at user request 2026-05-26.",
+        "suggestions": []
+      }
+    }
+  },
+
+  "confirm_buttons": {
+    "_comment": "Chat-panel confirmation buttons (server.py emits a `confirm_buttons` event after each assistant reply that matches one of `triggers`). The 'Ask' button was removed 2026-05-25 \u2014 it duplicated the text the assistant already wrote. Re-add an entry to `options` to bring it back, or extend `triggers` to fire the button bar on additional preview cues.",
+    "enabled": true,
+    "triggers": [
+      "allow / cancel",
+      "allow/cancel",
+      "reply: allow",
+      "allow or cancel",
+      "want me to build it",
+      "want me to go ahead",
+      "shall i build",
+      "shall i go ahead",
+      "should i go ahead",
+      "confirm to use the suggestion"
+    ],
+    "options": [
+      {
+        "label": "Allow",
+        "send": "allow",
+        "primary": true
+      },
+      {
+        "label": "Cancel",
+        "send": "cancel",
+        "primary": false
+      }
+    ]
+  },
+  "validate": {
+    "_comment": "Project-level IR validation thresholds. canonical_power_rails is the allowlist used when validate.py inspects net names; non-canonical names raise POWER_RAIL_NONSTANDARD warnings. Add to this list (don't fork the Python code) if your project uses non-standard rail names like +VBAT_PROT or +3V3_ANALOG.",
+    "canonical_power_rails": [
+      "+3V3",
+      "+3.3V",
+      "+5V",
+      "+12V",
+      "+9V",
+      "+15V",
+      "+24V",
+      "+1V8",
+      "+1.8V",
+      "+2V5",
+      "+2.5V",
+      "-5V",
+      "-12V",
+      "-15V",
+      "VBUS",
+      "VBAT",
+      "VCC",
+      "VDD",
+      "VEE",
+      "VSS",
+      "GND",
+      "AGND",
+      "DGND",
+      "PGND"
+    ],
+    "connectivity_guard": {
+      "_comment": "BOARD_UNDER_WIRED guard. Rejects a board that was returned as a parts list without wiring (architect emits nets=null on ~100-part boards). Fires only when components >= min_components AND the fraction of component pins wired to any net < min_pin_coverage. Conservative defaults: a normal board wires 60-90% of pins, so 0.25 catches only the never-wired case. Set enabled=false to disable.",
+      "enabled": true,
+      "min_components": 8,
+      "min_pin_coverage": 0.25
+    },
+    "pin_role_check": {
+      "_comment": "PIN_ROLE_MISMATCH guard (2026-06-08). The architect chooses each net's pin refs as free strings; with no pin catalog for a part it can hallucinate the pinout (observed on ATmega328-P: VCC<->GND swapped, the crystal/RESET nets landing on GPIOs while the real XTAL/RESET pins were left no_connect). The engine resolves refs by EXACT name/number and renders the wrong pins faithfully, and ERC stays silent because a GPIO is still 'connected'. This guard rejects two unambiguous datasheet-role violations at the IR gate (fires `error` so the architect-retry loop regenerates): (1) a ground-named power pin wired to a +V supply rail or a positive-supply pin wired to GND (VCC/GND swap); (2) a net NAMED for a dedicated function (XTAL1/XTAL2/RESET) landing on a pin OTHER than the part's dedicated pin for that function. Conservative by design: only clearly-named power pins and explicitly function-named nets are checked, so V-/VEE/VREF and arbitrarily-named nets never false-trip. Set enabled=false to disable. Token lists are tunable here (no Python literals).",
+      "enabled": true,
+      "ground_tokens": ["GND", "VSS", "AGND", "AVSS", "DGND", "VSSA", "EARTH"],
+      "supply_tokens": ["VCC", "VDD", "AVCC", "VDDA", "VDDIO", "VBAT", "VBUS", "VIN", "V+"],
+      "function_pins": {
+        "XTAL1": ["XTAL1", "OSC_IN", "OSCIN"],
+        "XTAL2": ["XTAL2", "OSC_OUT", "OSCOUT"],
+        "RESET": ["RESET", "NRST"]
+      }
+    }
+  },
+  "normalize": {
+    "_comment": "IEC 60062 value normalisation + KLC label conventions. Each list lives here so a project can extend (e.g. add custom refdes prefix 'NTC' for a thermistor family) without code edits. differential_pair_prefixes drives the active-low override (signal_P / signal_N pairs are NOT inverted). unit_by_refdes_prefix maps the refdes letter to the SI unit used during value normalisation. refdes_categories is the ASME Y14.44 prefix -> category map used for BOM grouping and refdes validation.",
+    "_comment_resolve_lib_ids": "Correct hallucinated IC lib_ids against the real symbol libraries, keyed on the part VALUE (MPN). The architect names the part right in `value` ('BQ76952', 'INA240', 'STM32G474VET6') but often guesses a wrong/fake lib_id -- a wrong library ('Sensor_Battery:BQ76952' vs the real 'Battery_Management:BQ7695201PFBR') or a different real part ('Amplifier_Operational:TL072' for an INA240). A wrong-but-valid symbol loads with no error then every real pin wired onto it fails PIN_NOT_ON_SYMBOL, and the repair loop grinds for minutes on an unfixable mismatch (the BMS build's #1 hard failure). normalize_ir resolves each IC (refdes 'U', or any component whose lib_id won't load) to the best VALUE-matching symbol across ALL libraries via symbol_geom.resolve_lib_id_by_value. resolve_lib_ids_margin = how much better the found symbol must score than the current one before an already-loadable id is replaced (broken ids are always replaced). Set resolve_lib_ids false to revert.",
+    "resolve_lib_ids": true,
+    "resolve_lib_ids_margin": 0.15,
+    "_comment_normalize_block_names": "Map an unregistered architect block name onto the closest REGISTERED name (config/block_naming.json:blocks) BEFORE validate, so a descriptive name ('MCU_CORE', 'CURRENT_SENSE', 'LOAD_CONTROL') doesn't hard-fail as BLOCK_NAME_NOT_IN_REGISTRY and spin the repair loop. FULLY DYNAMIC + per-circuit-agnostic: scores each registered name by token overlap against the block's own name AND its block_type (regulator/sensor/analog/mcu/comm/driver/io/...), exact match preferred, renames to the best only if it clears block_name_match_min_score. No synonym table (block_name_aliases is an empty optional override). Set false to revert.",
+    "normalize_block_names": true,
+    "block_name_match_min_score": 0.6,
+    "differential_pair_prefixes": [
+      "USB",
+      "CAN",
+      "RS485",
+      "ENET",
+      "LVDS",
+      "DP",
+      "DM",
+      "TX",
+      "RX",
+      "CLK",
+      "DATA",
+      "PCIE"
+    ],
+    "unit_by_refdes_prefix": {
+      "R": "ohm",
+      "RV": "ohm",
+      "RT": "ohm",
+      "C": "farad",
+      "L": "henry",
+      "FB": "ohm"
+    },
+    "refdes_categories": {
+      "A": "assembly",
+      "AT": "attenuator",
+      "B": "motor",
+      "BR": "bridge rectifier",
+      "BT": "battery",
+      "C": "capacitor",
+      "D": "diode / led",
+      "F": "fuse",
+      "FB": "ferrite bead",
+      "FL": "filter",
+      "H": "hardware",
+      "HY": "hybrid",
+      "J": "connector (jack)",
+      "K": "relay",
+      "L": "inductor",
+      "LS": "speaker",
+      "M": "motor (alt)",
+      "MK": "microphone",
+      "MH": "mounting hole",
+      "MP": "mechanical part",
+      "P": "connector (plug)",
+      "Q": "transistor",
+      "R": "resistor",
+      "RT": "thermistor",
+      "RV": "varistor",
+      "S": "switch",
+      "T": "transformer",
+      "TC": "thermocouple",
+      "TP": "test point",
+      "U": "integrated circuit",
+      "V": "vacuum tube",
+      "VR": "voltage regulator",
+      "W": "wire / cable",
+      "X": "socket",
+      "Y": "crystal / oscillator",
+      "Z": "zener (rare)"
+    },
+    "refdes_prefix_aliases": {
+      "_comment": "Informal / vendor refdes prefixes mapped onto their ASME Y14.44 letter. Applied in normalize_ir BEFORE validation, renaming the component AND every site its ref appears (net pins, block membership, anchor pins). A rename that would collide with an existing ref is skipped (keeps the original + its warning). KiCad's default switch prefix is 'SW' -> ASME 'S'. Extend freely (e.g. 'LED':'D', 'XTAL':'Y') with no code edit.",
+      "SW": "S"
+    },
+    "tie_nets": {
+      "_comment": "Groups of net names that are the SAME electrical node in this design family (first entry = canonical). When a single pin bridges two nets in the same group (the PIN_IN_MULTIPLE_NETS symptom), normalize renames both to the canonical rail so they collapse into one net. A pin bridging nets NOT in any group is left as a hard validation error (real wiring bug). Default empty = nothing auto-merges. Add e.g. [\"+3V3\",\"VBAT\"] only for boards where VBAT really is tied to +3V3 (no coin-cell backup).",
+      "groups": []
+    },
+    "_comment_merge_floating_connector_rails": "Deterministic safety net for the two architect slips that dominate multi-block MCU boards: (a) a BARE rail token used as a pin endpoint ('GND' with no dot) -> fires PIN_MALFORMED and strands the rail on two nets; (b) a single-pin '*_GND'/'*_VCC'/'*_3V3'/'*_5V'/'*_VBAT' connector net (UART_GND, SD_VCC) the architect forgot to fold into the global rail -> fires NET_FLOATING. Each has exactly ONE correct resolution (the named global rail), so normalize folds it in instead of bouncing the architect through a retry. Ambiguous *_VCC/*_VDD nets are only merged when the board has exactly ONE non-ground power rail. Set false to revert.",
+    "merge_floating_connector_rails": true,
+    "_comment_resolve_multinet_passives": "Deterministic resolution of PIN_IN_MULTIPLE_NETS on 2-TERMINAL parts (R/C/L/ferrite/diode), where a pin on two nets is always an architect slip (never a legit dual-role pin -- those live on multi-pin ICs). The fix is decided by whether the part's OTHER pin is already wired: OTHER PIN FREE -> MOVE the functional net to it (R5.2 on [GND,LED_PWR] with R5.1 free -> R5.1=LED_PWR, R5.2=GND), polarity-free parts only so a diode/electrolytic is never flipped; OTHER PIN WIRED -> DROP a redundant membership (drop the net equal to the other pin's net -- which would short the part end-to-end -- else drop the canonical power rail, keeping the functional node: C17.1 on [+3V3,VCAP_1] with C17.2=GND -> drop the spurious +3V3). 3+ net pins, both-rail ties, multi-pin devices and unloadable symbols are left for the validator, so this only ever removes a real error and never creates a short. Set false to revert.",
+    "resolve_multinet_passives": true,
+    "_comment_merge_net_aliases": "Deterministic merge of two nets that share >= 2 physical pins -- they are the SAME electrical node under two names (NRST + SWD_NRST both holding the reset pull-up pin AND the SWD header reset pin; the dominant slip on the STM32F405 CAN-logger build). Two pins shared on two names is always one node (no legit topology lists the same two pins on two nets -- that shorts them at two points). Sharing exactly ONE pin is the ambiguous bridge case left to resolve_multinet_passives. Two DISTINCT power rails sharing pins are NOT merged (a real short -> validator). Set false to revert.",
+    "merge_net_aliases": true,
+    "_comment_global_pin_ownership": "GLOBAL one-net-per-pin guarantee (_enforce_pin_ownership), run DEAD LAST after every merge/tie/resolver above so the invariant holds on the FINAL net set. A physical pin is one electrical node, so a pin on >1 net is always wrong. The merge test is PURELY STRUCTURAL -- no net-name heuristics, no power-token lists, nothing circuit-specific: it merges two of an over-assigned pin's nets only when they are literally the same name OR share 2+ physical pins (a two-point tie can only be one node). A single shared pin is the ambiguous bridge (CAN_H/CAN_L) and is NOT merged. Pin identity is resolved from the LIVE symbol (a name in one net == a number/alias in another), so it is fully dynamic and part-agnostic -- no per-part table. Genuinely-distinct nodes (a real architect mis-wire onto two different rails, or rail+signal) are LEFT for the validator + repair loop; this never blind-drops a membership (that could silently mis-wire the board), only merges same-node nets. Default true; set false to revert (byte-identical: the pass is skipped entirely).",
+    "global_pin_ownership": true,
+    "_comment_unified_multinet_resolver": "When true, ONE classify->act resolver (_resolve_pin_multinet) handles ALL of PIN_IN_MULTIPLE_NETS -- it replaces the scattered ground-fold (merge_shared_pin_ground_nets) + shunt-fold (fold_shunt_tap_aliases) + 2-terminal drop/move (resolve_multinet_passives), which are skipped when this is on. For each pin on >1 net it classifies by the part + what its OTHER terminal touches, then MERGEs (one node: ground alias, or a shunt tap whose names are both-power or related-signal), DROPs (series part's redundant membership / decoupling cap's spurious rail), MOVEs (symmetric bridge to a free terminal), or leaves it (REVIEW), iterating until stable. Same guards as the scattered path (GND never folded into, two distinct rails never merged, unrelated signals never merged, diodes never pin-swapped) so it never shorts. Default false = keep the proven scattered path; flip true to use the consolidated resolver (passes every multinet/net-repair/complex regression suite at 0 shorts).",
+    "unified_multinet_resolver": false,
+    "_comment_fold_shunt_tap_aliases": "Deterministic merge of two nets that meet at the SIGNAL pin of a SHUNT 2-terminal part (TVS / filter / decoupling), recognised because the part's OTHER pin lands on GND or a power rail. A shunt part TAPS a node, it does not separate it, so a pin double-listed on [MAIN, MAIN_alias] is one node -> fold the alias into the canonical/more-connected name (D2.A on [CAN_H, CAN_TVS] with D2.K on GND -> CAN_TVS folds into CAN_H; C3.1 on [+5V, J4_PWR] with C3.2 on GND -> J4_PWR folds into +5V). This is the dominant ATTEMPT-1 PIN_IN_MULTIPLE_NETS on multi-block boards (a protection/decoupling part tapped onto a bus under a second descriptive name). Conservative: only when the other pin is provably on GND/rail; never merges two DISTINCT rails; the SERIES case (other pin on one of the two signal nets, e.g. an LED series resistor) is left to resolve_multinet_passives' DROP rule. Set false to revert.",
+    "fold_shunt_tap_aliases": true,
+    "_comment_fold_intent_named_stubs": "Completes a SINGLE-PIN net whose NAME encodes a rail intent by renaming it to that rail so the by-name merge folds in its lone pin and finishes the leg the architect left open: *_PU/*_PULLUP -> dominant logic rail (a pull-up returns to VCC), *_PD/*_STRAP -> GND (pull-down / boot strap returns low), *_VDDA/*_AVDD -> dominant logic rail (analog supply stub). This is the DOMINANT residual on large data-logger boards (self-test 2026-06-06): the architect declares NRST_PU / SD_DET_PU / BOOT0_PD and leaves it floating (NET_FLOATING), or splits the analog supply onto a VDDA_RAIL stub AND lists VDDA on +3V3 too (PIN_IN_MULTIPLE_NETS). Conservative + non-destructive: fires ONLY on a single-pin non-power net carrying an intent TOKEN ('_'-delimited, not substring) and only when the target rail already exists -- a single-pin net is already a hard error so folding it can only remove errors, never short. Token->rail map overridable at intent_stub_targets. Set false to revert.",
+    "fold_intent_named_stubs": true,
+    "_comment_intent_stub_targets": "Override map for fold_intent_named_stubs: net-name TOKEN (uppercase) -> rail kind ('vcc' = dominant logic rail, 'gnd' = board ground). Inline fallback: PU/PUP/PULLUP->vcc, PD/PDN/PULLDOWN/STRAP->gnd, VDDA/AVDD/VREF->vcc. Add a token (e.g. 'VBACKUP':'vcc') with no code edit.",
+    "intent_stub_targets": {},
+    "_comment_merge_shared_pin_ground_nets": "Deterministic resolution of PIN_IN_MULTIPLE_NETS where a SINGLE physical pin sits on BOTH the global GND and a derived '<BASE>_GND' bus/connector ground reference (CAN_GND, RS485_GND, LIN_GND, SHIELD_GND). The shared pin is a galvanic tie -> the two grounds are provably one node, so they cannot be isolated; on a non-isolated transceiver the bus ground reference IS the board ground (ISO 11898-2 requires the shared reference). normalize folds the '<BASE>_GND' net into GND so the by-name merge collapses them, instead of bouncing the architect through a non-converging retry (the lone recurring error on the STM32F405 CAN-logger: J4.Pin_2 on [GND, CAN_GND], 3 attempts failed). Bus-agnostic: any future '<BASE>_GND' folds with no code edit. Conservative -- fires only when exactly ONE of the pin's two nets is the canonical ground and the other is '<BASE>_GND'; deliberate split grounds (split_ground_bases) and 3+-net pins are left for the validator. Set false to revert.",
+    "merge_shared_pin_ground_nets": true,
+    "_comment_split_ground_bases": "Uppercase BASE names in a '<BASE>_GND' net that denote a DELIBERATE split ground (analog/digital/power/chassis/earth) joined to GND only at a single star point -- these are NEVER auto-folded by merge_shared_pin_ground_nets. Everything else ('<BASE>_GND' where BASE is a bus/connector name) is treated as a ground reference common with GND. Extend per project (e.g. add 'ISO' for an isolated section's ground) with no code edit.",
+    "split_ground_bases": ["ANALOG", "DIGITAL", "POWER", "PWR", "CHASSIS", "EARTH", "FRAME", "A", "D", "P", "AGND", "DGND", "PGND", "FGND", "CGND", "EGND"],
+    "_comment_complete_power_tree": "Completes the power tree a DEGRADED architect attempt left open (the 21x POWER_PIN_FLOATING wreck), without guessing the ambiguous parts. (a) Synthesises a GND net when missing but ground pins exist, so the floating-ground tie has a target. (b) For each voltage REGULATOR (lib_id matches regulator_lib_markers) ties its floating power_OUT pin to the rail its part number defines (AMS1117-3.3 -> +3V3, LM2596S-5 -> +5V, LM7812 -> +12V), creating that rail net if absent -- the regulator is the authority on its own output rail; an adjustable/unparseable reg is skipped (no guess). It ALSO guards _tie_floating_power_pins so a regulator's INPUT pin is never auto-folded into the logic rail (that upstream rail is a design decision; folding it would short input to output). Strictly additive -- only wires currently-floating pins. Set false to revert.",
+    "complete_power_tree": true,
+    "_comment_regulator_lib_markers": "Uppercase lib_id substrings that mark a voltage regulator for complete_power_tree. Inline fallback ['REGULATOR'] (covers KiCad Regulator_Linear / Regulator_Switching).",
+    "regulator_lib_markers": ["REGULATOR"],
+    "_comment_power_input_pin_markers": "Uppercase substrings in a PIN name marking a board power INPUT/source (USB VBUS, barrel-jack/regulator VIN) that _tie_floating_power_pins must NOT fold into the logic rail (its upstream voltage is a design decision; folding would short input to output). Inline fallback ['VBUS','VIN'].",
+    "power_input_pin_markers": ["VBUS", "VIN"],
+    "_comment_tie_floating_power_pins": "Tie any IC power_in pin absent from every net to the correct rail (ground-type names -> GND; supply names like VDD/VCC/VBAT/VDDA -> the dominant logic rail by connector_vcc_rail_priority). Mirrors the validator's POWER_PIN_FLOATING check, clearing it every build instead of via retry. Only power_in is auto-tied; a floating power_out (regulator output) is handled by complete_power_tree. Fires only when the target rail already exists. Set false to revert.",
+    "tie_floating_power_pins": true,
+    "_comment_tie_crystal_caps_gnd": "For each crystal, tie each adjacent load cap's free (non-crystal) pin to GND -- mirrors the validator's CRYSTAL_LOAD_CAP_NO_GND check. Strictly additive: only grounds the cap pin when it is not already wired anywhere, so it never double-lists a pin or creates a short. Set false to revert.",
+    "tie_crystal_caps_gnd": true,
+    "_comment_tie_floating_led_cathode": "LEGACY per-component LED-cathode tie. DEFAULT FALSE -- superseded by the data-driven pin_completion engine (its 'led_cathode' rule does the same thing without dedicated code). Kept as a fallback only; leave false unless you disable pin_completion.",
+    "tie_floating_led_cathode": false,
+    "_comment_complete_design_checklist": "Turns the validator's detect-only design checklist into detect-AND-synthesise. validate._run_design_checklist DETECTS missing SHUNT support parts (MCU reset pull-up, LDO input/output caps, crystal load caps, USB-C CC pull-downs) for ANY part via the lib_id/pin-name patterns in design_checklist.json, but only reports them -- so that whole class bounces to the architect, which re-emits the FULL board and diverges on large designs (the CAN-logger retry storm). When true, intent/checklist_repair.complete_design_checklist reads the SAME config + consumes the validator's own issues and ADDS the missing part, wiring it from the offending pin's net to the rail/GND the checklist names, and assigns it to the supported part's block. Part-agnostic (acts on issue CODES, never part names), deterministic (no LLM/retry), strictly additive + short-free (shunt class only: a 2-pin part between an existing net and a rail/GND). SERIES insertion (LED current-limit R) and STRUCTURAL additions (a missing bus connector / SD socket) change topology and are LEFT to the architect. Runs LAST in normalize_ir so the rails it attaches to already exist. Default FALSE until live-verified; flip true + restart to activate.",
+    "complete_design_checklist": true,
+    "_comment_expand_verified_blocks": "Phase 2 verified-block expansion (intent/verified_blocks.py). When true, after complete_design_checklist, normalize_ir instantiates any stored verified support sub-circuit (config/verified_blocks/*.json) whose anchor IC appears in the IR -- e.g. an INA240 current-sense front-end: shunt + input filter R's + diff filter cap + Vs decoupling + the datasheet internal wiring. GENERAL + config-driven: any anchor part can have a template, zero code. Internal net names are namespaced by the anchor refdes so two instances never bond via same-named global labels; support pins join the anchor's EXISTING V+/GND rails; the architect keeps the boundary (OUT->ADC, REF->bias). Strictly additive, never shorts, never raises; skip_if avoids double-injecting when the architect already wired the front-end. Default FALSE until live-verified; flip true + restart to activate.",
+    "expand_verified_blocks": false,
+    "_comment_net_repair_vocab": "Tuning knobs for the four structural net repairs above -- all part/circuit-agnostic, NO hardcoded part numbers. net_alias_min_shared_pins: pins two nets must share to be merged as one node (floored at 2). ground_pin_name_markers: substrings in a PIN name that classify it as ground for the floating-power-pin tie (substring match so VSSA~VSS, AGND/DGND~GND; any IC). power_pin_etypes: KiCad symbol electrical-types treated as a SINK power pin needing a rail (power_out excluded -- a source has no derivable rail). capacitor_refdes_prefixes: refdes letters that denote a load capacitor for the crystal-cap-GND repair. Crystal lib_id glob patterns are read from design_checklist.json:rules.crystal_oscillator.trigger_lib_id_patterns so repair and validation stay in sync.",
+    "net_alias_min_shared_pins": 2,
+    "ground_pin_name_markers": ["GND", "VSS", "VEE"],
+    "power_pin_etypes": ["power_in"],
+    "capacitor_refdes_prefixes": ["C"],
+    "_comment_polarity_free_passive_prefixes": "Refdes letter-prefixes whose parts are symmetric / polarity-free, so the multinet resolver may SWAP their pins (MOVE a net to the opposite pin). Diodes (D) and electrolytics (Device:C_Polarized, caught by polarized_lib_markers) are deliberately excluded -- swapping their pins flips the part. Config-driven; inline fallback {R,C,L,FB,RV,RT}.",
+    "polarity_free_passive_prefixes": ["R", "C", "L", "FB", "RV", "RT"],
+    "_comment_polarized_lib_markers": "Uppercase substrings in a lib_id that mark a polarity-SENSITIVE 2-terminal part (electrolytic / tantalum). A match disables the pin-swap MOVE action for that part (DROP, which never swaps pins, still applies). Inline fallback ['POLAR'].",
+    "polarized_lib_markers": ["POLAR"],
+    "_comment_ground_rail_aliases": "Uppercase net names treated as ground when classifying logic vs ground rails in the connector-rail fold. Inline fallback {GND,AGND,DGND,PGND}.",
+    "ground_rail_aliases": ["GND", "AGND", "DGND", "PGND"],
+    "_comment_connector_vcc_rail_priority": "When a generic '*_VCC'/'*_VDD'/'*_VBAT' connector net must fold into a rail and the board has MORE THAN ONE logic rail, pick the first of these (by priority) that is present -- a connector's VCC is the MCU logic rail, never the raw input or analog rail. Inline fallback [+3V3,+3.3V,+5V,+1V8,+2V5].",
+    "connector_vcc_rail_priority": ["+3V3", "+3.3V", "+5V", "+1V8", "+2V5"]
+  },
+  "nc_policy": {
+    "_comment": "Auto-emit (no_connect) markers on every unused pin so KiCad's ERC pin_not_connected check passes WITHOUT manual cleanup. Pure data-driven \u2014 covers any IC, any circuit, no part-number hardcoding. The pin etypes listed in auto_nc_etypes are the KiCad pin electrical types that ERC normally flags when left unconnected. Library pins already tagged etype='no_connect' are always covered. Set enabled=false to revert to the old 'only library-tagged NC pins' behavior.",
+    "enabled": true,
+    "auto_nc_etypes": [
+      "input",
+      "bidirectional",
+      "tri_state",
+      "passive",
+      "unspecified",
+      "open_collector",
+      "open_emitter",
+      "no_connect"
+    ],
+    "skip_etypes_comment": "power_in / power_out pins are NOT auto-NC'd \u2014 those should either be wired or fixed at the IR level. Output pins are also skipped \u2014 leaving them dangling is a real design error, not noise.",
+    "instance_unit_filter": {
+      "_comment": "When true (default), NC markers are emitted ONLY for pins belonging to the instance's rendered unit + unit-0 (shared). Multi-unit symbols (LM358 / LM324 / LM2904) declare pins under sub-blocks `<name>_<unit>_<style>`; emitting NC on un-rendered units' pins puts X markers at coordinates that visually overlap the active unit. Filter: pin.unit in {0, instance_unit} -> eligible for NC; else skip.",
+      "enabled": true,
+      "instance_unit": 1
+    }
+  },
+  "hierarchy_layout": {
+    "_comment": "Dynamic layout for the parent (root) sheet in multi-sheet hierarchies. Picks the smallest page that fits all child-sheet boxes, then picks a grid (cols x rows) whose cell aspect best matches target_box_aspect, then sizes every box so they all fit AND avoid the title-block area at the bottom of the page. Pure data-driven \u2014 no hardcoded grids, no per-circuit logic. Change page_size_priority to bias toward A3/A2 sooner for large projects. Sheet boxes never overlap the title-block reserve.\n`default_render_paper` is the paper used by simple flat renders (single IC, no blocks).\n`single_sheet_with_blocks_paper` is used by multi-block circuits drawn on ONE sheet (POWER + MCU + OLED on one page) \u2014 A3 by default because the extra width fits the block columns without cramping.",
+    "default_render_paper": "A4",
+    "single_sheet_with_blocks_paper": "A3",
+    "_paper_priority_note": "Page size auto-selected by `auto_paper` rules below when enabled. When auto_paper.enabled=false, falls back to default_render_paper (flat) / single_sheet_with_blocks_paper (multi-block).",
+    "auto_paper": {
+      "_comment": "Dynamic paper-size selection driven by component count + block count. Universal — no per-circuit logic. Rules evaluated in order; first match wins. NOTE: the placer is page-agnostic today — it spreads components in a 30mm grid around sheet centre regardless of paper size. So picking A5 for a 7-component circuit with a connector is unsafe (the connector lands off-sheet). Until the placer becomes page-aware, A5 is reserved for tiny circuits (≤4 parts, e.g. RC filter / voltage divider). A4 covers everything else single-sheet; A3 takes block-heavy designs.",
+      "enabled": false,
+      "dynamic_block_fit": false,
+      "_dynamic_block_fit_comment": "When true (and the circuit has functional blocks), the paper is sized DYNAMICALLY from the actual block grid: smallest standard page (A5..A0) whose usable area gives every block its full un-shrunk zone (zone_w_mm x zone_h_mm from placement config), so block rectangles never overlap. Derived from the signal-flow grid span x ideal zone size — NOT a component-count threshold. The count-based `rules` below are the fallback for block-less (flat) circuits or when this is false.",
+      "rules": [
+        { "max_components": 4,  "blocks": 0, "paper": "A5" },
+        { "max_components": 25, "blocks": 0, "paper": "A4" },
+        { "max_components": 30, "blocks": 999, "paper": "A4" },
+        { "max_components": 60, "blocks": 999, "paper": "A3" }
+      ],
+      "fallback_paper": "A3"
+    },
+    "page_size_priority": [
+      "A5",
+      "A4",
+      "A3"
+    ],
+    "page_sizes": {
+      "A5": {
+        "w_mm": 210,
+        "h_mm": 148
+      },
+      "A4": {
+        "w_mm": 297,
+        "h_mm": 210
+      },
+      "A3": {
+        "w_mm": 420,
+        "h_mm": 297
+      }
+    },
+    "margin_mm": {
+      "left": 15.0,
+      "right": 15.0,
+      "top": 15.0,
+      "bottom": 12.0
+    },
+    "title_block_reserve_mm": {
+      "width_mm": 110.0,
+      "height_mm": 30.0
+    },
+    "gap_mm": {
+      "x": 12.0,
+      "y": 12.0
+    },
+    "min_sheet_box_mm": {
+      "w": 45.0,
+      "h": 35.0
+    },
+    "max_sheet_box_mm": {
+      "w": 95.0,
+      "h": 70.0
+    },
+    "target_box_aspect": 1.35,
+    "_box_aspect_comment": "Width / height ratio for each sheet box. ~1.3 = slightly wider than tall \u2014 leaves room on right edge for hierarchical pin labels.",
+    "sheet_pin": {
+      "_comment": "Hierarchical-sheet-pin stacking geometry on the parent's sheet boxes. _compute_hierarchy_grid uses these to floor each box's HEIGHT so the busiest block's pins fit inside the box edge(s); _emit_sheet_box uses the same values to actually place the pins. Without this floor, a block touching many cross-block nets ran its pins off the box bottom and off the page (the hierarchy-sheet layout error). top_gap_mm = first pin inset below the box top; pitch_mm = vertical spacing between pins (2.54 = 100 mil); bottom_pad_mm = clearance kept below the last pin. distribute_both_edges: when true, pins beyond what one edge holds wrap onto the LEFT edge (so only half the count drives box height); set false to keep all pins on the right edge (taller boxes).",
+      "top_gap_mm": 5.08,
+      "pitch_mm": 2.54,
+      "bottom_pad_mm": 2.54,
+      "distribute_both_edges": true
+    }
+  },
+  "convert_to_hierarchy": {
+    "_comment": "Phase 14b. Turn a flat .kicad_sch into a multi-sheet hierarchy. Components grouped by `default_prefix_blocks` (refdes prefix -> block name), or by user-supplied `blocks` mapping passed to the tool. Original is snapshotted via apply_ops_snapshots before re-render.",
+    "enabled": true,
+    "timeout_seconds": 30,
+    "default_prefix_blocks": {
+      "U": "MAIN",
+      "Q": "TRANSISTORS",
+      "D": "DIODES",
+      "J": "IO",
+      "SW": "CONTROLS",
+      "Y": "CLOCKS",
+      "R": "PASSIVES",
+      "C": "PASSIVES",
+      "L": "PASSIVES",
+      "FB": "PASSIVES",
+      "TP": "MISC"
+    }
+  },
+  "auto_layout_pcb": {
+    "_comment": "P27 (2026-06-23). Closed-loop PCB layout orchestrator (tools/auto_layout_pcb.py). The pipeline IS this step list — re-order/disable/add steps here, no Python change. Each step dispatches to that tool's own @tool handler with the same pcb_path; per-step `args` merge over the tool's config defaults. stop_on_error halts on the first failing step (default false: run all, report each). The final step (pcb_verify) gives the board's end state. Runs AFTER footprints exist (F8 or pcb_gen).",
+    "enabled": true,
+    "stop_on_error": false,
+    "steps": [
+      { "tool": "auto_place_pcb", "enabled": true },
+      { "tool": "auto_outline_pcb", "enabled": true },
+      { "tool": "route_pcb_simple", "enabled": true },
+      { "tool": "set_track_widths_pcb", "enabled": true },
+      { "tool": "auto_zones_pcb", "enabled": true },
+      { "tool": "auto_thermal_vias_pcb", "enabled": true },
+      { "tool": "silkscreen_cleanup_pcb", "enabled": true },
+      { "tool": "drc_autofix", "enabled": true, "args": { "apply": true, "max_rounds": 2 } },
+      { "tool": "pcb_verify", "enabled": true }
+    ]
+  },
+  "ampacity": {
+    "_comment": "P26 (2026-06-23). IPC-2221 track-width-for-current engine used by tools/set_track_widths_pcb.py. A net is POWER if its name starts with one of power_net_patterns.patterns; otherwise Default. Each class has a design current; the required width = IPC-2221 area equation (A[mil^2]=(I/(k*dT^0.44))^(1/0.725), width=A/copper_thickness_in_mils) then optionally divided by ipc2152_factor (IPC-2152 allows narrower for the same current — keep 1.0 for conservative pure-2221). Under-sized track segments on a net are widened to its required width (only_widen never shrinks). net_current_a overrides a specific net by name. Verified: 1A/10C/1oz external -> ~0.30mm, matching the published IPC-2221 chart. All knobs here; nothing hardcoded in Python.",
+    "enabled": true,
+    "temp_rise_c": 10.0,
+    "copper_weight_oz": 1.0,
+    "copper_thickness_mm_per_oz": 0.0348,
+    "layer_kind": "external",
+    "k_external": 0.048,
+    "k_internal": 0.024,
+    "ipc2152_factor": 1.0,
+    "min_width_mm": 0.2,
+    "round_to_mm": 0.05,
+    "only_widen": true,
+    "class_design_current_a": {
+      "POWER": 2.0,
+      "Default": 0.5
+    },
+    "net_current_a": {},
+    "preview_only": false
+  },
+  "silkscreen_cleanup_pcb": {
+    "_comment": "P25 (2026-06-23). DFM silk fix run by tools/silkscreen_cleanup_pcb.py and dispatched by drc_autofix for silk_overlap. Relocates each footprint's reference-designator / value silk text off its own pads to the nearest clear spot just outside the pad cluster. Every threshold here is config-driven — no constants in Python. text_fields selects which property names move (Reference only by default; add 'Value' to also move values). char_width_factor approximates the KiCad stroke-font glyph advance for the text-width estimate. gap_mm/ring_step_mm/max_rings define the outward search ring. hide_if_no_room hides text that cannot be placed clear (off by default — prefer leaving it visible and reporting).",
+    "enabled": true,
+    "silk_layers": ["F.SilkS", "B.SilkS"],
+    "text_fields": ["Reference"],
+    "pad_inflate_mm": 0.15,
+    "text_clearance_mm": 0.1,
+    "char_width_factor": 0.75,
+    "default_text_size_mm": 1.0,
+    "gap_mm": 0.3,
+    "ring_step_mm": 0.5,
+    "max_rings": 12,
+    "hide_if_no_room": false,
+    "preview_only": false
+  },
+  "drc_autofix": {
+    "_comment": "Phase 19c2 + 2026-06-23 closed-loop rewrite. DRC violation -> PCB tool dispatcher with re-check + regression guard. Each strategy maps a DRC issue type to a PCB-mutating tool; disable per type by `strategies.<type>.enabled=false`; per-action `args` override what we pass to the dispatched tool. After applying, DRC is re-run and the board is restored from a byte snapshot if the total (errors+warnings) rises (regression_guard='on'). max_rounds>1 iterates while each round strictly reduces the total.",
+    "enabled": true,
+    "regression_guard": "on",
+    "_regression_guard_note": "'on' = revert the .kicad_pcb to its pre-fix snapshot whenever a round raises the total violation count (errors+warnings). 'off' = keep whatever the fix produced (still re-checked and reported honestly).",
+    "max_rounds": 1,
+    "_max_rounds_note": "Default 1 = apply once, re-check, report. Raise (e.g. 3) for an iterate-to-plateau loop; the orchestrator passes this per call.",
+    "strategies": {
+      "invalid_outline": {
+        "enabled": true,
+        "action": "auto_outline_pcb"
+      },
+      "unconnected_item": {
+        "enabled": true,
+        "action": "auto_zones_pcb",
+        "args": {
+          "net": "GND"
+        }
+      },
+      "unconnected_items": {
+        "enabled": true,
+        "action": "auto_zones_pcb",
+        "args": {
+          "net": "GND"
+        }
+      },
+      "lib_footprint_issues": {
+        "enabled": false
+      },
+      "clearance": {
+        "_comment": "Left report-only: a clearance error caused by overlapping footprints is cleared as a SIDE EFFECT of the courtyards_overlap fix below; a track-to-track clearance error needs manual re-routing, so we never blindly move parts for it.",
+        "enabled": false
+      },
+      "hole_to_hole_clearance": {
+        "enabled": false
+      },
+      "courtyards_overlap": {
+        "_comment": "Auto-fixable: dispatches to auto_place_pcb in refine_only mode, which pushes overlapping footprint courtyards apart in place (no re-gridding). Guarded by the re-check + snapshot revert. Also resolves the clearance errors that the same overlap produced.",
+        "enabled": true,
+        "action": "auto_place_pcb",
+        "args": {
+          "refine_only": true
+        }
+      },
+      "silk_overlap": {
+        "_comment": "Dispatches to silkscreen_cleanup_pcb once that tool is installed; until then it is reported only (the dispatch fails gracefully).",
+        "enabled": true
+      }
+    }
+  },
+  "erc_autofix": {
+    "_comment": "Phase 19b + 2026-05-27 rewrite. Incremental ERC repair: each proposal applied in isolation, re-validated against kicad-cli, rolled back if it INCREASED the error count. Replaces the old bulk-apply that cascaded errors (6 -> 19 regression). Strategy fixes: PWR_FLAG now spirals outward from the error coord to find a free spot (no more 'Power output and Power output connected' cascade); duplicate_reference uses next-free number (R1 dup -> R7) instead of '_dup' suffix; delete_wire uses tight 0.1mm tolerance so only the exact dangling stub is removed.",
+    "enabled": true,
+    "verb_executors": true,
+    "_verb_executors_note": "Phase 3 (2026-06-09). Global kill-switch for the taxonomy's executor=\"verb\" tier. When true, a safe_auto violation whose erc_taxonomy.json entry has executor=\"verb\" is turned into concrete apply_ops (add_no_connect for pin_not_connected, snap_endpoint for endpoint_off_grid, delete_wire for wire_dangling) and applied — still confidence-gated by the taxonomy and re-validated by regression_guard below, so the schematic is never left worse. When false, those types fall back to diagnostic-only (the pre-2026-06-09 behaviour, byte-stable). Per-type opt-out: set that type's executor back to \"diagnostic\" in erc_taxonomy.json.",
+    "result_as_json": true,
+    "_result_as_json_note": "When true (2026-06-08), erc_autofix returns its result as a JSON object in the tool's text block ({path, ops_applied, report}) instead of bare prose — so the server's KiCad auto-refresh path fires after a fix lands (it reads tool_result = json.loads(content[0].text) and reverts the open .kicad_sch via IPC, the SAME way build_circuit + apply_ops already do). `path` is non-null ONLY when apply=true AND >=1 op landed, so previews never trigger a needless revert. The full human report stays under `report` for the chat AI. Set false for the legacy bare-prose text (byte-stable, but NO auto-refresh after ERC fixes).",
+    "regression_guard": "batch",
+    "_regression_guard_note": "Phase A (2026-06-08). HARD invariant: applying fixes must NEVER leave the schematic with more errors OR a new violation than it started with. Modes: 'batch' (DEFAULT) = apply all fixes, run kicad-cli ERC ONCE, and if the final report has more errors than baseline or any brand-new violation signature, restore the original file wholesale (1 ERC run, all-or-nothing, never worse); 'per_fix' = re-run ERC after EACH proposal and undo_last_edit only the offending fix (surgical, keeps good fixes, but 1 ERC run per fix = slow); 'off' = apply with no verification (fastest, unsafe). When this key is ABSENT the mode is derived from legacy validate_each_fix (true->per_fix, false->off) so old configs stay byte-stable.",
+    "signature_regression_guard": true,
+    "_signature_guard_note": "When true the guard compares the SET of violation signatures (type@x,y) before/after, not just the error COUNT. Catches 'swaps' (a fix clears error X but creates error Y at a different coord, leaving the count unchanged) and 're-introductions'. Set false for pure legacy count-only behaviour.",
+    "hierarchy_aware": true,
+    "_hierarchy_aware_note": "Phase H (2026-06-09). For a MULTI-SHEET project, kicad-cli groups violations under `***** Sheet /NAME/` headers and the @(x,y) coords are LOCAL to that child sheet. When true, erc_autofix maps each violation to the child .kicad_sch that owns it (via the parent's (sheet ...) refs) and applies the fix THERE at the already-local coords, with a per-file batch snapshot/restore. When false (or for a flat/single-sheet design with no child sheets), every violation resolves to the parent path = the legacy single-file behaviour, byte-stable. Fixes the bug where PWR_FLAG/no-connect flags landed on the parent canvas at child-local coords (connected to nothing -> original errors unfixed + new '#FLG Pin not connected' errors). FLAT and SINGLE_SHEET_BLOCKS render to ONE file so they were never affected; only HIERARCHY needed this.",
+    "validate_each_fix": false,
+    "_validate_note": "LEGACY flag, kept only as the back-compat fallback used when `regression_guard` is absent (true->per_fix, false->off). Superseded by `regression_guard` above, which wins whenever present.",
+    "priority_order": [
+      "pin_not_connected",
+      "unconnected_wire_endpoint",
+      "duplicate_reference",
+      "power_pin_not_driven",
+      "missing_power_pin",
+      "isolated_pin_label",
+      "multiple_net_names"
+    ],
+    "strategies": {
+      "unconnected_wire_endpoint": {
+        "enabled": true,
+        "delete_wire_tol_mm": 0.1,
+        "_tol_note": "Tight tolerance so only the wire whose endpoint is EXACTLY at the reported coord is removed. The legacy 1.27mm value was wide enough to delete a perfectly-good wire that happened to terminate one grid cell from the stub."
+      },
+      "duplicate_reference": {
+        "enabled": true
+      },
+      "power_pin_not_driven": {
+        "enabled": true,
+        "trace_before_flag": true,
+        "_note": "Re-enabled 2026-05-27 after PWR_FLAG placement was made collision-aware (_find_clear_flag_pos). Each flag now spirals outward from the floating pin until it finds a coord with no neighbouring symbol within 5mm \u2014 avoids the old cascade where the flag landed on top of another pin.",
+        "_trace_note": "trace_before_flag (2026-06-01): when true, erc_autofix calls trace_net to find the real root cause BEFORE adding a PWR_FLAG. already_driven -> propose nothing (a flag would mask a wire/label continuity bug); missing_wire (exactly one orphan power_out exists) -> draw the wire instead of a flag; no_driver -> PWR_FLAG fallback. Set false to restore legacy PWR_FLAG-first behaviour for every error."
+      },
+      "isolated_pin_label": {
+        "enabled": false
+      },
+      "multiple_net_names": {
+        "enabled": false
+      },
+      "missing_power_pin": {
+        "enabled": false
+      }
+    }
+  },
+  "apply_ops_snapshots": {
+    "_comment": "Phase 20. Before every apply_ops call, the tool copies the current .kicad_sch into <sch_dir>/.envil-snapshots/<basename>.<ts>.envil-bak.kicad_sch so destructive edits (delete, reroute, rename) can be undone. The `undo_last_edit` verb restores from the most recent snapshot. Retention: oldest snapshots beyond `max_snapshots` are auto-deleted.",
+    "enabled": true,
+    "dirname": ".envil-snapshots",
+    "max_snapshots": 20
+  },
+  "hierarchy_edit": {
+    "_comment": "Cross-sheet edit routing for HIERARCHY designs. In a KiCad hierarchical project the parts live on child sheets and the root .kicad_sch is just (sheet ...) stubs, so a ref-based edit ('delete R2') can't find its target on the root. When enabled, the snapshot reader aggregates every sheet's components (each tagged with its owning 'sheet' file) and apply_ops routes ref-targeted edits (delete/move/rotate/change_value/change_footprint/set_property/set_dnp/add_decoupling) to the child sheet that owns the ref, then writes that file back. Pure FALLBACK: a ref that exists on the primary file is handled exactly as before, so FLAT and SINGLE_SHEET_BLOCKS designs are unaffected. Default on.",
+    "enabled": true,
+    "snapshot_deep_read": true
+  },
+  "rename_net": {
+    "_comment": "rename_net verb config. `power_lib_prefix` is the lib_id prefix used for power-port symbols in the user's KiCad library (default `power:`). Most KiCad installations use `power:GND`, `power:+3V3` etc. \u2014 if your project uses a custom library like `Project_Power:GND`, change this string and the verb will follow. `label_node_heads` lists the s-expr head names that represent signal-net labels \u2014 extend if you use custom label flavours.",
+    "power_lib_prefix": "power:",
+    "label_node_heads": [
+      "label",
+      "global_label",
+      "hierarchical_label"
+    ]
+  },
+  "pullup_pulldown_defaults": {
+    "_comment": "Defaults for add_pullup / add_pulldown verbs when the user / agent doesn't specify them. Tune here per project \u2014 no per-circuit hardcoding in code.",
+    "default_pullup_value": "10k",
+    "default_pulldown_value": "10k",
+    "default_pullup_rail": "+3V3",
+    "default_pulldown_rail": "GND",
+    "default_resistor_lib_id": "Device:R",
+    "placement_offset_x_mm": 12.7,
+    "placement_offset_y_mm": 12.7
+  },
+  "apply_ops_defaults": {
+    "_comment": "Fallback values for apply_ops verbs when the user/agent omits a field. Everything is read from here so NO value is hardcoded in tools/apply_ops.py; user-supplied op fields always win. pullup/pulldown/led/decoupling have their own *_defaults sections — leaving those op fields blank lets THOSE sections drive the result (the dispatch must pass blanks through, not literals).",
+    "rotate_angle_deg": 90.0,
+    "delete_wire_tol_mm": 0.5,
+    "add_component_fallback_x_mm": 148.59,
+    "add_component_fallback_y_mm": 105.41,
+    "add_decoupling_include_bulk": true,
+    "set_dnp_default": true
+  },
+  "led_indicator_defaults": {
+    "_comment": "Defaults for the add_led verb (indicator LED = series resistor + LED + ground port, fully wired from a GPIO pin). Tune here per project — no per-circuit hardcoding in code. Topology: source pin -> R -> LED anode (pin 2/A), LED cathode (pin 1/K) -> rail. value is the series-resistor value; color goes into the LED's Value field.",
+    "default_resistor_value": "330",
+    "default_color": "green",
+    "default_rail": "GND",
+    "resistor_lib_id": "Device:R",
+    "led_lib_id": "Device:LED",
+    "gnd_lib_id": "power:GND",
+    "spacing_mm": 10.16
+  },
+  "multi_block": {
+    "_comment": "Multi-block circuit upgrade (Phase 1-4). Controls when the engine takes the zoned-placement path (each block placed in its own region) vs. the flat-placement path (single global anchor + satellites). Single-IC circuits (NE555, LM317, op-amp) must continue to use the flat path \u2014 those work well today and any change here must not regress them. The architect prompt is responsible for emitting blocks=[] for single-IC circuits; this config is the engine-side guard.",
+    "_rule": "REFERENCE-SCHEMATIC RULE (user-confirmed 2026-05-21): (1) INSIDE a block \u2014 components connected by WIRES (R1\u2192C3 in RESET, LDO\u2192caps in POWER, MCU\u2192C6 in MEMORY). (2) MCU pin \u2192 other block \u2014 LABELS at MCU pin tip + matching label at destination (UART_TX, SPI_SCK, SWDIO etc). (3) Power rail across blocks \u2014 LABEL + power-port symbol per block (each block has its OWN local VDD power port; NOT a drawn bus). Defaults below enforce this rule: flow_dag ON (left-to-right block ordering), decoupling ON (caps adjacent to IC VDD pin -> within-block clusters get wires via existing power-net cluster logic), interblock_wires OFF (drawn inter-block wires CONFLICT with the rule that inter-block connections use labels + power ports).",
+    "hierarchy_global_pwr_flag": true,
+    "_hierarchy_global_pwr_flag_comment": "DEFAULT true. Hierarchy-wide PWR_FLAG synthesis. When true, render_hierarchical builds ONE global rail-driver registry over the whole design (every block) and shares a flagged-rails set + #FLG counter across all child sheets, so each power rail gets AT MOST ONE PWR_FLAG, with a globally-unique #FLG reference, and NEVER on a rail already driven by a native power_out in ANY sheet. Fixes the per-sheet defect where every child restarted at #FLG001 (=> 'Duplicate items #FLG001') and dropped a flag on a rail driven by the regulator in another sheet (=> 'Pins of type Power output and Power output are connected'). Fully dynamic — decisions come from pin etype + the net graph, never from a net name / refdes / part type. Set false to restore the legacy per-sheet behaviour (byte-stable).",
+    "min_pins_for_self_contained": 3,
+    "allow_partial_zoning": true,
+    "_allow_partial_zoning_comment": "When true, a genuine multi-IC board still uses zoned (block-by-block) placement even if some blocks are passive-only (e.g. a CLOCK block of crystal + load caps that owns no >=3-pin part). Without this, ONE passive block used to force the WHOLE circuit onto the flat single-anchor path, scattering every block's parts into one ring so the block rectangles overlapped page-wide. Gated by zoned_min_anchored_blocks so circuits that aren't really multi-IC (0-1 anchored blocks) keep the flat path.",
+    "zoned_min_anchored_blocks": 2,
+    "cross_block_signal_wires": false,
+    "_cross_block_signal_wires_comment": "Phase 4b. Enforces the reference rule 'INSIDE a block use WIRES; BETWEEN blocks use LABELS'. When false (default), signal-net pin pairs whose owners belong to DIFFERENT IRBlocks are NEVER wired \u2014 only labels carry the connection. When true, the body-aware router decides per-pair (legacy behavior; allows cross-block wires whenever a clean L-path exists). Rule is purely IR-data-driven (block membership), so flipping this knob never depends on IC names, circuit names, or any hardcoded list.",
+    "cross_sheet_label_kind": "global",
+    "_cross_sheet_label_kind_comment": "Multi-SHEET (hierarchy) cross-sheet connection model. Applies ONLY to render_hierarchical (parent + N child sheets), not to the flat single-sheet path. 'global' (default, Model B): a cross-block signal net emits a (global_label) at each pin in every child it touches \u2014 KiCad bonds same-named global labels across ALL sibling sheets automatically, no parent wiring needed. Parent sheet boxes carry NO sheet pins in this mode. This is the standard model for a flat sibling hierarchy (every sheet a direct child of one root). 'hierarchical' (Model A): emits (hierarchical_label) in children + matching (sheet_pin) on each parent box \u2014 the strict parent/child interface. NOTE: Model A is only electrically complete once render_hierarchical ALSO draws parent-side wiring joining same-named sheet pins across boxes; that parent-wiring pass is NOT implemented yet, so 'hierarchical' currently leaves sibling cross-sheet nets open. Power rails are unaffected by this knob \u2014 they always go via global power-port symbols.",
+    "mcu_centric_layout": {
+      "_comment": "Phase 5 (2026-06-02). 2-D MCU-centric block placement for MCU boards. Anchors the MCU/controller block at the sheet centre and places every other block in a compass cell around it (power top-left, clock top, reset top-right, connectors right, output bottom \u2014 from the canonical layout.zone_layout map). UNLIKE flow_dag's 1-D column grid, cells are sized to each block's ACTUAL estimated content (content-aware), so a tall MCU (e.g. ATmega328P = 76mm) never overflows a fixed-height row into a stacked neighbour \u2014 the structural cause of block-on-block overlap. ADDITIVE: consulted BEFORE flow_dag inside _place_components_zoned; returns {} (falls back to flow_dag, then ZONE_LAYOUT) when disabled or when there is no single dominant MCU/controller block (ambiguous / non-MCU board), so single-IC and multi-IC-non-MCU circuits are unaffected. Reversible \u2014 set enabled=false to restore the flow_dag path.",
+      "enabled": true,
+      "center_block_types": ["mcu", "controller", "cpu", "compute"],
+      "center_min_anchor_pins": 8,
+      "_center_note": "A block becomes the centre only if its block_type is one of center_block_types (or its anchor lib_id matches a flow_dag compute pattern) AND its anchor has >= center_min_anchor_pins. Excludes big connectors (Conn_02x20 = 40 pads) from being mistaken for the MCU. If two candidates tie on pin count the layout is treated as ambiguous and bails to flow_dag.",
+      "block_gap_mm": 16.0,
+      "min_block_gap_mm": 8.0,
+      "max_block_gap_mm": 55.0,
+      "_gap_note": "Blocks are JUSTIFIED across the usable sheet: the inter-block gap grows to fill free space (so the design uses the whole page, not a cramped top-centre patch), clamped to [min_block_gap_mm, max_block_gap_mm]. The gap also shrinks toward min when the grid is too big. min guarantees boxes never touch; max stops a sparse board from flinging blocks into the far corners.",
+      "satellite_depth_mm": 11.0,
+      "min_block_w_mm": 50.0,
+      "min_block_h_mm": 45.0,
+      "bias_above_title_block": true,
+      "reserve_title_block_cell": false,
+      "title_block_cell": [1, 1],
+      "_reserve_title_block_cell_comment": "DEFAULT false. Reserving the bottom-right cell (1,1) exiled a connector to an extra far-right column (2,1), making the sheet look lopsided. Instead the reflow's title-block lift-up moves any block off the title block while keeping it in its normal column. Set true only if you'd rather leave (1,1) empty than lift.",
+      "relative_cell_map": {
+        "_comment": "Landscape-optimised compass cells around the MCU at (0,0). col=left/right, row=up/down. Spreads power/clock/reset across the TOP row and connectors down the RIGHT column so blocks don't stack 3-tall in one column and overflow a landscape A3 (the screenshot's POWER/RESET/CLOCK-all-on-the-left bug). Matches the reference: POWER top-left, CLOCK top-centre, RESET top-right, MCU centre, comm/IO right, output bottom. Edit here to retune positions — no code change.",
+        "power": [-1, -1], "regulator": [-1, -1], "source": [-1, -1], "protection": [-1, -1],
+        "clock": [0, -1], "crystal": [0, -1],
+        "reset": [1, -1], "boot": [1, -1],
+        "mcu": [0, 0], "controller": [0, 0], "cpu": [0, 0], "compute": [0, 0],
+        "sensor": [-1, 0], "memory": [-1, 0],
+        "comm": [1, 0], "uart": [1, 0], "i2c": [1, 0], "spi": [1, 0], "usb": [1, 0],
+        "swd": [1, 1], "icsp": [1, 1], "io": [1, 1], "jtag": [1, 1],
+        "output": [0, 1], "led": [0, 1], "indicator": [0, 1],
+        "display": [-1, 1],
+        "generic": [0, 1]
+      },
+      "_size_note": "Each block's cell = the DRAWN rectangle size = max(anchor_bbox + 2*(satellite_depth per ~4 satellites) + 2*block_rect.padding_mm, block_rect.min_size). Cells are spaced by block_gap_mm of clear whitespace. To fit the page the engine compresses ONLY that whitespace (down to min_block_gap_mm), never the box size — scaling the box shrank the cell but not the actual symbols, so the full-size rectangle spilled into the neighbour and the boxes TOUCHED. min_block_gap_mm is the guaranteed clear air between any two block boxes (they never touch). If the boxes alone exceed the page the board is too dense for one sheet -> it's the >5-block hierarchy tier and never reaches this path."
+    },
+    "flow_dag": {
+      "_comment": "Phase 2b. Compute left-to-right block ordering from signal flow (power source on the left, compute in the middle, sinks on the right) instead of the static block_type \u2192 (col,row) map at engine.py:ZONE_LAYOUT. ENABLED by default \u2014 matches the reference convention (POWER top-left, MCU center, peripherals on right). When ir.blocks<2 the DAG is empty and the dispatcher falls back to ZONE_LAYOUT, so single-block circuits (NE555, LM317) are byte-identical to before. Block-level override: IRBlock.flow_role from the architect wins over component-based detection.",
+      "enabled": true,
+      "default_role_column_map": {
+        "source": -2,
+        "regulator": -1,
+        "compute": 0,
+        "sink": 1
+      },
+      "block_type_to_role": {
+        "_comment": "Fallback default when IRBlock.flow_role is empty AND no power-input connector / regulator / MCU is detected in the block's components.",
+        "power": "regulator",
+        "mcu": "compute",
+        "sensor": "compute",
+        "comm": "compute",
+        "io": "sink",
+        "generic": "compute"
+      },
+      "role_lib_substring_patterns": {
+        "_comment": "Lib_id substring matches for inferring block flow_role from components (lowercase). Pattern matching is 'pattern in lib_id.lower()'. Per [feedback_no_hardcode_json_config]: replaced the in-code 'usb_c' / 'regulator_' / 'atmega' / 'stm32' literals that were originally hardcoded into _classify_role. Add a new family (esp32-c6, nrf52840, MAX1745) by editing JSON — no Python change. Priority order is source > regulator > compute > sink, so a USB-input block with an MCU on it still classifies as source.",
+        "source":    ["usb_c", "usb_b", "usb_a", "barrel", "battery", "conn_01x02"],
+        "regulator": ["regulator_", "ldo"],
+        "compute":   ["mcu_", "atmega", "stm32", "esp32", "rp2040", "attiny", "pic"]
+      }
+    },
+    "decoupling": {
+      "_comment": "Phase 3. Post-pass that moves decoupling caps adjacent to their target IC's power pin (instead of leaving them in a generic 'passives' cluster). Detection: 2-pin cap on (positive-power-net, GND) where the positive-power net also touches an IC pin (component with \u22653 pins). ENABLED by default \u2014 this is THE key change that delivers the 'INSIDE-block wires' part of the rule: once caps sit adjacent to the IC's VDD pin (<12.7 mm), the existing power-net cluster logic in render_flat groups them into ONE cluster, emits ONE shared power-port symbol, and draws wires from each cap pin to the IC pin. Runs ONLY in the zoned path (multi-block); defensive guard refuses to run when ir.blocks is empty, so single-block circuits (NE555, LM317) are unreachable by this code and remain byte-identical.",
+      "enabled": true,
+      "cap_lib_id_prefixes": [
+        "Device:C"
+      ],
+      "ground_net_names": [
+        "GND",
+        "AGND",
+        "DGND",
+        "PGND",
+        "VSS",
+        "VEE",
+        "EGND",
+        "SGND"
+      ],
+      "apply_to_flat_single_block": true,
+      "_apply_to_flat_single_block_comment": "When true (default), the decoupling-cap relocator ALSO runs for flat single-block circuits (ir.blocks==[]). Without this flag, single-IC outputs (ATtiny85 dimmer, NE555 oscillator) left decoupling caps wherever the flat placer dropped them — sometimes 60+ mm from the IC's VDD pin. With this flag the relocator uses the tighter `child_sheet_max_distance_from_vdd_mm` threshold (default 8 mm) so the cap snaps next to the IC. Set false to revert to the byte-identical pre-2026-05-26 behaviour for circuits whose hand-tuned single-IC layout is preferred.",
+      "max_distance_from_vdd_mm": 30.0,
+      "child_sheet_max_distance_from_vdd_mm": 8.0,
+      "min_anchor_pin_count": 3,
+      "row_layout": false,
+      "_row_layout_comment": "Datasheet D1 'comb' drawing standard (user-chosen default 2026-06-02): lay each IC's decoupling caps in a ROW (perpendicular to the power pin's outward axis), +V pin facing the IC. Pairs with LOCAL power-port symbols (engine.single_block_power_cluster_radius_mm=3.81) so each cap pin gets its own +V/GND symbol instead of a shared bus -> renders fully clean (0 short / 0 overlap), textbook comb layout. The user explicitly preferred this over the prior 'wires INSIDE block' rule for power nets. Set false (and radius back to 0) to restore shared-bus wiring inside blocks.",
+      "row_gap_mm": 2.54,
+      "row_distance_mm": 7.62,
+      "robust_destack": true,
+      "_robust_destack_comment": "Fix (2026-06-02) for the +3V3<->GND SHORT class: when two decoupling caps target the SAME IC power pin (e.g. a 100nF HF + a 10uF bulk cap, both 'Device:C'-prefixed), the de-stack collision loop must land them on DISTINCT coordinates. The old loop diffed a drifting `placed_bboxes` list by float equality, so the 2nd cap often did NOT see the 1st cap's just-committed position and stacked exactly on top of it (identical coord) -> the +3V3 and GND power-port wire clusters merged into one net = dead short. When true, the resolver instead rebuilds its collision set from the LIVE positions of every other placed component (keyed by ref) and verifies-after-snap (walks outward, then the perpendicular axis) so two caps on one pin can never end co-located. Set false to revert to the pre-fix byte-identical behaviour.",
+      "destack_step_budget": 16,
+      "text_aware_spacing": true,
+      "_text_aware_spacing_comment": "Fix (2026-06-02) for cap field text overwriting neighbours (user: 'letter ellam overwrite aakuthu konjam space vittu'). The de-overlap pass used to fire only when two caps' BODIES overlapped, so a row of caps ~7.62 mm apart had clear bodies but the side-placed Reference/Value of one cap printed over the next cap / the +V rail label. When true, de-overlap measures each cap with a TEXT-INCLUSIVE bbox (body + the placed field reach: vertical caps grow on the right by the wider of ref/value at 50-mil font; horizontal caps grow top+bottom by field_stack_allowance_mm) and spreads caps until that clears. placed_bboxes still tracks body-only boxes, so non-cap layout is unchanged. Set false to revert to body-only de-overlap (byte-identical).",
+      "field_stack_allowance_mm": 2.54,
+      "_field_stack_allowance_comment": "Vertical reach (mm) added above AND below a name-above/value-below part (horizontal caps/ICs) when text_aware_spacing is on. 2.54 = field gap (1.27) + half a 1.27 mm text line, enough to clear a stacked cap's value-below from the next cap's reference-above. The right-side reach for vertical 2-pin caps is computed per-part from the actual ref/value string width, so only this top/bottom margin is a constant."
+    },
+    "crystal": {
+      "_comment": "R2.5 (2026-05-27). Post-pass that moves crystal-like 2-pin parts to the midpoint between the two IC pins they bridge — implements rule 'Keep crystal close to MCU pins'. Universal detection (no refdes / lib_id hardcoding): 2-pin part wired into 2 non-power nets where BOTH nets land on the same multi-pin IC. Catches crystals, ceramic resonators, differential filters. Threshold `min_anchor_pin_count` defaults to 8 (skips small ICs to avoid false positives — 2-pin filter caps between op-amp pins don't qualify). max_distance_from_pins_mm = if the part is already within this many mm of the midpoint, don't move it.",
+      "enabled": true,
+      "min_anchor_pin_count": 8,
+      "max_distance_from_pins_mm": 25.0
+    },
+    "interblock_wires": {
+      "_comment": "Phase 4. CONFLICTS WITH THE REFERENCE-SCHEMATIC RULE (see _rule above) and is therefore SHIPPED DISABLED. The rule says inter-block connections use LABELS + per-block power ports, NOT drawn wires. This phase exists as opt-in for a different aesthetic (visible bus across the sheet) \u2014 flip enabled=true only if you explicitly want drawn wires between blocks. Defensive: routes that pierce non-endpoint bodies are dropped silently (the label-net still carries the electrical connection either way). GND-like nets are skipped by default. Only runs when ir.blocks is non-empty AND the dispatcher took the zoned path \u2014 single-block circuits are unreachable by this code.",
+      "enabled": false,
+      "max_routes_per_sheet": 20,
+      "skip_ground_nets": true,
+      "ground_net_names": [
+        "GND",
+        "AGND",
+        "DGND",
+        "PGND",
+        "VSS",
+        "VEE",
+        "EGND",
+        "SGND"
+      ],
+      "include_signal_nets": false
+    },
+    "discrete_templates": {
+      "_comment": "Phase 5. Topology-template placer for discrete-only circuits \u2014 bridge rectifier, voltage divider, RC filter, common-emitter amp, LED + current-limit resistor, H-bridge. Triggered ONLY when (1) ir.blocks is empty AND (2) no component has \u2265 min_anchor_pin_count pins (no IC anchor) AND (3) the IR matches a known topology. Single-IC circuits (NE555, LM317) have ICs \u2192 topology detection returns None \u2192 fall through to existing flat path \u2192 byte-identical to today. Multi-block circuits have ir.blocks \u2192 unreachable. Enabled by default because the regression guard is strict \u2014 only discrete-only circuits without a known topology match see any change.",
+      "enabled": true,
+      "min_anchor_pin_count": 3,
+      "bridge_rectifier": {
+        "diode_lib_id_prefixes": [
+          "Device:D",
+          "Diode:",
+          "Diode_"
+        ],
+        "min_diode_count": 4,
+        "max_diode_count": 4,
+        "diamond_pitch_mm": 20.32,
+        "ac_input_offset_mm": 30.48,
+        "dc_output_offset_mm": 30.48
+      },
+      "voltage_divider": {
+        "_comment": "Phase 5b. Two resistors in series with a middle tap on a non-power node. Top resistor between Vin (power net) and middle tap; bottom resistor between middle tap and GND. Detection requires exactly 2 Device:R components forming this topology. chain_pitch_mm must keep R1's bottom pin and R2's top pin WITHIN the engine's 12.7 mm power-net cluster radius so they form ONE shared label + wire instead of two duplicated labels. With chain_pitch_mm=5.08, body-to-body gap is ~2.54 mm and the midpoint pins cluster.",
+        "resistor_lib_id_prefixes": [
+          "Device:R"
+        ],
+        "min_resistor_count": 2,
+        "max_resistor_count": 2,
+        "chain_pitch_mm": 5.08,
+        "tap_label_offset_mm": 5.08
+      }
+    }
+  },
+  "power_net_patterns": {
+    "_comment": "A net is treated as power if (a) any member is a power-port symbol (lib_id starts with 'power:' or refdes starts with '#PWR') OR (b) its name matches one of these prefixes (case-insensitive). Both checks are needed \u2014 bare wires labeled '+3V3' without a power-port symbol still need power treatment.",
+    "patterns": [
+      "VCC",
+      "VDD",
+      "VEE",
+      "VSS",
+      "GND",
+      "AGND",
+      "DGND",
+      "PGND",
+      "EGND",
+      "SGND",
+      "VBUS",
+      "VBAT",
+      "VIN",
+      "VOUT",
+      "VSYS",
+      "+3V3",
+      "+3.3V",
+      "+5V",
+      "+12V",
+      "+24V",
+      "+1V8",
+      "+1.8V",
+      "+2V5",
+      "-3V3",
+      "-5V",
+      "-12V"
+    ]
+  },
+  "ignored_refdes_prefixes": {
+    "_comment": "Refdes prefixes that represent annotation/utility symbols, not real components. Excluded from the connectivity graph so they don't inflate degree counts or create phantom nodes.",
+    "prefixes": [
+      "#PWR",
+      "#FLG",
+      "TP",
+      "MK",
+      "LOGO",
+      "FID"
+    ]
+  },
+  "importance_weights": {
+    "_comment": "score = w_pins * pin_count + w_degree * unique-non-power-neighbors + w_betweenness * betweenness_centrality. The highest-scoring node is the layout center candidate (MAIN_CONTROLLER). Tune these to bias toward pin-rich ICs vs hub-like passives.",
+    "pin_count": 1.0,
+    "degree": 2.0,
+    "betweenness": 5.0
+  },
+  "edge_rules": {
+    "_comment": "How non-power nets create edges between components. Power nets are excluded by default so the graph reveals signal topology (otherwise every component connects via GND and the graph is useless for layout). min_pin_count_for_edge filters single-pin dangling nets that would create no real edge anyway.",
+    "exclude_power_nets": true,
+    "min_pin_count_for_edge": 2
+  },
+  "label_stub": {
+    "_comment": "R13 (stub before label) + R11 (label collision avoidance) from WIRING_RULES.md. `length_mm` is the base stub from pin tip to label anchor. When a new label's anchor would land within `min_separation_mm` of a previously-emitted anchor on the same outward axis, the stub auto-lengthens by `stagger_step_mm` until separated (up to `max_stagger_count` times). Body-pierce guard: when an obstacle list is supplied, the stub endpoint must not land strictly inside any obstacle bbox; if it does, the stub is extended by `body_pierce_extend_step_mm` until it exits, capped at `body_pierce_max_tries`. Wire-overlap guard (R11-wire, added 2026-06-01): when an `existing_wires` list is supplied AND wiring_rules.r11_avoid_label_wire_overlap is true, the stub is lengthened by `wire_overlap_extend_step_mm` until the label text bbox no longer overlaps any previously-emitted wire segment.",
+    "length_mm": 3.81,
+    "min_separation_mm": 2.0,
+    "stagger_step_mm": 2.54,
+    "max_stagger_count": 4,
+    "body_pierce_extend_step_mm": 2.54,
+    "body_pierce_max_tries": 8,
+    "wire_overlap_extend_step_mm": 1.27,
+    "wire_overlap_max_tries": 6,
+    "wire_overlap_font_height_mm": 1.27,
+    "_ink_comment": "R11 unified text-bbox de-collision (added 2026-06-04, gated by wiring_rules.r11_unified_ink_decollide). After the per-label passes above, the stub is lengthened by `ink_overlap_extend_step_mm` (up to `ink_overlap_max_tries`) while the label's TEXT rectangle overlaps any committed ink -- component body+RefDes+Value (seeded at render start), other net labels, and power-port / PWR_FLAG names -- tested with `ink_overlap_margin_mm` clearance. Power ports lengthen their own stub by the same knobs. This is what stops long labels overlapping each other (VIN_FUSED), labels landing on RefDes/Value, and GND/PWR_FLAG names stacking.",
+    "ink_overlap_extend_step_mm": 1.27,
+    "ink_overlap_max_tries": 8,
+    "ink_overlap_margin_mm": 0.3
+  },
+  "pin_completion": {
+    "_comment": "ONE data-driven engine (intent/pin_complete.complete_floating_pins) that connects a FLOATING component pin to its correct net -- instead of a Python function PER component (LED cathode, crystal cap, ground pin, ...). A floating pin's correct connection is its ROLE = (lib_id pattern) x (pin name / electrical type), so the knowledge lives HERE as data and one generic loop applies it. Adding a relay coil return, a Hall-sensor ground, an opto anode, a new MCU's VBAT = ONE rule below, ZERO new code. Each rule matches a pin by any of {lib_id_contains, pin_name_in, pin_name_contains, pin_etype_in} with optional guards (two_pin_only, require_other_pin_wired) and connects a matching FLOATING pin to connect_to (GND | DOMINANT_RAIL | explicit rail). First matching rule wins; list order = priority. 'Floating' = pin in no net OR lone pin on a single-pin NET_FLOATING stub. Strictly additive -- only touches pins the validator already calls floating. Set enabled=false to revert to the per-component functions.",
+    "enabled": true,
+    "rules": [
+      {"name": "ground_pins", "pin_name_contains": ["GND", "VSS", "AGND", "DGND", "PGND"], "pin_etype_in": ["power_in"], "connect_to": "GND"},
+      {"name": "led_cathode", "lib_id_contains": ["LED"], "pin_name_in": ["K", "CATHODE", "KATHODE"], "two_pin_only": true, "require_other_pin_wired": true, "connect_to": "GND"},
+      {"name": "supply_power_in", "pin_etype_in": ["power_in"], "connect_to": "DOMINANT_RAIL"}
+    ]
+  },
+  "load_completion": {
+    "_comment": "ONE data-driven completion for a fully-floating 2-terminal LOAD / indicator (LED, buzzer, relay coil, motor, ...) -- NOT a function per part. A floating load needs a SOURCE on one terminal and a RETURN (GND) on the other; some need a series resistor. Each rule: lib_id_contains (which parts), source_pin / return_pin (matched by pin NAME or NUMBER), series_resistor (+resistor_value), source_to / return_to (GND | DOMINANT_RAIL | explicit rail). Fires ONLY when the load is fully floating (no real >=2-pin connection on either terminal) so it never touches a GPIO-driven or half-wired part. The source defaults to a power rail (safe always-on / always-energised completion, ERC-clean, unblocks the build; re-point to a GPIO afterwards). Adding a buzzer / relay / motor = ONE rule here, ZERO new code. Engine: intent/checklist_repair._complete_loads.",
+    "enabled": true,
+    "series_part_lib_id": "Device:R",
+    "series_refdes_prefix": "R",
+    "dominant_rail_pattern": "+3V3|+5V|VDD|VCC",
+    "rules": [
+      {"name": "led", "lib_id_contains": ["LED"], "source_pin": ["A"], "return_pin": ["K", "CATHODE"], "series_resistor": true, "resistor_value": "330", "source_to": "DOMINANT_RAIL", "return_to": "GND"},
+      {"name": "buzzer", "lib_id_contains": ["BUZZER", "SPEAKER", "SOUNDER"], "source_pin": ["+", "1"], "return_pin": ["-", "2"], "series_resistor": false, "source_to": "DOMINANT_RAIL", "return_to": "GND"}
+    ]
+  },
+  "build_graph": {
+    "_comment": "max_attempts raised to 3 (2026-06-02) so the validate->retry->architect edge can reach a clean IR and the full render->export path runs. detailed_trace=true selects the 7-node router_graph_detailed (classify_intent -> decide_render_mode -> architect -> normalize -> validate -> render -> export); set it false to revert to the 5-node router_graph. architect_timeout_seconds raised 45->180 (2026-06-04): on a large board (37-part STM32F405 CAN logger) the architect Claude call legitimately needs ~135s; the old 45s killed it every attempt -> APITimeoutError -> arun_with_retry re-ran the whole node -> retry storm (each pass ~270s, looped to max_attempts, GeneratorExit/no output). 180s lets a big board finish in one pass; small boards still return in seconds so this only raises the ceiling, never the floor.",
+    "max_attempts": 3,
+    "_comment_single_build_trace": "OBSERVABILITY. When true (default) the whole graph invocation runs inside ONE umbrella LangSmith run ('Build schematic'), parented to the turn's conversation ('Chat') run, so Plan blocks + every per-block Fix block + the engine spans nest into a SINGLE trace route instead of scattering as dozens of detached top-level rows. Needed because the Agent SDK invokes the build_circuit MCP tool in a task that does NOT inherit run_turn's run-tree contextvar, so without the umbrella each inner @traceable started its own root trace (the cluttered 'Fix block' list). Best-effort + fully wrapped: it never raises and never changes the build output. Set false to revert to the prior scattered-trace behaviour (byte-identical build).",
+    "single_build_trace": true,
+    "architect_timeout_seconds": 180,
+    "_comment_architect_max_tokens": "Output-token budget for the architect Claude call. Raised 4000->16000 (2026-06-05): 4000 could not hold a full ~100-part IR (components + nets). Because the strict emit_ir tool is grammar-constrained, an over-budget generation does NOT truncate visibly -- the decoder closes the JSON VALIDLY after the components array with nets=null, so the board parses fine but is completely unwired (the BMS build: 98 components, 0 nets). 16000 fits a ~100-part netlist with room to spare; small boards finish far under it, so this only raises the ceiling, never the floor. architect_block_max_tokens is the per-block (#9) call's smaller budget.",
+    "architect_max_tokens": 16000,
+    "architect_block_max_tokens": 8000,
+    "_comment_block_draw_attempts": "Per-block draw retries in the incremental forward path (intent/incremental_build.py build_incrementally). A transient block-draw failure (180s timeout / Anthropic 529 / an over-budget block whose decoder closes the JSON empty) otherwise SILENTLY drops that block's whole intra-block wiring -> an under-wired board that validate can't catch (a dense monitor block's cell-sense pins are `input`, not power, so POWER_PIN_FLOATING / BOARD_UNDER_WIRED stay quiet). 2 = one cheap redraw recovers the common transient case; set 1 to restore the original single-attempt behaviour (byte-stable).",
+    "block_draw_attempts": 2,
+    "_comment_parallel_block_draw": "PARALLEL BLOCK DRAW (incremental_build.build_incrementally). The incremental path draws each planned block in its OWN LLM call; by default those calls run one-after-another, so an 8-block board = 8 (x retries) sequential calls and a ~100-part BMS spent ~590s in 'Designing' then got CANCELLED past the ~9-min WS/timeout window before anything rendered (LangSmith trace 2026-06-12). The block DRAWS are independent (each block's interface is the PLAN's frozen boundary contract, and _reassert_plan_seams re-joins every cross-block seam afterwards), so when true they run CONCURRENTLY on a thread pool and only the SPLICE (which mutates the shared plan_ir) stays serial, in plan order -> wall-time collapses from sum-of-blocks to ~slowest-single-block. Each draw call builds its own Anthropic client (thread-safe) and the LangSmith @traceable parent context is copied into each worker so 'Fix block' spans still nest. DEFAULT FALSE (sequential path is byte-identical when off + on small/medium boards); set true to speed up large multi-block boards. parallel_block_workers caps concurrency.",
+    "parallel_block_draw": true,
+    "parallel_block_workers": 3,
+    "_comment_graph_recursion_limit": "LangGraph superstep ceiling for the build-graph ainvoke (tools/build_circuit.py). LangGraph's default is 25; a large board interleaving full regens (max_attempts) + per-block repair passes (max_block_attempts) can exceed it, crashing with an opaque GraphRecursionError that DISCARDS the keep_best IR. 60 covers the worst-case retry interleave with margin.",
+    "graph_recursion_limit": 60,
+    "detailed_trace": true,
+    "_comment_save_preview": "SAVE-PREVIEW STAGE. When true (code default) the build graph ends with the preview/export node (router_graph 'preview' / router_graph_detailed 'Save preview') that runs _export_preview_svg over the parent + every child sheet, returns preview_svgs, and lets server.py push {kind:previews} to the chat for inline <img> display. Set FALSE to drop the stage entirely: the node is never wired, so no SVGs are produced, the chat receives no previews, and the 'Save preview'/export span no longer appears in the LangSmith trace. Disabled 2026-06-05 at user request (image preview removed from the chat frontend; this also removes its backend half + LangSmith span). Flip back to true + restart to restore -- no code change.",
+    "save_preview": false,
+    "_comment_keep_best_attempt": "The architect retry can DIVERGE -- errors climb 5 -> 8 -> 27 across attempts and the last attempt drops whole power rails (21x POWER_PIN_FLOATING). When true (default): validate remembers the fewest-error IR, the retry loop STOPS as soon as an attempt has more errors than that best (no point burning the budget making it worse), and the terminal handler reports the BEST attempt instead of the last. Set false to revert to 'retry to max_attempts, return the last attempt'.",
+    "keep_best_attempt": true,
+    "_comment_per_block_retry": "PER-BLOCK RETRY (#9). When true AND the IR has blocks AND every current validate error localises to a block (none cross-block / global), the retry regenerates ONLY the failing block(s) -- the rest of the board stays BYTE-FROZEN -- instead of re-emitting all 37 parts (which diverges + times out on big boards). The LIVE detailed graph routes validate -> 'Fix block' (block_repair_node: localise -> _architect_block_call per failing block -> splice_block -> normalize_ir) -> validate, capped at max_block_attempts before falling back to a FULL architect regen. Only router_graph_detailed is affected (its _pass_or_fix); build_graph + the 5-node router are untouched. Default FALSE until live-verified; the offline splice core (intent/block_repair.py) is proven at 0 shorts. max_blocks_per_pass bounds how many blocks are regenerated in one Fix-block pass.",
+    "_comment_incremental_large_board": "Forward 'draw bit by bit' generation for LARGE boards ONLY. When true AND the board's render-mode guess is in incremental_trigger_render_modes (hierarchy OR single_sheet_blocks by default -- generation is DECOUPLED from render mode as of 2026-06-09) AND the PLAN call's real count is >= block_repair_min_components parts, the architect node PLANS the blocks (one small skeleton call: components + blocks + rails + inter-block signals), then DRAWS each block in its own focused call and splices it into the growing board (intent/incremental_build.py) -- so a ~100-part board is never wired in one shot (which overflows the model's reliable output length and tangles cross-block, the BMS failure). Small + medium boards, and every RETRY, use the proven single-shot _architect_call unchanged. DYNAMIC + part-agnostic: the decomposition comes from the architect's own block plan for whatever board was asked, nothing per-circuit. Set false to revert to one-shot for all boards.",
+    "incremental_large_board": true,
+    "_comment_incremental_trigger_render_modes": "DECOUPLES generation mode from render mode (fix 2026-06-09). Which pre-architect render-mode GUESSES are eligible to attempt the forward-incremental PLAN call. The PLAN call's REAL component count (>= block_repair_min_components AND >= 2 blocks, in architect._try_incremental) is the authoritative large-board decision; this list only pre-filters which boards pay the cheap PLAN round-trip, so a clearly-flat tiny circuit (render_mode=='', NE555 blinker) skips it. Was hard-coded to ['hierarchy'] only, which left a ~55-part board the keyword guess mis-tagged SINGLE_SHEET_BLOCKS on the lossy one-shot path (LLM drops nets) -- the large-board generation cliff. Added 'single_sheet_blocks' so any block-decorated board attempts incremental and the part-count gate decides. Add '' (flat/auto guess) to attempt incremental on EVERY board (full decouple) at the cost of a PLAN call on small boards.",
+    "incremental_trigger_render_modes": ["hierarchy", "single_sheet_blocks", ""],
+    "_comment_max_builds_per_turn": "HARD per-turn cap on build_circuit calls. The agent (Haiku) ignores the system-prompt's 'call build_circuit at most once per message' rule and re-invokes it 3-6x on a hard board, turning ONE failed build into a 600s+ no-output disaster (observed live: CAN logger via chat WebSocket, 6 calls / 676s / no schematic). The (max+1)th call this turn is short-circuited INSTANTLY (no architect loop) with a STOP message telling the agent to report the prior result. A prompt rule can't enforce this; this is the deterministic layer. Default 1; set 0 to disable.",
+    "max_builds_per_turn": 1,
+    "per_block_retry": true,
+    "_comment_block_repair_min_components": "LARGE-BOARD GATE for per_block_retry. Per-block (decomposition) regeneration only kicks in when the board has >= block_repair_min_components components (OR >= block_repair_min_blocks blocks when that is > 0). Below the threshold a failed board routes to the normal full-architect regen -- unchanged, proven behaviour for the small/medium boards that converge single-shot (the data-loggers at ~34-37 parts). The threshold exists because the size-specific failure (one-shot ~100-part netlist degrading via output-length ceiling / context rot / lost-in-the-middle) is what decomposition fixes; small boards don't need it and shouldn't pay its per-block-call cost. 40 sits just above the data-logger size that converges single-shot; raise/lower to tune which boards decompose. Set block_repair_min_blocks > 0 to also trigger on sheet count.",
+    "block_repair_min_components": 40,
+    "block_repair_min_blocks": 0,
+    "max_block_attempts": 3,
+    "max_blocks_per_pass": 2,
+    "_comment_feedback_available_pins": "CLOSE THE PIN FEEDBACK LOOP. When true (default), a PIN_NOT_ON_SYMBOL validation error also carries the FULL real pin list of the offending symbol (read live from the .kicad_sym library -- no curated list, works for any part) plus a symbol-derived 'did you mean' ranking, and the repair prompts (per-block _architect_block_call AND the full-architect retry feedback) render an 'AVAILABLE PINS' section so the architect picks the actual library pin instead of re-emitting the hallucinated one (the BMS 'Vref/NRST/BOOT0' re-hallucination loop). The legacy truncated prose (first 8 pins) stays byte-identical; this only ADDS structured fields + the prompt section. Set false to revert to the exact prior behaviour (no extra issue keys, repair prompts unchanged).",
+    "feedback_available_pins": true,
+    "_comment_mark_run_failed_on_validation_error": "OBSERVABILITY. When true (default), a terminal build failure (validation errors after the retry budget, a graph crash, or a hard state error) sets the live LangSmith run's status to ERROR (red) with build_failed/issue_count/attempt metadata, so a build that produced NO schematic stops showing GREEN in the trace. It does NOT raise and does NOT change the friendly chat reply -- the tool still returns its is_error dict and the agent still synthesises its plain-English options. Best-effort + fully wrapped: it can never break a build. Set false to leave failed runs uncoloured.",
+    "mark_run_failed_on_validation_error": true,
+    "_comment_fail_on_block_skip": "Never ship an incrementally-SKIPPED block as a green success. When true (default), a genuine draw/splice FAILURE in the incremental forward path (block_interface raised, block_draw returned nothing after block_draw_attempts, or splice_block raised -- NOT an intentionally-empty plan block) is stamped on the IR and raised by validate as INCREMENTAL_BLOCK_SKIPPED, keyed to the block so the per-block repair loop redraws it (and prunes the mark on success). Without this an unwired block passes ERC silently (its input pins aren't power pins, so BOARD_UNDER_WIRED stays quiet). Set false to revert to the silent-continue behaviour (no IR stamp, no issue).",
+    "fail_on_block_skip": true,
+    "_comment_reset_attempt_on_full_handoff": "Rescue the dead block->full handoff. When true (default), if per-block repair AND the architect attempt budget are both exhausted with errors remaining (and no hard error, and not a divergence-fail), the detailed graph routes once through a 'Retry full board' node that resets attempt + block_attempt to 0 (keeping the accumulated available-pins feedback) so a fresh full regen -- now armed with the real pin list -- can converge, instead of dying at max_attempts. Bounded by max_full_handoffs so it can never loop. Only router_graph_detailed is affected; set false and the 'reset' route + node are never wired (byte-identical routing).",
+    "reset_attempt_on_full_handoff": true,
+    "_comment_max_full_handoffs": "Hard cap on how many times reset_attempt_on_full_handoff may refresh the attempt budget in one build. 1 (default) = at most one extra full budget (worst case ~2x max_attempts architect calls, still under graph_recursion_limit). full_handoffs is never reset, so this is the loop backstop. 0 effectively disables the rescue even when the flag is true.",
+    "max_full_handoffs": 1,
+    "_comment_seam_reassert_ownership": "PREVENT the incremental path from manufacturing PIN_IN_MULTIPLE_NETS. _reassert_plan_seams re-adds cross-block contract pins a block dropped during redraw. When true (default) it re-adds a planned pin ONLY if that pin is currently on NO net (genuinely dropped) -- a pin a block already wired elsewhere is NOT re-added, so one physical pin can never end up on two nets via seam re-assertion. When false, the legacy always-re-add behaviour (which blind-appends and can double-list a pin) is restored byte-identically. Pairs with normalize.global_pin_ownership (the post-assembly backstop).",
+    "seam_reassert_ownership": true,
+    "_comment_offload_build_to_thread": "Run the SYNC build graph in a worker thread (asyncio.to_thread) instead of blocking the asyncio loop with `await ainvoke`. The graph nodes are synchronous and the architect uses the sync anthropic client, so a ~6-min build otherwise freezes the loop -- nothing can stream to the chat or refresh eeschema mid-build (the heartbeat is the only thing that survives). Offloading frees the loop so progressive_status can push live per-block updates. to_thread COPIES contextvars, so LangSmith tracing keeps nesting under 'Circuit Design'. Default FALSE (the loop-blocking `await ainvoke` path, byte-identical) until live-verified; this is the prerequisite for progressive_status. Flip true + restart.",
+    "offload_build_to_thread": false,
+    "_comment_progressive_status": "Stream a live 'Drew block 3/8: POWER' status to the chat as each block of a large incremental build is drawn, so the ~6-min build is not a black box. Needs offload_build_to_thread=true (else the loop is blocked and frames can't be sent until the build ends). The build worker hands each update to build_progress.emit(), which rides the SAME single heartbeat-queue consumer in server.py (no concurrent-send race). Default FALSE -> no per-block frames, the loop's consumer never sees a progress frame (byte-identical). Requires chat_ui.heartbeat.enabled (default true, the queue path).",
+    "progressive_status": false,
+    "_comment_partial_persist_on_failure": "Don't throw away a large board that mostly built. When a build fails validation but drew some blocks cleanly, render+save the cleanly-drawn blocks (HOLDING OUT the broken/conflicted ones so the canvas is never electrically wrong) and report 'drew N, held out K: ...', instead of returning nothing. Held-out set = incrementally-skipped blocks + blocks owning unresolved errors (localize_issues). The partial is returned as a normal result with a `path`, so the server refreshes eeschema via its existing safe-revert. Only fires on the incremental (block) path. Default FALSE -> the legacy all-or-nothing failure text (byte-identical). Flip true + restart. ENABLED 2026-06-10 so a failed BMS shows its drawn blocks instead of a blank sheet.",
+    "partial_persist_on_failure": true,
+    "_comment_plan_contract_complete": "THE cure for floating cross-block control nets (NET_FLOATING on ALERT_NET / CFETOFF_NET / DFETOFF_NET / REGIN_NET / ...). In the incremental PLAN, the architect declares an inter-block signal on the source IC but often never wires the other end (the MCU GPIO), leaving a one-ended (floating) net that NO downstream repair can fix -- only the architect can decide which GPIO it lands on, and on a complex board it diverges trying. When true (default), after the PLAN call _complete_plan_contract DETECTS one-ended signal nets (non-power nets with <2 pins -- purely structural, no net-name table) and asks the architect to add the missing endpoint (it sees the board's real pins via the pin catalog), re-emitting the full plan BEFORE any block is drawn, so the both-ended contract propagates to both block draws and the net can't float. Bounded + only accepts a re-emit that reduces the one-ended count (never loops/regresses). Set false -> the plan is used as-is (byte-identical). The plan prompt also now always instructs both-ended signals.",
+    "plan_contract_complete": true,
+    "_comment_plan_contract_max_attempts": "Max plan-completion re-calls when one-ended signal nets remain (each is one extra ~cheap PLAN-sized architect call). 2 (default) is enough to complete the contract on a typical large board; raise if a very wide board still has one-ended nets after planning. Each re-call must make progress (fewer one-ended nets) or the loop stops early.",
+    "plan_contract_max_attempts": 2,
+    "_comment_block_audit": "PER-BLOCK correctness audit in the incremental forward draw (intent/incremental_build.py). After a block is drawn, validate IT IN ISOLATION (_audit_block builds a sub-IR of the block's components + internal nets + boundary rails) and, if it has block-fixable errors -- a pin name that isn't on the symbol (PIN_NOT_ON_SYMBOL), a power pin wired to nothing (POWER_PIN_FLOATING), or a pin on two of its own nets (PIN_IN_MULTIPLE_NETS) -- REDRAW that block with those errors fed back (block_draw renders the real available_pins), until it is clean or block_audit_attempts runs out. Catches the architect's per-block slips (e.g. INA240 'OUT' vs pin 5, STM32 'NRST', BQ76952 REG1/REG2/CP1 undecoupled, a GPIO put on two nets) at the BLOCK level where the model can fix them with focused context, BEFORE they pile onto the assembled board and diverge. Deliberately does NOT report NET_FLOATING in isolation (a boundary signal looks one-ended there but isn't). When true (default) the board is built block-by-block AND verified block-by-block. Set false -> a block is spliced as first drawn (byte-identical, single forward draw). Never raises; an audit failure just keeps the first draw.",
+    "block_audit": true,
+    "_comment_block_audit_attempts": "Max draws per block when block_audit is on (covers BOTH a transient draw failure and a correctness redraw). 3 (default): the first draw + up to two redraws with the audit errors fed back. Each redraw is one focused ~5-part block call (cheap + fast). Raise for a board whose blocks are dense/hard; lower to cap cost. A block that is still dirty after the budget is spliced as-is and the normal validate/repair loop downstream handles the residual.",
+    "block_audit_attempts": 3
+  },
+
+  "auto_refresh": {
+    "_comment": "Controls which schematic file(s) the server tells eeschema to reload after a build completes (server.py auto-refresh broadcaster). `active_only` (default, added 2026-06-01 per user request) refreshes ONLY the parent / target sheet the user had open --- hierarchical child sheets are produced on disk but not force-reloaded. `all_sheets` restores the legacy behaviour where every produced .kicad_sch (parent + children) gets a revert command sent to eeschema. Pick `all_sheets` only when the user routinely keeps multiple eeschema windows open at once.",
+    "scope": "active_only",
+    "_skip_open_comment": "When true (default), the server does NOT send `open_file` to eeschema if the just-built file is already the schematic eeschema has open --- it sends only `revert` (in-place reload). `open_file` makes eeschema run a full OpenProjectFiles() which, on an already-open project, hangs on a hidden 'save changes?' modal and goes Not Responding (the 5-min freeze that forced a close+reopen). Set false to restore the always-send-open_file behaviour.",
+    "skip_open_when_active": true,
+    "_touch_mtime_comment": "When the target sheet is the one eeschema already has open, do NOT bump its file timestamp after a build. Touching mtime wakes eeschema's own 'file changed on disk - reload?' watcher, which races the in-place `revert` and leaves a pending modal that surfaces behind the close --- eeschema goes Not Responding and force-closing it leaves a stale .lck that re-triggers the freeze on the next open (the close+restart loop). build_circuit already wrote the file so its mtime is fresh; the touch on the active sheet is redundant. Sheets eeschema does NOT have open are still touched. Set true to restore the always-touch behaviour (only needed if reverts are being debounced).",
+    "touch_mtime_when_active": false,
+    "_active_ignores_app_ctx_comment": "When true (default, added 2026-06-05), a schematic eeschema has open is treated as the active sheet even if the edit arrived from the PCB editor (both windows open, PCB focused). The old logic required the message's app context to BE the schematic, so a PCB-context edit would touch+open_file the background schematic, arm its 'file changed on disk - reload?' modal, and hang the whole project when the user closed the schematic page. With both editors sharing one project lock, that bad close stranded the lock and made the NEXT file open from the project manager deadlock too. Set false to restore the app_ctx-bound behaviour.",
+    "active_ignores_app_ctx": true,
+    "_open_project_in_shell_comment": "Cursor-style (2026-06-21, user: 'project folder create but not show in Project Files'). When true (default), after a build the server also broadcasts an `open_project` IPC message carrying the new project's .kicad_pro path. The single-window SHELL (KICAD_MANAGER_FRAME) has its own AI_IPC_CLIENT that handles `open_project` -> LoadProject(), which rebuilds the left 'Project Files' tree and resets its file watcher, so the just-built project's files appear (and update live) like Cursor opening a folder. Editors (eeschema/pcbnew) ignore the action; the shell skips the reload if it is already the active project. Without this the files land in F:/Ki_CAD/_envil_out/<name>/ but no open project is watching that folder, so the tree stays empty. Requires the shell IPC handler (kicad_manager_frame.cpp) — present from the 2026-06-21 fork rebuild. Set false to restore the editor-only refresh (no shell project switch).",
+    "open_project_in_shell": true,
+    "_update_pcb_after_build_comment": "Cursor-style fully-automatic F8 (2026-06-22, user: 'cursor type i need my ai automatic'). When true (default), after a schematic build the server broadcasts an `update_pcb_from_schematic` IPC message to eeschema, whose AI_IPC_CLIENT calls OnUpdatePCB(true). That opens/docks pcbnew (if needed) and applies the netlist SILENTLY (no Update-PCB modal) via BOARD_NETLIST_UPDATER with the dialog's default options, so footprints land on the board with zero manual steps. Requires the fork rebuild that adds the eeschema `update_pcb_from_schematic` dispatch + pcbnew silent-apply path (cross-probing.cpp MAIL_PCB_UPDATE payload=='auto' -> BOARD_EDITOR_CONTROL::UpdatePCBFromSchematicSilent). Set false to keep F8 manual (press F8 in eeschema yourself). Note: requires footprints assigned to the schematic symbols; symbols with no Footprint field are skipped by the updater.",
+    "update_pcb_after_build": false,
+    "_update_pcb_after_build_superseded": "Set FALSE 2026-06-22: superseded by direct file-based PCB generation (see pcb_gen below + tools/build_circuit.py -> layout/pcb_gen.generate_pcb_from_ir). The board is now WRITTEN with footprints placed at build time (Cursor-style, no running-app F8), so the auto-F8 IPC broadcast is off. The eeschema/pcbnew silent-F8 fork path stays available as a dormant capability if you flip this true."
+  },
+  "pcb_gen": {
+    "_about": "Direct .kicad_pcb generation (2026-06-22, user: 'cursor type ... AI generates the .kicad_pcb directly'). After a schematic build, tools/build_circuit.py calls layout/pcb_gen.generate_pcb_from_ir(ir, sch_path): resolves each component's footprint, loads the .kicad_mod, grid-places it, assigns pad nets from the IR (symbol pin -> footprint pad via symbol_geom.resolve_pin), and writes a valid populated .kicad_pcb next to the .kicad_sch. No F8, no running KiCad app. Verified loadable by kicad-cli. enabled=false skips it (board stays the empty stub).",
+    "enabled": true,
+    "require_erc_clean": true,
+    "finish_board": true,
+    "_finish_board_note": "Standard-rules foundation (2026-06-22). When true (default), after generating the .kicad_pcb build_circuit chains the existing apply tools to make the board fab-ready: auto_outline_pcb (Edge.Cuts rectangle), set_design_rules (fab netclasses: clearance/track width/via per the configured fab profile), auto_zones_pcb (GND copper pour on F.Cu+B.Cu). Each step is best-effort and never breaks the build; results listed in summary.pcb.finished. Set false to leave the raw placed+netted board (no outline/rules/pour). Routing (tracks) is a separate Phase 2 step.",
+    "_require_erc_clean_note": "ERC-CLEAN GATE (schematic->PCB rule, 2026-06-22). When true (default), build_circuit generates the .kicad_pcb ONLY if the schematic has zero ERC errors after the self_heal autofix loop (count from final.erc_summary.errors, or a fresh kicad-cli ERC run when that's missing). With open errors it SKIPS generation and returns summary.pcb={blocked:'erc_not_clean', erc_errors:N} so the agent tells the user to fix ERC first — pushing an error-laden schematic to PCB would copy the mistakes onto copper. Warnings do NOT block (only errors). A checker failure leaves the count unknown and generation proceeds (don't fail the board on a tool hiccup). Set false to always generate regardless of ERC.",
+    "fp_lib_table": "F:/Ki_CAD/fp-lib-table",
+    "_fp_lib_table_note": "fp-lib-table mapping footprint library nicknames to .pretty dirs. ${KIPRJMOD} in its URIs is substituted with kiprjmod_base; remaining ${VARS} resolve from the environment.",
+    "kiprjmod_base": "F:/Ki_CAD",
+    "lib_root": "F:/Ki_CAD/kicad-fp-lib",
+    "_lib_root_note": "Fallback footprint root: when 'Lib:Name' is not found via fp-lib-table, pcb_gen looks for <lib_root>/<Lib>.pretty/<Name>.kicad_mod.",
+    "paper": "A4",
+    "origin_x_mm": 30.0,
+    "origin_y_mm": 30.0,
+    "pitch_x_mm": 12.7,
+    "pitch_y_mm": 12.7,
+    "columns": 8,
+    "_placement_note": "Initial grid: footprints grouped by refdes prefix, laid from (origin_x,origin_y) at pitch_x/pitch_y, `columns` per row, blank band between groups. auto_place_pcb or a future router can refine afterward."
+  },
+  "wiring_rules": {
+    "_comment": "Per-rule gates for the WIRING_RULES.md R-series. Each flag turns ONE engine-side enforcement on/off without code changes. Defaults chosen to preserve current behaviour: rules that have always been enforced default to true, rules added 2026-06-01 default to true once implemented but can be flipped off per project.",
+    "r4_split_four_way": false,
+    "_r4_status": "DETECTION only (via tools/audit_wires.py + lint.selectors.find_four_way_junctions). Auto-split mutator (lint.selectors.propose_four_way_split) exists but is NOT wired into the engine yet -- enabling this flag is currently a no-op.",
+    "r4_add_junction_dots": true,
+    "_r4_add_status": "ACTIVE: lint.repair.add_missing_junction_dots appends an explicit (junction) at every 3+ wire meet AND mid-span T-tap that lacks one (superset of r4_split_four_way). The T-tap case is a real connectivity REPAIR -- a wire ending on another wire's mid-span without a dot is electrically OPEN in KiCad. Never dots pure 2-wire crossings (find_missing_junction_dots excludes them), so unrelated nets are never merged. Idempotent; runs in repair_after_render.",
+    "r9_buses_enabled": false,
+    "_r9_status": "IR support shipped (TopologyIR.buses + intent/bus_ir.py:BusDef); engine bus + bus_entry s-expr emission pending.",
+    "r11_avoid_label_label_overlap": true,
+    "_r11_label_status": "ACTIVE: _emit_label_with_stub lengthens stub when a new label anchor lands within label_stub.min_separation_mm of a prior anchor on the same outward axis.",
+    "r11_avoid_label_wire_overlap": true,
+    "_r11_wire_status": "ACTIVE (added 2026-06-01): when existing_wires is passed to _emit_label_with_stub, the stub is lengthened until the label text bbox no longer overlaps any previously-emitted wire.",
+    "r11_unified_ink_decollide": true,
+    "_r11_ink_status": "ACTIVE (added 2026-06-04): one ink registry (_INK_RECTS) shared by every text emitter. Seeded with component body+RefDes+Value, then net labels and power ports lengthen their stubs until their TEXT rectangle clears all committed ink and register their own box. Replaces the point-distance, same-axis-only, body-only label check that let long labels overlap each other, labels overlap field text, and GND/PWR_FLAG names stack. Off -> nothing seeds/registers, _INK_RECTS stays empty, every consulting loop is a no-op and output is byte-identical to the legacy path. Tuning knobs live in label_stub.ink_overlap_*.",
+    "r13_stub_before_label": true,
+    "_r13_status": "ACTIVE: every label goes through _emit_label_with_stub which emits a label_stub.length_mm stub between the pin tip and the label anchor.",
+    "r11_move_text_off_wire": true,
+    "r11_text_clear_step_mm": 1.27,
+    "r11_text_clear_max_tries": 6,
+    "r11_text_clear_margin_mm": 0.3,
+    "_r11_text_status": "ACTIVE (added 2026-06-08): lint.repair.clear_wires_over_text resolves the R11_TEXT warning (a wire running across a component's Reference/Value text). The router's obstacle set is body-only (_abs_outer_bbox), so it never avoided field text; this post-render pass nudges the obscured field anchor outward in r11_text_clear_step_mm steps (up/down/right/left, nearest-clear wins, up to r11_text_clear_max_tries) until its text bbox clears every wire + every OTHER component body. Moves ONLY the (property ... (at)) anchor -> connectivity byte-identical. Idempotent; byte-stable when no wire crosses a field. Set false to keep the legacy warn-only behaviour."
+  },
+  "placement": {
+    "_comment": "Engine-level placement tuning. `satellite_gap_mm` is the clear distance between an IC pin tip and the nearest pin of the radial satellite (cap / resistor). 2.54 = tight (was default), 5.08 = 2 grid cells, more visible breathing room for dense ICs like 74HC595 with many pins. The other knobs were previously hardcoded mm constants in engine.py module scope (ZONE_W, ZONE_H, CLEARANCE, power-cluster radius, spiral step) and have been pulled here so different circuit densities can tune them without code edits.",
+    "satellite_gap_mm": 5.08,
+    "zone_w_mm": 110.0,
+    "zone_h_mm": 85.0,
+    "collision_clearance_mm": 7.62,
+    "power_cluster_radius_mm": 12.7,
+    "child_sheet_power_cluster_radius_mm": 15.24,
+    "spiral_step_mm": 10.16,
+    "page_margin_mm": 18.0
+  },
+  "layout": {
+    "_comment": "Block-type to (column, row) zone map used by the static-layout fallback in engine._zone_centre. Column 0 = anchor centre, -1 = left of centre, +1 = right; row -1 = above, 0 = same, +1 = below. Override per project to push specific block_types into custom zones without a code change.",
+    "zone_layout": {
+      "power":   [-1, -1],
+      "reset":   [-1,  0],
+      "clock":   [-1,  1],
+      "crystal": [-1,  1],
+      "mcu":     [ 0,  0],
+      "anchor":  [ 0,  0],
+      "io":      [ 1,  0],
+      "comm":    [ 1, -1],
+      "sensor":  [ 1,  0],
+      "i2c":     [ 1,  0],
+      "spi":     [ 1, -1],
+      "uart":    [ 1,  1],
+      "usb":     [ 1, -1],
+      "swd":     [ 1, -1],
+      "icsp":    [ 1,  1],
+      "boot":    [ 1,  1],
+      "output":  [ 0,  1],
+      "led":     [ 1,  1],
+      "display": [ 1,  0],
+      "generic": [ 0, -1]
+    }
+  },
+  "routing": {
+    "_comment": "L-aware Manhattan router tuning. `obstacle_detour_clearance_mm` is the gap left around a blocking component bbox when routing a Z-detour. `avoid_wire_crossings` makes the router rank L1 vs L2 by the number of other-net wires each path would cross \u2014 pick the option that crosses fewer (eliminates 'wire on wire' visual ambiguity). `max_wire_length_mm` caps signal-wire Manhattan length \u2014 paths longer than this are dropped and the per-pin label loop bonds the endpoints by name (professional convention: long wires across the sheet become labelled nets). 0 = no cap.",
+    "obstacle_detour_clearance_mm": 2.54,
+    "avoid_wire_crossings": true,
+    "avoid_wire_overlaps": true,
+    "_avoid_wire_overlaps_comment": "Fix (2026-06-02) for the +V<->GND SHORT class. _route_l_aware ranked L1 vs L2 only by perpendicular CROSSING count; a collinear OVERLAP (two different-net buses on the same line) was never penalised, so decoupling caps in a vertical column let the +3V3 cluster bus and GND cluster bus stack on one x-line and overlap = KiCad merges them = dead short. When true, the router (a) never takes the straight-line shortcut if it would lie on another net's wire, and (b) ranks L variants by (overlaps, crossings) so an overlap-free route always wins. Set false for byte-identical pre-fix routing.",
+    "avoid_pin_shorts": true,
+    "_avoid_pin_shorts_comment": "Fix (2026-06-08) for the FOREIGN-PIN mid-span SHORT class. _route_l_aware previously checked a path only vs component bodies and other-net WIRE segments — never vs a foreign PIN/PORT TIP lying on the segment's interior. A straight rail wire passing THROUGH an unrelated collinear pin (e.g. the GND backbone running through J1.Pin_1/+12V port, or the XTAL1 rail reaching the XTAL2 pin) makes KiCad mid-span-bond the nets = short, with no ERC trace of why. When true, the engine passes every component pin NOT on the current net as `foreign_pts` and the router rejects any straight/L/Z path whose interior crosses one (falling back to a dogleg, or to a name-bonding label if no clean route exists). Universal + geometry-only (no part names). Set false for byte-identical pre-fix routing.",
+    "max_wire_length_mm": 60.0
+  },
+  "engine": {
+    "_comment": "Engine-wide render knobs that don't belong to a specific tool block. Tunable per project without touching Python.",
+    "single_block_seed_label_when_clean": false,
+    "_single_block_seed_label_when_clean_comment": "When false (default, per user rule 2026-05-26 'single circuit wire tha use pannanum, not use label'), single-IC circuits where ALL signal-net wires routed cleanly emit ZERO signal labels — the schematic reads as direct wires throughout. KiCad auto-names the nets from connectivity. Set true to restore the legacy 'one seed label per net' behaviour (gives nets human-readable names like DISCH / TIMING in the schematic; pre-2026-05-26 behaviour). Multi-block circuits and circuits with dropped wires are unaffected — they always need labels to bond pins by net name.",
+    "single_block_one_port_per_rail": true,
+    "_single_block_one_port_per_rail_comment": "When true (default), single-circuit (no ir.blocks) renders use ONE power-port per rail regardless of how spread out the pins are — the engine wires every pin on that rail to the one port via L-routes. Eliminates the 'labels everywhere' look on flat single-IC schematics where the default 12.7 mm cluster radius produces 4–6 separate ports per rail. Per rule [feedback_wires_inside_labels_between]: single circuit = one logical block, USE WIRES.",
+    "single_block_power_cluster_radius_mm": 0.0,
+    "_single_block_power_cluster_radius_mm_comment": "3.81 (user-chosen 2026-06-02 = datasheet 'comb' layout, pairs with decoupling.row_layout=true): power pins farther apart than this radius each get their OWN local +V/GND power symbol + short stub instead of one shared bus. For decoupling caps laid in a row this puts a clean +V symbol on every cap's IC-facing pin and a GND symbol on the other — eliminating the shared-bus +V/GND OVERLAP that caused the board_four/five shorts and the cosmetic stacked-wire mess. Verified: MCU + regulator blocks render 0 short / 0 overlap; simple boards unchanged. SET BACK TO 0 (and row_layout=false) to restore the prior 'wires inside block, one port per rail' style.",
+    "multi_block_one_port_per_rail_block": true,
+    "_multi_block_one_port_per_rail_block_comment": "When true (default), multi-block renders use ONE power-port per (rail, block) regardless of distance within the block. Pins on the same rail in the same block wire to one shared port; pins on the same rail in DIFFERENT blocks land in separate clusters → separate ports per block → KiCad bonds them via net-by-label. Eliminates the per-pin power-port clutter that the 12.7 mm radius produced when a block's rail pins were spread 20–30 mm apart. Per rule [feedback_wires_inside_labels_between]: wires INSIDE block, labels (= cross-block ports) BETWEEN blocks. Set false to restore the legacy radius-based clustering."
+  },
+  "grid_mm": 1.27,
+  "sheet": {
+    "_comment": "Sheet sizing. A4 landscape is the default for small/medium designs. When the role-grouped block count exceeds a4_block_limit, the placer auto-promotes to A3_landscape. margin_mm is the keep-out border on every side.",
+    "default_size": "A3_landscape",
+    "sizes_mm": {
+      "A4_landscape": [
+        297,
+        210
+      ],
+      "A4_portrait": [
+        210,
+        297
+      ],
+      "A3_landscape": [
+        420,
+        297
+      ],
+      "A3_portrait": [
+        297,
+        420
+      ],
+      "A2_landscape": [
+        594,
+        420
+      ]
+    },
+    "a4_block_limit": 12,
+    "a3_block_limit": 20,
+    "margin_mm": 10.0,
+    "margin_bottom_mm": 30.0,
+    "density_factor": 1.4
+  },
+  "spacing": {
+    "_comment": "Geometry constants used by the placer. component_pitch_mm is the per-cell pitch. block_padding_mm is the white-space ring inside a block's border. block_gap_mm is the lane between adjacent blocks. The per-cell label keepout pad is NOT specified here \u2014 it is DERIVED at runtime from label_format.fixed_font_mm and label_format.label_gap_mm (see _cell_size), so a single edit to those values propagates everywhere.",
+    "component_pitch_mm": 7.62,
+    "block_padding_mm": 5.0,
+    "block_gap_mm": 8.0,
+    "ic_cell_mm": 30.0,
+    "passive_cell_mm": 7.62,
+    "connector_cell_mm": 12.7,
+    "dynamic_gap_max_mm": 30.0,
+    "dynamic_gap_low_fill_ratio": 0.3,
+    "dynamic_gap_high_fill_ratio": 0.7
+  },
+  "zones": {
+    "_comment": "Sheet-fractional positions for each named zone (top-left corner of the zone's first block). A block assigned to zone Z lands at (frac_x * sheet_w + margin, frac_y * sheet_h + margin). Tuning these reshapes the whole sheet at once.",
+    "top_center": [
+      0.36,
+      0.04
+    ],
+    "top_left": [
+      0.04,
+      0.04
+    ],
+    "top_right": [
+      0.68,
+      0.04
+    ],
+    "center": [
+      0.36,
+      0.32
+    ],
+    "left_top": [
+      0.04,
+      0.22
+    ],
+    "left_center": [
+      0.04,
+      0.46
+    ],
+    "left_bottom": [
+      0.04,
+      0.66
+    ],
+    "right_top": [
+      0.7,
+      0.12
+    ],
+    "right_center": [
+      0.7,
+      0.4
+    ],
+    "right_bottom": [
+      0.7,
+      0.66
+    ],
+    "bottom_left": [
+      0.1,
+      0.76
+    ],
+    "bottom_center": [
+      0.38,
+      0.76
+    ],
+    "bottom_right": [
+      0.62,
+      0.76
+    ]
+  },
+  "role_zone_map": {
+    "_comment": "Legacy single-map fallback. Used when role_zone_maps is absent or the detected circuit type has no entry. New circuit types go in role_zone_maps instead.",
+    "MAIN_CONTROLLER": "center",
+    "POWER": "top_center",
+    "POWER_REGULATOR": "top_left",
+    "PROTECTION": "top_right",
+    "RESET": "left_top",
+    "CRYSTAL": "left_bottom",
+    "ANALOG": "left_center",
+    "UART": "left_bottom",
+    "USB": "left_center",
+    "MEMORY": "right_top",
+    "WIRELESS": "right_top",
+    "DISPLAY": "right_center",
+    "DEBUG": "right_bottom",
+    "BOOT": "right_bottom",
+    "CONNECTOR": "right_center",
+    "SPI": "bottom_left",
+    "I2C": "bottom_center",
+    "SENSOR": "bottom_right",
+    "CAN": "bottom_right",
+    "MOTOR": "bottom_center",
+    "GENERIC": "bottom_center"
+  },
+  "circuit_detection": {
+    "_comment": "Layer 5 classifier \u2014 picks a sheet-layout template from the role distribution after Layers 1-4 finish. Result: MCU_BOARD (default), POWER_SUPPLY, ANALOG, MOTOR_DRIVER, RF_CIRCUIT. motor_keywords is the substring match list against value + lib_id; add new motor-driver families with a one-line edit.",
+    "power_supply_min_regulators": 1,
+    "power_supply_max_mcus": 0,
+    "analog_min_analog_role": 3,
+    "analog_max_mcus": 0,
+    "motor_min_analog_role": 2,
+    "rf_min_wireless_role": 1,
+    "motor_keywords": [
+      "MOTOR",
+      "DRIVER",
+      "L293",
+      "L298",
+      "DRV8",
+      "TB6",
+      "A4988",
+      "TMC",
+      "DRV10",
+      "AS5",
+      "BTS7",
+      "VNH"
+    ]
+  },
+  "role_zone_maps": {
+    "_comment": "Per-circuit-type zone layouts. The placer picks one of these maps based on circuit_type returned by Layer 5. Adding a new circuit type means: extend circuit_type.detect_circuit_type AND add a map here \u2014 no other code changes needed. Missing entries for a circuit_type fall back to MCU_BOARD's map.",
+    "MCU_BOARD": {
+      "_comment": "Classic MCU-centric board: MCU center, power top, support circuits on the sides, connectors right.",
+      "MAIN_CONTROLLER": "center",
+      "POWER": "top_center",
+      "POWER_REGULATOR": "top_left",
+      "PROTECTION": "top_right",
+      "RESET": "left_top",
+      "CRYSTAL": "left_bottom",
+      "ANALOG": "left_center",
+      "UART": "left_bottom",
+      "USB": "left_center",
+      "MEMORY": "right_top",
+      "WIRELESS": "right_top",
+      "DISPLAY": "right_center",
+      "DEBUG": "right_bottom",
+      "BOOT": "right_bottom",
+      "CONNECTOR": "right_center",
+      "SPI": "bottom_left",
+      "I2C": "bottom_center",
+      "SENSOR": "bottom_right",
+      "CAN": "bottom_right",
+      "MOTOR": "bottom_center",
+      "GENERIC": "bottom_center"
+    },
+    "POWER_SUPPLY": {
+      "_comment": "Switching / linear PSU. Regulator at center, input protection top-left, output filtering on the right, connectors bottom.",
+      "POWER_REGULATOR": "center",
+      "POWER": "top_center",
+      "PROTECTION": "top_left",
+      "ANALOG": "left_center",
+      "SENSOR": "right_top",
+      "CONNECTOR": "bottom_center",
+      "RESET": "left_bottom",
+      "GENERIC": "right_center"
+    },
+    "ANALOG": {
+      "_comment": "Pure-analog circuit (op-amps, audio, filters). The analog block anchors at center; passives spread around.",
+      "ANALOG": "center",
+      "POWER": "top_center",
+      "POWER_REGULATOR": "top_left",
+      "PROTECTION": "top_right",
+      "SENSOR": "left_top",
+      "CONNECTOR": "right_center",
+      "GENERIC": "bottom_center"
+    },
+    "MOTOR_DRIVER": {
+      "_comment": "Motor driver board. Driver IC center, power top, protection left, motor connector right, sense passives bottom.",
+      "ANALOG": "center",
+      "POWER": "top_center",
+      "POWER_REGULATOR": "top_left",
+      "PROTECTION": "left_center",
+      "SENSOR": "left_bottom",
+      "CONNECTOR": "right_center",
+      "MOTOR": "right_top",
+      "GENERIC": "bottom_center"
+    },
+    "RF_CIRCUIT": {
+      "_comment": "RF / wireless module board. The radio module is the centre, MCU (if present) opposite, antenna connector to one side.",
+      "WIRELESS": "center",
+      "MAIN_CONTROLLER": "left_center",
+      "POWER": "top_center",
+      "POWER_REGULATOR": "top_left",
+      "PROTECTION": "top_right",
+      "CONNECTOR": "right_center",
+      "CRYSTAL": "left_bottom",
+      "GENERIC": "bottom_center"
+    }
+  },
+  "hide_pin_numbers": {
+    "_comment": "Hide pin numbers + pin names on small symbols (\u2264 max_pins). A 2-pin diode rendering '1' and '2' next to a 2 mm body is pure clutter \u2014 net labels carry the connection info. ICs (>4 pins by default) keep pin numbers/names visible because P0.04 / VCC / GND on an MCU is genuinely useful. force_show_min_pins overrides any source-side `(pin_numbers (hide yes))` for symbols at or above the threshold \u2014 without this, an MCU lib_symbol cached with hide=yes from a foreign library renders without any pin numbers next to our column-aligned labels.",
+    "enabled": true,
+    "max_pins_to_hide_numbers": 4,
+    "max_pins_to_hide_names": 2,
+    "force_show_min_pins": 6
+  },
+  "property_normalize": {
+    "_comment": "After moving a component, override its Reference and Value property positions to KiCad's canonical convention: Reference centered above the body, Value centered below. The source schematic's property offsets may have been hand-tuned for a specific layout \u2014 when our placer moves the component into a tight zone those offsets often land the text on top of the body or on adjacent components. Disable (enabled=false) to preserve source offsets when emitting a near-pixel-perfect copy of the original schematic.",
+    "enabled": true,
+    "refdes_margin_mm": 1.27,
+    "value_margin_mm": 1.27
+  },
+  "block_split": {
+    "_comment": "Split blocks that have more than max_block_size members into multiple sub-blocks (e.g. a GENERIC trash bucket of 43 components becomes 3 sub-blocks of ~15 each). Sub-block role gets a `_N` suffix so the existing zone resolver pushes them into fallback zones with gaps. Universal fix for dense layouts \u2014 same logic helps dcdc's 127-component GENERIC.",
+    "enabled": true,
+    "max_block_size": 15
+  },
+  "bbox_padding": {
+    "_comment": "Dynamic padding around the union-of-outlines bbox per block. Bigger blocks need slightly more breathing room than the constant in spacing.block_padding_mm provides \u2014 formula is `base + count * per_component`, clamped to [min, max]. Without this, dense blocks (many components -> tight bbox) get the same 5 mm padding as a 1-component block and look cramped.",
+    "base_mm": 8.0,
+    "per_component_mm": 0.5,
+    "min_mm": 6.0,
+    "max_mm": 15.0
+  },
+  "debug_overlay": {
+    "_comment": "Functional-zone overlay \u2014 circuit-shape gated. Dashed boxes + titles only render when they add navigation value: sheet must have \u2265 min_blocks_for_borders distinct blocks AND \u2265 min_components_for_borders parts AND \u2265 min_distinct_subsystems distinct base roles. Per-block gate skip_single_component_blocks suppresses solo-part boxes; per-role floor `bbox_policy.role_min_members` suppresses single-IC PROTECTION/POWER_REGULATOR/CONNECTOR boxes that turn small datasheet-style circuits (LM317, AMS1117, NE555 reg-only) into 3-4 ugly dashed boxes. Industry rule of thumb (TI/ON/ST/KiCad/EMA/Cadence/Sierra/Schemalyzer): boxes are for MEDIUM+ circuits \u2014 small circuits (<20 parts, 1-2 sub-systems) render direct-wire single-sheet, no boxes.",
+    "min_components_for_borders": 20,
+    "min_blocks_for_borders": 2,
+    "min_distinct_subsystems": 2,
+    "skip_single_component_blocks": true,
+    "bbox_policy": {
+      "_comment": "Per-block bbox decision. always_box_roles get a box ONLY when they reach role_min_members[role] (or default_min_members if absent) \u2014 a lone U1 LM317 with role POWER_REGULATOR is not a 'sub-system boundary', it's the whole circuit. never_box_roles never get a box. Other roles: boxed when \u2265min_components_to_box members AND title not in skip_topology_titles.",
+      "always_box_roles": [
+        "POWER",
+        "POWER_REGULATOR",
+        "CONNECTOR",
+        "USB",
+        "WIRELESS",
+        "MEMORY",
+        "PROTECTION",
+        "DEBUG",
+        "BOOT",
+        "MOTOR",
+        "SENSOR",
+        "DISPLAY"
+      ],
+      "never_box_roles": [
+        "MAIN_CONTROLLER",
+        "CRYSTAL",
+        "RESET",
+        "ANALOG"
+      ],
+      "min_components_to_box": 3,
+      "default_min_members": 2,
+      "role_min_members": {
+        "POWER_REGULATOR": 4,
+        "POWER": 3,
+        "PROTECTION": 2,
+        "CONNECTOR": 2,
+        "USB": 2,
+        "WIRELESS": 2,
+        "MEMORY": 2,
+        "DEBUG": 2,
+        "BOOT": 2,
+        "MOTOR": 2,
+        "SENSOR": 2,
+        "DISPLAY": 2
+      },
+      "skip_topology_titles": [
+        "VOLTAGE DIVIDER",
+        "FILTER NETWORK",
+        "RESISTOR NETWORK"
+      ]
+    },
+    "draw_zone_borders": true,
+    "draw_zone_titles": true,
+    "border_offset_mm": 0.0,
+    "border_stroke_mm": 0.2,
+    "border_style": "dash",
+    "title_font_size_mm": 1.6,
+    "title_margin_mm": 1.0,
+    "title_color_rgba": [
+      0,
+      72,
+      150,
+      1.0
+    ],
+    "title_bold": true,
+    "title_justify": "center"
+  },
+  "net_name_sanitizer": {
+    "_comment": "KiCad rejects '(' and ')' in label names (KLC says label names must be a single symbol token). Auto-generated 'Net-(REF-PadN)' names from build_sheet_nets always violate. This rewrites the canonical auto-name shape to 'REF_PN' and strips remaining invalid chars from anything else. Applied at router emission time so routed.json carries clean text downstream.",
+    "auto_name_pattern": "^Net-\\((.+)-Pad(.+)\\)$",
+    "auto_name_format": "{ref}_P{pad}",
+    "invalid_chars": "()&",
+    "fallback_replacement": "_",
+    "drop_namespace_prefix": true,
+    "max_chars": 0
+  },
+  "connector_edge_placement": {
+    "_comment": "Post-placement pass that snaps CONNECTORS (lib_id starts with one of `connector_lib_prefixes`, OR refdes starts with one of `connector_refdes_prefixes`) to the sheet edge their function dictates. Inputs go LEFT, outputs RIGHT, debug headers BOTTOM-RIGHT. Detection is by NET-NAME PATTERN (regex against the names of nets the connector touches) — pure data, no part-number knowledge. Universal across NE555, LM317, op-amp, MCU, anything with a connector.\n\nMatching rule: walk every net the connector pin-touches; first pattern that matches in priority order (left -> right -> bottom_right) wins. If nothing matches, leave the connector where the placer put it. Pattern syntax = Python regex, case-insensitive, anchored with ^...$ unless you write your own anchors.",
+    "enabled": false,
+    "left_edge_net_patterns": [
+      "^\\+?V?IN$", "^\\+?V?IN_?", "^\\+?VUNREG$", "^\\+?V?BUS$", "^\\+?V?BAT$",
+      "^\\+\\d+V_?IN$", "^AC_IN", "^AC_L$", "^AC_N$",
+      "^AUDIO_IN", "^SIG_IN", "^IN_", "^.*_IN$",
+      "^MIC", "^LINE_IN", "^ANT_IN", "^RF_IN"
+    ],
+    "right_edge_net_patterns": [
+      "^\\+?V?OUT$", "^\\+?V?OUT_?", "^V?OUT_\\d",
+      "^\\+\\d+V_?OUT$", "^AC_OUT",
+      "^AUDIO_OUT", "^SIG_OUT", "^OUT_", "^.*_OUT$",
+      "^SPK", "^LINE_OUT", "^ANT_OUT", "^RF_OUT", "^TX_"
+    ],
+    "bottom_right_net_patterns": [
+      "^SWD", "^SWCLK$", "^SWDIO$", "^JTAG", "^TCK$", "^TMS$", "^TDI$", "^TDO$",
+      "^ICSP", "^MISO$", "^MOSI$", "^SCK$", "^RESET$", "^NRST$", "^~?\\{?RESET",
+      "^DEBUG", "^PROG", "^UART_TX$", "^UART_RX$"
+    ],
+    "connector_lib_prefixes": [
+      "Connector:", "Connector_USB:", "Connector_JST:",
+      "Connector_PinHeader:", "Connector_PinSocket:",
+      "Connector_Generic:", "Connector_Molex:", "Connector_AudioJack",
+      "Connector_RJ45:", "Connector_Wago:",
+      "Connector_RaspberryPi", "Connector_Arduino"
+    ],
+    "connector_refdes_prefixes": ["J", "P"],
+    "left_edge_inset_mm": 18.0,
+    "right_edge_inset_mm": 18.0,
+    "bottom_edge_inset_mm": 18.0,
+    "_inset_comment": "Distance from sheet edge to the connector's origin. Default 18 mm leaves room for pin-1 label + an outward power-port symbol.",
+    "snap_only_if_misplaced_mm": 25.0,
+    "_snap_only_comment": "Skip snapping when the connector is ALREADY within this distance of its target edge — avoids jittering a connector the placer already got right. 25 mm = roughly the inset + one grid step.",
+    "min_components_for_edge_snap": 12,
+    "_min_components_comment": "Skip edge-snap on small flat single-IC circuits (< N components and no blocks). Otherwise a 7-part LDO has J1/J2 thrown to opposite sheet edges, +VIN/+VOUT become 250 mm spans, the L-router can't route them, and the whole sheet collapses to label-only bonding (per feedback_wires_inside_labels_between: small flat circuit = one logical block, use wires not labels). Set 0 to always snap."
+  },
+  "power_port_edge_anchor": {
+    "_comment": "Pattern from professional reference schematics: every block's positive-rail (VCC/VDD/+3V3/+5V) power-port symbol gets anchored to the block's TOP edge; ground-rail (GND/VSS/AGND) power-ports to the BOTTOM edge. A connecting wire runs from each colocated component pin up/down to the relocated port. Universal \u2014 relies only on rail-name polarity + block bbox geometry, no part-number knowledge. Disable for the legacy 'port-at-pin-tip' behaviour.",
+    "enabled": true,
+    "offset_mm": 2.54
+  },
+  "label_format": {
+    "_comment": "Fixed-font label format. Net labels render as PURE net names \u2014 never embed the pin number into the label text. KiCad's native pin-number rendering on the lib_symbol covers visible pin-number display next to the body, and embedding a pin number into the label name produces invalid net identifiers (KiCad reports 'Lbl Bad Format' when labels start with digits / contain spaces). The embed_pin_number flag exists for experimental/visual-only use; default OFF so the chat's lint passes and labels stay valid net identifiers.",
+    "embed_pin_number": false,
+    "fixed_font_mm": 1.0,
+    "label_gap_mm": 2.0,
+    "separator": "  ",
+    "left_format": "{net}{sep}{pin}",
+    "right_format": "{pin}{sep}{net}",
+    "top_format": "{pin}{sep}{net}",
+    "bottom_format": "{pin}{sep}{net}",
+    "show_pin_number_threshold": 1.5,
+    "abbrev_threshold": 1.0,
+    "abbrev_max_chars": 8,
+    "abbrev_prefix_chars": 5,
+    "abbrev_suffix_chars": 3
+  },
+  "label_placement": {
+    "_comment": "Dynamic label position resolver \u2014 try 4 orthogonal angles (outward + 2 perpendiculars + opposite), ray-cast each, first clear position wins. component_body_margin_mm pads each component bbox to cover ref/value text overhangs that aren't in the body bbox itself (KiCad renders 'Reference' + 'Value' properties ~2.5 mm outside the body line). Stub wire from pin tip to label is orthogonal-only; diagonal angles are rejected because KiCad parser rejects diagonal wires. spatial_hash_cell_mm controls the grid spacing of the O(1)-lookup index \u2014 bigger cells = fewer buckets but more candidates per bucket; 20 mm is a sweet spot for A4-class sheets.",
+    "enabled": true,
+    "min_offset_mm": 1.27,
+    "max_offset_mm": 25.0,
+    "step_mm": 0.635,
+    "collision_pad_mm": 0.5,
+    "component_body_margin_mm": 2.5,
+    "char_width_mm": 0.55,
+    "_font_height_mm_note": "auto-synced from label_format.fixed_font_mm at runtime; this fallback applies only if label_format is absent",
+    "font_height_mm": 1.0,
+    "spatial_hash_cell_mm": 20.0,
+    "angle_candidates_offset_deg": [
+      0,
+      90,
+      -90,
+      180
+    ],
+    "apply_to_power_ports": false
+  },
+  "dense_pin_stagger": {
+    "_comment": "Superseded by swim_lanes. Set enabled=false; the old tier-by-index logic forced every Nth pin to a different lane even when adjacent pins fit fine in the same column.",
+    "enabled": false,
+    "density_threshold_1": 0.3,
+    "stagger_step_mm": 4.0,
+    "density_threshold_2": 0.45,
+    "stagger_groups": 3,
+    "group_step_mm": 3.0
+  },
+  "column_alignment": {
+    "_comment": "Per (component, unit, side) group: align every label's anchor to the same X (for left/right sides) or same Y (for top/bottom). Force swim-lanes when label count > max_column_labels even if pin pitch is technically OK \u2014 a 26-label single column still reads crammed visually even at 2.54 mm pitch.",
+    "enabled": true,
+    "max_column_labels": 100
+  },
+  "swim_lanes": {
+    "_comment": "Fallback when column_alignment is disabled. Greedy lane assignment per (component_side, outward_angle): each label assigned to first lane with enough vertical clearance; opens new lanes as needed.",
+    "enabled": false,
+    "lane_width_mm": 6.0,
+    "label_gap_mm": 1.5,
+    "max_lanes": 4
+  },
+  "hierarchical_split": {
+    "_comment": "Step 6: hierarchical sheet splitter \u2014 circuit-shape-driven. Fires when ANY of: (1) min_main_controllers MCUs are present (multi-MCU board); OR (2) component count \u2265 min_components AND distinct roles \u2265 min_roles; OR (3) any single role bucket has \u2265 single_role_overflow members. All three are config-tunable; pure topology, no part-number knowledge.",
+    "enabled": true,
+    "min_main_controllers": 2,
+    "min_components": 40,
+    "min_roles": 3,
+    "single_role_overflow": 40,
+    "wireless_mcu_min_pins": 12,
+    "complexity": {
+      "_comment": "Unified circuit-complexity score combining component count, net density, cross-block traffic, and label density. Each signal is normalised to [0,1] then weighted; the total is divided by max_score (sum of weights) and compared to split_threshold. Crosses tricky-but-small designs (small RF board with many sub-systems) that bucket rules miss.",
+      "split_threshold": 0.55,
+      "soft_cap_components": 100,
+      "weights": {
+        "count": 2.0,
+        "density": 1.5,
+        "cross": 1.5,
+        "text": 1.0
+      }
+    },
+    "parent_grid_cols": 3,
+    "parent_cell_w_mm": 80.0,
+    "parent_cell_h_mm": 50.0,
+    "parent_cell_gap_mm": 12.0,
+    "parent_origin_x_mm": 20.0,
+    "parent_origin_y_mm": 20.0
+  },
+  "local_wire_synthesis": {
+    "_comment": "P11 \u2014 short-range label-to-wire promotion. After the router emits labels for every signal net, this pass replaces labels with direct Manhattan wires when ALL pins on the net sit within `max_distance_mm` of each other. Long-haul nets (cross-page rails like 3V3 / GND / SDA) keep their labels. Shifts the wire-edges:label-edges ratio toward wires \u2014 the visual reason human schematics don't look like floating-label spaghetti.",
+    "enabled": true,
+    "max_distance_mm": 80.0,
+    "min_pins_per_net": 2
+  },
+  "pin_role_placement": {
+    "_comment": "P10 \u2014 pin-role aware placement. After the grid-based placer assigns coordinates, this post-pass moves 2-pin satellite passives (decoupling caps, pull-ups, biasing resistors, crystal load caps) to sit adjacent to the specific anchor IC pin they connect to. A decoupling cap that classifier put in MAIN_CONTROLLER role gets moved next to VCC pin, NOT just somewhere inside the MAIN_CONTROLLER grid cell.",
+    "enabled": true,
+    "offset_from_pin_mm": 5.08,
+    "max_passive_move_mm": 50.8,
+    "min_clearance_mm": 1.27
+  },
+  "community_partition": {
+    "_comment": "Connectivity-graph community detection that replaces the role-bucket hierarchy split. Weighted edges (wire=1.0 strong, label=0.6 medium, power=0.2 weak) feed Louvain modularity clustering; clusters are role-named by plurality vote of their members' classifier roles. Used by community_partition.partition_schematic \u2014 gated by `enabled` on the consumer side (hierarchical.py).",
+    "enabled": true,
+    "weights": {
+      "wire": 1.0,
+      "label": 0.6,
+      "power": 0.2
+    },
+    "detection": {
+      "algorithm": "louvain",
+      "seed": 42
+    },
+    "balance": {
+      "_comment": "Post-partition merging: communities below min_members absorb into the largest community; if more than max_sheets remain, smallest ones merge into a final MISC bucket.",
+      "min_members": 3,
+      "max_sheets": 8
+    },
+    "anchor_boost": {
+      "_comment": "Pre-Louvain weight boost on every edge from an anchor component (MCU / POWER_REGULATOR / SENSOR / WIRELESS / etc.) to its direct neighbours. Pulls the subsystem (anchor + decoupling + crystal + pull-ups) into one community even when the anchor also shares label-edges with other clusters. multiplier=2.5 keeps satellite caps glued to their parent IC.",
+      "enabled": true,
+      "multiplier": 2.5
+    },
+    "merge_duplicate_names": true,
+    "cross_cluster": {
+      "_comment": "When generating sheet pins on the parent, only signal-strength edges become hierarchical labels \u2014 power edges merge naturally via power-port symbols and would clutter the parent if exposed.",
+      "min_edge_weight_for_sheet_pin": 0.5
+    }
+  },
+  "fallback_zones": {
+    "_comment": "When two roles claim the same zone, the second one is bumped to the next unused entry in this order. Spillover roles that exhaust the list re-use the first entry (placer logs a warning).",
+    "order": [
+      "bottom_left",
+      "bottom_center",
+      "bottom_right",
+      "left_center",
+      "right_center",
+      "top_center",
+      "top_left",
+      "top_right",
+      "left_top",
+      "right_top",
+      "left_bottom",
+      "right_bottom",
+      "center"
+    ]
+  }
+}

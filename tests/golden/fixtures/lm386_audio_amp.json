@@ -1,0 +1,33 @@
+{
+  "name": "lm386_audio_amp",
+  "_about": "Known-good LM386 audio amp IR, lifted verbatim from rebuild_all.make_lm386(). Single-IC flat circuit (blocks=[]). Pure data: render mode auto-decided, universal invariants from golden_config.json.",
+  "ir": {
+    "name": "lm386_audio_amp",
+    "circuit_type": "ANALOG",
+    "components": [
+      {"ref": "U1", "lib_id": "Amplifier_Audio:LM386", "value": "LM386"},
+      {"ref": "C1", "lib_id": "Device:C_Polarized", "value": "10u"},
+      {"ref": "C2", "lib_id": "Device:C_Polarized", "value": "10u"},
+      {"ref": "C3", "lib_id": "Device:C_Polarized", "value": "220u"},
+      {"ref": "C4", "lib_id": "Device:C", "value": "100n"},
+      {"ref": "C5", "lib_id": "Device:C", "value": "47n"},
+      {"ref": "R1", "lib_id": "Device:R", "value": "10R"},
+      {"ref": "R2", "lib_id": "Device:R", "value": "1k"},
+      {"ref": "D1", "lib_id": "Device:LED", "value": "PWR_LED"},
+      {"ref": "J1", "lib_id": "Connector:Conn_01x03", "value": "VIN_AUDIO_GND"},
+      {"ref": "J2", "lib_id": "Connector:Conn_01x02", "value": "SPEAKER"}
+    ],
+    "nets": [
+      {"name": "+9V", "pins": ["U1.6", "C4.1", "C3.2", "R2.1", "J1.1"], "is_power": true},
+      {"name": "GND", "pins": ["U1.4", "U1.2", "C4.2", "C5.2", "R1.2", "J1.3", "J2.2"], "is_power": true},
+      {"name": "AUDIO_IN", "pins": ["J1.2", "C1.1"], "is_power": false},
+      {"name": "LM_IN", "pins": ["C1.2", "U1.3"], "is_power": false},
+      {"name": "GAIN_HI", "pins": ["U1.1", "C2.1"], "is_power": false},
+      {"name": "GAIN_LO", "pins": ["U1.8", "C2.2"], "is_power": false},
+      {"name": "OUT", "pins": ["U1.5", "C3.1", "C5.1", "R1.1"], "is_power": false},
+      {"name": "SPK", "pins": ["C3.2", "J2.1"], "is_power": false},
+      {"name": "LED_K", "pins": ["R2.2", "D1.1"], "is_power": false}
+    ],
+    "blocks": []
+  }
+}

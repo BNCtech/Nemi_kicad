@@ -1,0 +1,155 @@
+{
+  "_about": "Keyword → block-hint map. The architect sees a hint of which functional blocks would be appropriate for the user's prompt. Strictly advisory: the PINNED RULE (single-IC → blocks=[]) in the architect prompt still wins.",
+  "version": 1,
+  "_apply_when": "Hint is injected into the architect system prompt only when at least one keyword matches. When no rule matches, the prompt is byte-identical to the no-hint version — keeps the prompt-cache prefix stable.",
+
+  "keyword_rules": [
+    {"keywords": ["usb-c", "usb c", "usb type-c", "type-c", "usbc"],
+     "blocks": ["PROTECTION", "POWER"]},
+    {"keywords": ["usb micro", "micro-usb", "mini usb", "usb-a"],
+     "blocks": ["PROTECTION", "POWER"]},
+    {"keywords": ["barrel jack", "dc jack", "barrel connector", "dc input"],
+     "blocks": ["POWER"]},
+    {"keywords": ["battery", "li-ion", "lipo", "lifepo4", "coin cell", "cr2032"],
+     "blocks": ["POWER", "BMS"]},
+    {"keywords": ["solar", "harvester", "energy harvest"],
+     "blocks": ["POWER", "BMS"]},
+
+    {"keywords": ["ldo", "ams1117", "lm7805", "lm317", "regulator", "linear reg"],
+     "blocks": ["POWER"]},
+    {"keywords": ["buck", "boost", "switching reg", "smps", "tps5430", "mp1584", "mp2307"],
+     "blocks": ["POWER"]},
+
+    {"keywords": ["stm32", "esp32", "esp8266", "atmega", "attiny", "rp2040", "nrf52", "nrf51", "samd21", "pic16", "pic18", "mcu", "microcontroller"],
+     "blocks": ["MCU"]},
+
+    {"keywords": ["i2c sensor", "spi sensor", "bme280", "bmp280", "mpu6050", "mpu9250", "tmp36", "ds18b20", "sht3", "sht4", "lis3dh", "ads1115", "sensor"],
+     "blocks": ["SENSOR"]},
+
+    {"keywords": ["crystal", "16mhz", "12mhz", "8mhz", "32khz", "32.768", "hse", "lse", "oscillator", "tcxo"],
+     "blocks": ["CLOCK"]},
+
+    {"keywords": ["icsp", "swd", "swclk", "swdio", "jtag", "programming header", "tag-connect"],
+     "blocks": ["ICSP"]},
+
+    {"keywords": ["led indicator", "status led", "power led", "rgb led", "ws2812", "sk6812"],
+     "blocks": ["INDICATOR"]},
+
+    {"keywords": ["motor", "h-bridge", "drv8833", "tb6612", "l298", "stepper driver", "a4988", "tmc2209", "motor driver", "bldc"],
+     "blocks": ["MOTOR_DRIVER"]},
+
+    {"keywords": ["display", "oled", "ssd1306", "sh1106", "lcd", "tft", "ili9341", "st7789", "epd", "e-paper"],
+     "blocks": ["DISPLAY"]},
+
+    {"keywords": ["can ", "rs485", "rs-485", "rs232", "rs-232", "ethernet", "lan8720", "w5500", "modbus"],
+     "blocks": ["COMM"]},
+
+    {"keywords": ["relay", "solid state relay", "ssr", "triac", "mosfet output", "high-side switch"],
+     "blocks": ["OUTPUT"]},
+
+    {"keywords": ["audio amp", "class-d", "max98357", "pam8403", "speaker", "i2s mic", "microphone"],
+     "blocks": ["AUDIO"]},
+
+    {"keywords": ["lora", "sx1276", "sx1278", "wifi", "esp-12", "bluetooth", "ble", "nrf24", "nrf52 ble", "antenna"],
+     "blocks": ["RF"]},
+
+    {"keywords": ["sd card", "micro sd", "tf card"],
+     "blocks": ["STORAGE"]},
+
+    {"keywords": ["thermal", "fan", "cooling", "temperature sense", "ntc"],
+     "blocks": ["THERMAL"]},
+
+    {"keywords": ["isolation", "optocoupler", "pc817", "iso7841", "iso7741", "digital isolator"],
+     "blocks": ["ISOLATION"]}
+  ],
+
+  "single_ic_keywords": {
+    "_comment": "Prompts matching these patterns trigger blocks=[] (PINNED RULE) regardless of other keywords. Order matters: the first match wins.",
+    "keywords": [
+      "555 blinker", "ne555 timer", "ne555 astable", "ne555 monostable",
+      "lm317 only", "lm7805 only", "single ldo",
+      "op-amp filter", "rc filter only", "voltage divider",
+      "rc oscillator", "crystal oscillator alone"
+    ]
+  },
+
+  "_block_justifications_doc": "Reverse map: when the architect declares block X, what justifies its existence? A block must satisfy AT LEAST ONE of (a) `requires_keywords` -- any keyword present in the user prompt, OR (b) `requires_lib_id_patterns` -- any component in components[] whose lib_id matches one of the glob patterns. Blocks failing both tests fire BLOCK_NOT_JUSTIFIED. Blocks not listed here are considered always-justified (POWER, MCU, GND-only IO, etc. -- structural staples). Glob patterns use fnmatch syntax (`*`, `?`).",
+  "block_justifications": {
+    "RF": {
+      "requires_keywords": ["rf", "antenna", "lora", "wifi", "wi-fi", "bluetooth", "ble", "nrf24", "nrf52", "sx1276", "sx1278", "esp32", "esp8266", "esp-12", "433mhz", "868mhz", "915mhz", "2.4ghz"],
+      "requires_lib_id_patterns": ["RF_*:*", "*nrf24*", "*nrf52*", "*sx12*", "*esp32*", "*esp8266*"]
+    },
+    "ANTENNA": {
+      "requires_keywords": ["antenna", "matching network", "balun", "rf front"],
+      "requires_lib_id_patterns": ["RF_*:*", "Antenna:*"]
+    },
+    "BLE": {
+      "requires_keywords": ["ble", "bluetooth", "nrf52", "nrf51"],
+      "requires_lib_id_patterns": ["*nrf52*", "*nrf51*", "*hm-10*", "*hc-05*", "*hc-06*"]
+    },
+    "WIFI": {
+      "requires_keywords": ["wifi", "wi-fi", "esp32", "esp8266", "esp-12", "esp-07"],
+      "requires_lib_id_patterns": ["*esp32*", "*esp8266*", "*esp12*", "*esp07*"]
+    },
+    "LORA": {
+      "requires_keywords": ["lora", "sx1276", "sx1278", "rfm95", "rfm96"],
+      "requires_lib_id_patterns": ["*sx12*", "*rfm9*", "*lora*"]
+    },
+    "MOTOR_DRIVER": {
+      "requires_keywords": ["motor", "stepper", "bldc", "h-bridge", "drv8", "tb6612", "l298", "a4988", "tmc2"],
+      "requires_lib_id_patterns": ["*drv8*", "*tb6612*", "*l298*", "*a4988*", "*tmc2*", "Driver_Motor:*"]
+    },
+    "AUDIO": {
+      "requires_keywords": ["audio", "amp", "speaker", "mic", "microphone", "i2s mic", "class-d", "pam8", "max98"],
+      "requires_lib_id_patterns": ["Amplifier_Audio:*", "*pam8*", "*max98*"]
+    },
+    "DISPLAY": {
+      "requires_keywords": ["display", "oled", "lcd", "tft", "e-paper", "epd", "ssd1306", "sh1106", "ili9341", "st7789"],
+      "requires_lib_id_patterns": ["*ssd1306*", "*sh1106*", "*ili9*", "*st7789*", "Display_*:*"]
+    },
+    "SD": {
+      "requires_keywords": ["sd card", "micro sd", "microsd", "tf card"],
+      "requires_lib_id_patterns": ["*sd_card*", "*microsd*"]
+    },
+    "FLASH": {
+      "requires_keywords": ["flash", "spi flash", "w25q", "mx25"],
+      "requires_lib_id_patterns": ["Memory_Flash:*", "*w25q*", "*mx25*"]
+    },
+    "EEPROM": {
+      "requires_keywords": ["eeprom", "24lc", "24c", "at24"],
+      "requires_lib_id_patterns": ["Memory_EEPROM:*", "*24lc*", "*at24*"]
+    },
+    "CAN": {
+      "requires_keywords": ["can ", "can bus", "canbus", "mcp2515", "tja10", "sn65hvd"],
+      "requires_lib_id_patterns": ["*mcp2515*", "*tja10*", "*sn65hvd*"]
+    },
+    "RS485": {
+      "requires_keywords": ["rs485", "rs-485", "max485", "modbus"],
+      "requires_lib_id_patterns": ["*max485*", "*sp485*"]
+    },
+    "RS232": {
+      "requires_keywords": ["rs232", "rs-232", "max232"],
+      "requires_lib_id_patterns": ["*max232*"]
+    },
+    "ETHERNET": {
+      "requires_keywords": ["ethernet", "lan8720", "w5500", "rj45"],
+      "requires_lib_id_patterns": ["*lan87*", "*w5500*", "*rj45*"]
+    },
+    "ISOLATION": {
+      "requires_keywords": ["isolation", "optocoupler", "pc817", "iso7841", "iso7741", "digital isolator"],
+      "requires_lib_id_patterns": ["*pc817*", "*iso7*", "Isolator_Digital:*"]
+    },
+    "FAN": {
+      "requires_keywords": ["fan", "pwm fan", "cooling"],
+      "requires_lib_id_patterns": ["*fan*"]
+    },
+    "BMS": {
+      "requires_keywords": ["battery", "li-ion", "lipo", "bms", "fuel gauge", "charger", "tp4056", "mcp7383", "max1704"],
+      "requires_lib_id_patterns": ["Battery_Management:*", "*tp4056*", "*mcp7383*", "*max1704*"]
+    },
+    "CHARGER": {
+      "requires_keywords": ["charger", "charging", "tp4056", "bq24"],
+      "requires_lib_id_patterns": ["*tp4056*", "*bq24*"]
+    }
+  }
+}

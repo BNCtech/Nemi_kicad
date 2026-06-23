@@ -655,39 +655,6 @@ def _build_label_node(text: str, x: float, y: float, angle: int,
     ]
 
 
-def _build_hierarchical_label_node(
-    text: str, x: float, y: float, angle: int,
-    shape: str = "passive",
-    font_mm: float = _LABEL_FONT_SIZE_MM_DEFAULT,
-) -> list:
-    """Construct a (hierarchical_label ...) sexpr node. Used on child sheets
-    for nets that cross a sheet boundary — KiCad matches them by name to
-    the parent's (sheet (pin "name" ...)) entries, completing the
-    hierarchical electrical connection.
-
-    Valid shape values: input | output | bidirectional | tri_state |
-    passive. `passive` is the safe default — KiCad accepts any-to-passive
-    at the parent-child join, no electrical-type inference required from
-    the LLM. Direction-aware shape is a future improvement once we infer
-    signal direction from pin electrical_type."""
-    shape_l = (shape or "passive").lower()
-    if shape_l not in {"input", "output", "bidirectional", "tri_state", "passive"}:
-        shape_l = "passive"
-    return [
-        _sym("hierarchical_label"),
-        text,
-        [_sym("shape"), _sym(shape_l)],
-        _make_at(float(x), float(y), int(angle) % 360),
-        [_sym("fields_autoplaced")],
-        [
-            _sym("effects"),
-            [_sym("font"), [_sym("size"), float(font_mm), float(font_mm)]],
-            [_sym("justify"), _sym("left"), _sym("bottom")],
-        ],
-        _gen_uuid_node(),
-    ]
-
-
 def _build_power_port_node(lib_id: str, ref: str, value: str,
                             x: float, y: float, angle: int) -> list:
     """Construct a (symbol ...) entry for a power-port. We bypass
@@ -890,28 +857,12 @@ def emit(
         "fixed_font_mm", _LABEL_FONT_SIZE_MM_DEFAULT))
 
     labels_added = 0
-    hierarchical_labels_added = 0
     for lb in routed.get("net_labels", []):
-        is_hier = bool(lb.get("hierarchical"))
-        if is_hier:
-            # Cross-sheet net on a hierarchical child sheet. Must be a
-            # hierarchical_label so KiCad pairs it with the parent's
-            # matching (sheet (pin ...)) entry. The shape field is required
-            # by the parser; we default to passive (KiCad accepts the join
-            # against any direction).
-            doc.tree.append(_build_hierarchical_label_node(
-                lb["text"], float(lb["x_mm"]), float(lb["y_mm"]),
-                int(lb.get("angle", 0)),
-                shape=lb.get("hier_shape", "passive"),
-                font_mm=label_font_mm,
-            ))
-            hierarchical_labels_added += 1
-        else:
-            doc.tree.append(_build_label_node(
-                lb["text"], float(lb["x_mm"]), float(lb["y_mm"]),
-                int(lb.get("angle", 0)),
-                font_mm=label_font_mm,
-            ))
+        doc.tree.append(_build_label_node(
+            lb["text"], float(lb["x_mm"]), float(lb["y_mm"]),
+            int(lb.get("angle", 0)),
+            font_mm=label_font_mm,
+        ))
         labels_added += 1
 
     # Emit stubs as-is. label_placer's net-aware merge (group by net + axis +
@@ -1163,7 +1114,6 @@ def emit(
         "components_moved": moved,
         "missing_refs": missing_refs,
         "labels_added": labels_added,
-        "hierarchical_labels_added": hierarchical_labels_added,
         "stub_wires_added": stubs_added,
         "wires_deduped": wires_deduped,
         "power_ports_added": ports_added,

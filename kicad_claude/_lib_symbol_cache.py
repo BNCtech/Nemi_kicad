@@ -15,7 +15,15 @@ Discovery chain (first hit wins, in this order):
      a user table — chased through recursively
 
 URIs that use env-var substitution like '${KICAD9_SYMBOL_DIR}/Device.kicad_sym'
-are expanded against the live process environment.
+are expanded against the live process environment. KiCad itself does NOT
+push these vars into the OS environment — it stores them inside
+'<config_dir>/kicad_common.json' under "environment.vars" and reads them
+back at app startup. A Python backend that didn't inherit env from KiCad
+therefore sees those vars as undefined and every standard library lookup
+fails. To stay in sync with what KiCad actually resolves, we also read
+kicad_common.json from the highest-version user config dir and use its
+"environment.vars" as a fallback when the OS environment doesn't carry
+the variable.
 
 Two-stage resolution:
   1. lib_id_aliases.json (user-extensible) is consulted FIRST. Renames like
@@ -33,6 +41,7 @@ we resolve the chain recursively so the parent's def lands in (lib_symbols)
 too, otherwise KiCad has nothing to draw.
 """
 
+import json
 import os
 import re
 from functools import lru_cache as _functools_lru_cache
@@ -348,9 +357,16 @@ _ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 # op was re-parsing 222 libraries from disk, which dominated apply latency
 # and caused WebSocket timeouts. These caches are keyed by (path, mtime) so
 # any on-disk edit invalidates them automatically without explicit busting.
+<<<<<<< Updated upstream
 _TABLE_CACHE: Dict[Tuple[str, float, str], Dict[str, str]] = {}
 _LIB_FILES_CACHE: Dict[Tuple[str, float], List[Path]] = {}
 _LIB_INDEX_CACHE: Dict[Tuple[str, float], Dict[str, Tuple[Path, list]]] = {}
+=======
+_TABLE_CACHE: Dict[Tuple[str, float, str, str], Dict[str, str]] = {}
+_LIB_FILES_CACHE: Dict[Tuple[str, float], List[Path]] = {}
+_LIB_INDEX_CACHE: Dict[Tuple[str, float], Dict[str, Tuple[Path, list]]] = {}
+_KICAD_ENV_CACHE: Dict[Tuple[str, float], Dict[str, str]] = {}
+>>>>>>> Stashed changes
 
 
 def _path_stat_key(p: Path) -> Optional[Tuple[str, float]]:
@@ -551,9 +567,66 @@ def _try_normalize_lib_id(table: Dict[str, str], lib_id: str) -> Optional[Tuple[
     return None
 
 
+<<<<<<< Updated upstream
 def _expand_uri(uri: str, kiprjmod: Optional[Path] = None) -> str:
     """Expand ${KICAD9_SYMBOL_DIR} etc. against os.environ. Unknown vars
     are left in place (KiCad does the same — the file simply won't resolve).
+=======
+def _load_kicad_env_from_json(config_dir: Path) -> Dict[str, str]:
+    """Read 'environment.vars' from kicad_common.json in a KiCad config dir.
+
+    Cached by (path, mtime) so an edit in KiCad's Preferences → Configure
+    Paths is picked up automatically on the next call without restart.
+    Returns {} when the file is missing, malformed, or has no env section.
+    """
+    p = config_dir / "kicad_common.json"
+    stat = _path_stat_key(p)
+    if stat is None:
+        return {}
+    cached = _KICAD_ENV_CACHE.get(stat)
+    if cached is not None:
+        return cached
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        _KICAD_ENV_CACHE[stat] = {}
+        return {}
+    env = data.get("environment", {}).get("vars", {}) if isinstance(data, dict) else {}
+    result = {str(k): str(v) for k, v in env.items()} if isinstance(env, dict) else {}
+    _KICAD_ENV_CACHE[stat] = result
+    return result
+
+
+def _discover_kicad_env_vars() -> Dict[str, str]:
+    """Return env vars set inside KiCad's own Configure Paths (kicad_common.json).
+
+    KiCad stores Configure Paths entries here and reads them at startup; they
+    do NOT land in the OS process environment, so a sibling Python process
+    that didn't fork from KiCad sees them as undefined. Picks the
+    highest-version user config dir on this machine (same precedence as
+    sym-lib-table discovery).
+    """
+    for root in _candidate_config_roots():
+        if not root.is_dir():
+            continue
+        version_dirs = [p for p in root.iterdir() if p.is_dir() and re.match(r"^\d", p.name)]
+        version_dirs.sort(key=lambda p: _version_sort_key(p.name), reverse=True)
+        for vd in version_dirs:
+            if (vd / "kicad_common.json").is_file():
+                return _load_kicad_env_from_json(vd)
+    return {}
+
+
+def _expand_uri(uri: str, kiprjmod: Optional[Path] = None) -> str:
+    """Expand ${KICAD9_SYMBOL_DIR} etc. against os.environ, with a fallback
+    to KiCad's own kicad_common.json (Configure Paths). Unknown vars are
+    left in place (KiCad does the same — the file simply won't resolve).
+
+    Precedence: OS env first, then kicad_common.json. This lets a user who
+    explicitly `setx`-ed a var override KiCad's stored value, while still
+    making the common case work — where the var is ONLY set inside KiCad's
+    Preferences → Configure Paths and never exported to the shell.
+>>>>>>> Stashed changes
 
     KIPRJMOD is special: KiCad sets it to the open project's directory at
     file-open time, so it's NEVER in os.environ here. When the caller knows
@@ -563,11 +636,22 @@ def _expand_uri(uri: str, kiprjmod: Optional[Path] = None) -> str:
     a literal '${KIPRJMOD}/...' path that doesn't exist, and every symbol
     looks "missing".
     """
+<<<<<<< Updated upstream
+=======
+    kicad_env = _discover_kicad_env_vars()
+>>>>>>> Stashed changes
     def repl(m):
         var = m.group(1)
         if var == "KIPRJMOD" and kiprjmod is not None:
             return str(kiprjmod)
+<<<<<<< Updated upstream
         return os.environ.get(var, m.group(0))
+=======
+        val = os.environ.get(var)
+        if val is not None:
+            return val
+        return kicad_env.get(var, m.group(0))
+>>>>>>> Stashed changes
     return _ENV_RE.sub(repl, os.path.expanduser(uri))
 
 
@@ -588,11 +672,24 @@ def _parse_sym_lib_table(
     rarely. The kiprjmod component of the key prevents collisions when the
     same table is parsed from different project contexts.
     """
+<<<<<<< Updated upstream
     cache_key: Optional[Tuple[str, float, str]] = None
     if seen is None:
         stat = _path_stat_key(path)
         if stat is not None:
             cache_key = (stat[0], stat[1], str(kiprjmod) if kiprjmod else "")
+=======
+    cache_key: Optional[Tuple[str, float, str, str]] = None
+    if seen is None:
+        stat = _path_stat_key(path)
+        if stat is not None:
+            # Fingerprint the discovered kicad_common.json env vars into the
+            # key — when the user edits Configure Paths in KiCad, the parsed
+            # table's expanded URIs change even though sym-lib-table itself
+            # didn't, so the cache must invalidate.
+            env_fp = repr(sorted(_discover_kicad_env_vars().items()))
+            cache_key = (stat[0], stat[1], str(kiprjmod) if kiprjmod else "", env_fp)
+>>>>>>> Stashed changes
             if cache_key in _TABLE_CACHE:
                 return _TABLE_CACHE[cache_key]
     seen = seen or set()
@@ -639,6 +736,7 @@ def _parse_sym_lib_table(
                 out.setdefault(nk, nv)
         else:
             out[name] = expanded
+<<<<<<< Updated upstream
     # Bundled-library fallback. The orchestrator ships `<repo>/kicad-sym-lib/`
     # with copies of every standard KiCad library it needs (Device, power,
     # Timer, Regulator_Linear, ...). Friend-PCs frequently have a sym-lib-
@@ -655,10 +753,13 @@ def _parse_sym_lib_table(
         if cur and Path(cur).exists():
             continue  # user's table works; leave it alone
         out[lib_name] = bundled_path
+=======
+>>>>>>> Stashed changes
     # Only the top-level call (seen-set just initialized to this path) writes
     # to the module cache, so nested-table recursion doesn't pollute it.
     if seen == {path} and cache_key is not None:
         _TABLE_CACHE[cache_key] = out
+<<<<<<< Updated upstream
     return out
 
 
@@ -678,6 +779,8 @@ def _bundled_libs() -> Dict[str, str]:
             out[entry.stem] = str(entry).replace("\\", "/")
         elif entry.is_file() and entry.suffix == ".kicad_sym":
             out[entry.stem] = str(entry).replace("\\", "/")
+=======
+>>>>>>> Stashed changes
     return out
 
 
@@ -894,6 +997,7 @@ def _fuzzy_find_anywhere(
         if len(alternates) >= 12:
             break
     return (lib, sym, node, alternates)
+<<<<<<< Updated upstream
 
 
 # ---------------------------------------------------------------------------
@@ -1317,6 +1421,8 @@ def _write_split_envil_symbol(target_file: Path, pin_count: int) -> None:
             [Sym("generator"), "envil_kicad_claude"],
             new_node]
     target_file.write_text(sexpdata.dumps(tree), encoding="utf-8")
+=======
+>>>>>>> Stashed changes
 
 
 # ---------------------------------------------------------------------------
@@ -1665,8 +1771,11 @@ def ensure_lib_symbols_for_doc(
 
         resolved = f"{resolved_lib}:{resolved_sym}"
         entry: Dict[str, Any] = {"resolved": resolved, "status": status}
+<<<<<<< Updated upstream
         if confidence is not None:
             entry["confidence"] = confidence
+=======
+>>>>>>> Stashed changes
         if alternates:
             # Surface tied candidates so the caller can ask the user to pick.
             # Listed exactly as "Library:Symbol" matching the input format.
