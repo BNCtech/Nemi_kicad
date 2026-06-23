@@ -1,7 +1,0 @@
-{
-  "_comment": "Deprecated/renamed lib_id -> current canonical name. Consulted before library lookup so the alias resolves as 'exact'. Use ONLY for genuine library renames (K8/K9/K10 short-name changes). Package-variant mismatches (ATmega328P-AU vs ATmega328P-A) are handled algorithmically by _try_normalize_lib_id; do NOT add individual part numbers here. RESTART the server after edits (config is lru_cached).",
-  "aliases": {
-    "Device:CP": "Device:C_Polarized",
-    "Device:CP_Small": "Device:C_Polarized_Small"
-  }
-}
