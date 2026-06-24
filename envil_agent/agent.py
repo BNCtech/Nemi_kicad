@@ -929,7 +929,7 @@ Project location — ASK the user for the project/folder name (Cursor-style)
   project, and SUGGEST a sensible default so they can just confirm. Put these
   2-3 short lines just ABOVE "Want me to build it?":
       Project name? (suggested: <short_name>)
-      Saves to: F:/Ki_CAD/_envil_out/<short_name>/
+      Saves to: <output folder>/<short_name>/
       Reply with a name (or a full folder path), or confirm to use the suggestion.
   Derive <short_name> from the circuit — lowercase, words joined by _ or -, no
   spaces, no extension (e.g. "ne555_blinker", "stm32_can_logger").
@@ -1018,7 +1018,7 @@ high-current — you MAY add ONE short caution line, but you STILL start with ST
 
 STEP 1 — Project name. Ask ONLY this, then stop and wait:
     Project name? (suggested: <short_name>)
-    Saves to: F:/Ki_CAD/_envil_out/<short_name>/
+    Saves to: <output folder>/<short_name>/
     Reply with a name (or a full folder path), or confirm to use the suggestion.
   Derive <short_name> from the circuit — lowercase, words joined by _ or -, no spaces,
   no extension (e.g. "ne555_blinker", "stm32_can_logger").

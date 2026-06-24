@@ -24,7 +24,9 @@ from typing import Any, Dict
 from claude_agent_sdk import tool
 
 
-_DEFAULT_OUT_DIR = "F:/Ki_CAD/_envil_out"
+from ..settings import out_dir as _out_dir
+
+_DEFAULT_OUT_DIR = str(_out_dir())
 
 
 def _safe_name(name: str) -> str:
@@ -68,7 +70,7 @@ def _write_empty_project(sch_path: Path, title: str) -> str:
         "Args:\n"
         "  project_name: the project / folder name (required; a short slug, no "
         "spaces or extension, e.g. 'ne555_blinker')\n"
-        "  out_dir: base directory (default F:/Ki_CAD/_envil_out). The project "
+        "  out_dir: base directory (default: the configured output folder). The project "
         "is created at <out_dir>/<project_name>/<project_name>.kicad_sch.\n\n"
         "Returns JSON: {status:'created'|'exists', path:<.kicad_sch>, "
         "project:<.kicad_pro>, dir:<folder>}. Pass `path` as build_circuit's "

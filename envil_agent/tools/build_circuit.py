@@ -835,9 +835,10 @@ async def build_circuit(args: Dict[str, Any]) -> Dict[str, Any]:
             "is_error": True,
         }
 
+    from ..settings import out_dir as _out_dir
     initial: Dict[str, Any] = {
         "prompt": prompt,
-        "out_dir": args.get("out_dir", "").strip() or "F:/Ki_CAD/_envil_out",
+        "out_dir": args.get("out_dir", "").strip() or str(_out_dir()),
         "out_path": args.get("out_path", "").strip(),
         "project_name": args.get("project_name", "").strip(),
         "force_hierarchy": bool(args.get("force_hierarchy", False)),

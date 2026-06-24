@@ -101,7 +101,8 @@ def _subst_vars(uri: str, kiprjmod: str) -> str:
 
 def _fp_lib_dirs(cfg: Dict[str, Any], kiprjmod: str) -> Dict[str, Path]:
     """Map footprint-library nickname -> .pretty directory from fp-lib-table."""
-    table_path = Path(cfg.get("fp_lib_table", "F:/Ki_CAD/fp-lib-table"))
+    from ..settings import fp_lib_table as _fp_lib_table
+    table_path = Path(cfg.get("fp_lib_table") or str(_fp_lib_table()))
     dirs: Dict[str, Path] = {}
     if not table_path.is_file():
         return dirs
@@ -355,8 +356,9 @@ def generate_pcb_from_ir(ir: Any, sch_path: str,
     # project-style fp-lib-table here roots libraries at the Ki_CAD base, so
     # default KIPRJMOD to that (config-overridable). Falls back to the project
     # folder when no base is configured.
-    kiprjmod = str(cfg.get("kiprjmod_base") or "F:/Ki_CAD")
-    lib_root = Path(cfg.get("lib_root", "F:/Ki_CAD/kicad-fp-lib"))
+    from ..settings import envil_home as _envil_home, fp_lib_dir as _fp_lib_dir
+    kiprjmod = str(cfg.get("kiprjmod_base") or str(_envil_home()))
+    lib_root = Path(cfg.get("lib_root") or str(_fp_lib_dir()))
     paper = str(cfg.get("paper", "A4"))
 
     lib_dirs = _fp_lib_dirs(cfg, kiprjmod)

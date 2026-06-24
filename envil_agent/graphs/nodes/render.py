@@ -22,12 +22,13 @@ from ...intent.engine import (
     render as engine_render,
 )
 from ...lint.repair import repair_after_render
+from ...settings import out_dir as _out_dir
 
 
 def render_node(state: Dict[str, Any]) -> Dict[str, Any]:
     ir = state["ir"]
     explicit_out_path = state.get("out_path", "").strip()
-    out_dir = state.get("out_dir", "").strip() or "F:/Ki_CAD/_envil_out"
+    out_dir = state.get("out_dir", "").strip() or str(_out_dir())
     force_hierarchy = bool(state.get("force_hierarchy", False))
     force_single_sheet = bool(state.get("force_single_sheet", False))
 

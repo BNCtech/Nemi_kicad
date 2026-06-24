@@ -63,9 +63,13 @@ def _load_layout_config() -> Dict[str, Any]:
     if _LAYOUT_CONFIG_CACHE is not None:
         return _LAYOUT_CONFIG_CACHE
     try:
+        from ..settings import resolve_tokens
         cfg_path = Path(__file__).resolve().parent.parent / "config" / "layout_config.json"
         with cfg_path.open("r", encoding="utf-8") as f:
-            _LAYOUT_CONFIG_CACHE = _json.load(f)
+            # resolve_tokens rebases ${ENVIL_HOME} / legacy F:/Ki_CAD paths onto the
+            # real project root, so config is portable across machines (no-op on the
+            # dev machine where the root IS F:/Ki_CAD).
+            _LAYOUT_CONFIG_CACHE = resolve_tokens(_json.load(f))
     except (FileNotFoundError, _json.JSONDecodeError, OSError):
         _LAYOUT_CONFIG_CACHE = {}
     return _LAYOUT_CONFIG_CACHE
