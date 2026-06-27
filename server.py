@@ -106,6 +106,20 @@ def _classify(filename: str, content_type: Optional[str]) -> str:
 IPC_CLIENTS: Set[asyncio.StreamWriter] = set()
 IPC_PENDING: deque = deque(maxlen=32)
 
+# Sticky "open this project" state. open_project is a STATE-SYNC message, not a
+# fire-once event: the SHELL must end up on the latest project no matter WHEN it
+# connects. Two ordering hazards made the tree stay empty (observed in the live
+# log as `ipc_clients=0` at broadcast time):
+#   1. The broadcast fires while the shell is briefly disconnected (e.g. right
+#      after a backend restart) -> it lands in IPC_PENDING.
+#   2. IPC_PENDING is drained into the FIRST client to (re)connect and then
+#      cleared -> that client is usually an eeschema editor, which IGNORES
+#      open_project, so the shell (connecting a moment later) gets nothing.
+# Fix: remember the most recent open_project and replay it to EVERY newly
+# connected client. Editors discard the action; only the shell acts on it, and
+# its handler skips a redundant reload when the project is already active.
+IPC_LAST_OPEN_PROJECT: Optional[Dict[str, Any]] = None
+
 # Per-session conversation history. Each entry is a list of
 # {role: 'user'|'assistant', text: str} turns, oldest first. The agent
 # replays this in every run_turn() call so the model has memory across
@@ -152,6 +166,28 @@ async def _ipc_send(writer: asyncio.StreamWriter, payload: Dict[str, Any]) -> No
 
 
 async def _ipc_broadcast(payload: Dict[str, Any]) -> None:
+    # open_project handling: (1) absolutize the path, (2) remember it as sticky.
+    if isinstance(payload, dict) and payload.get("action") == "open_project":
+        # The SHELL resolves a relative path against ITS cwd (the install bin
+        # folder), not the backend's — so a relative `name/name.kicad_pro` fails
+        # wxFileExists() in the shell handler and LoadProject() never runs (the
+        # "folder created on disk but tree stays empty" symptom). Resolve to an
+        # absolute path here, at the single broadcast chokepoint, so every
+        # open_project (mid-turn create_project AND end-of-turn auto-refresh)
+        # sends a path the shell can actually open. resolve() is lexical-safe
+        # even if the file does not exist yet and is a no-op when already absolute.
+        try:
+            _d = payload.get("data") or {}
+            _p = _d.get("path") or ""
+            if _p and not Path(_p).is_absolute():
+                _abs = str(Path(_p).resolve()).replace("\\", "/")
+                payload = {**payload, "data": {**_d, "path": _abs}}
+        except Exception:
+            pass  # never let path math break the broadcast
+        # Remember the latest open_project so a client that connects (or
+        # reconnects) AFTER this broadcast still gets it — see above.
+        global IPC_LAST_OPEN_PROJECT
+        IPC_LAST_OPEN_PROJECT = payload
     if not IPC_CLIENTS:
         IPC_PENDING.append(payload)
         return
@@ -189,6 +225,15 @@ async def _ipc_handle(reader: asyncio.StreamReader,
                 await _ipc_send(writer, q)
             except Exception:
                 break
+    # Sticky state-sync: replay the latest open_project to THIS client too, so a
+    # shell that connects after the broadcast (or reconnects after a backend
+    # restart) still lands on the current project. Sent to every client; editors
+    # ignore open_project, the shell loads it (and no-ops if already active).
+    if IPC_LAST_OPEN_PROJECT is not None:
+        try:
+            await _ipc_send(writer, IPC_LAST_OPEN_PROJECT)
+        except Exception:
+            pass
     try:
         while True:
             length_bytes = await reader.readexactly(4)
@@ -909,6 +954,7 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
     try:
         full_reply = []
         generated_path: Optional[str] = None
+        generated_pcb_path: Optional[str] = None
         child_paths: list = []
         preview_svgs: list = []
         # Pull this session's history so the agent sees prior turns and
@@ -964,6 +1010,12 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
                     p = event.tool_result.get("path") or ""
                     if p and p.lower().endswith(".kicad_sch"):
                         generated_path = p
+                    # PCB tools (generate_pcb, auto_layout_pcb, route_pcb_simple,
+                    # auto_zones_pcb, drc_autofix, …) return a .kicad_pcb path.
+                    # Capture the LAST one so the open PCB editor gets a live
+                    # reload at turn end, the same way eeschema does for .kicad_sch.
+                    elif p and p.lower().endswith(".kicad_pcb"):
+                        generated_pcb_path = p
                     cps = event.tool_result.get("child_paths") or []
                     if isinstance(cps, list):
                         for cp in cps:
@@ -985,6 +1037,37 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
                                       "tool_name": event.tool_name,
                                       "result": event.tool_result,
                                       "session_id": session_id})
+                # Folder-first UX: when create_project finishes, load the EMPTY
+                # project into the shell's Project Files tree IMMEDIATELY —
+                # mid-turn, before the design questions stream. The generic
+                # open_project broadcast below only runs at turn-END, so without
+                # this the user sees the design questions appear before the empty
+                # file shows up (the exact "create the file first, THEN go to
+                # design" complaint). Gated auto_refresh.open_project_in_shell
+                # (same flag as the end-of-turn path); never breaks the turn.
+                # tool_name is the SDK's MCP-prefixed form (e.g.
+                # "mcp__envil__create_project") — match on the bare suffix.
+                _bare_tool = str(event.tool_name or "").split("__")[-1]
+                if _bare_tool == "create_project" and event.tool_result:
+                    _cp_sch = event.tool_result.get("path") or ""
+                    if _cp_sch.lower().endswith(".kicad_sch"):
+                        try:
+                            from envil_agent.intent.engine import (
+                                _load_layout_config as _lc_cp)
+                            _cp_on = bool((_lc_cp().get("auto_refresh", {}) or {})
+                                          .get("open_project_in_shell", True))
+                        except Exception:
+                            _cp_on = True
+                        _cp_pro = _cp_sch[:-len(".kicad_sch")] + ".kicad_pro"
+                        try:
+                            if _cp_on and Path(_cp_pro).exists():
+                                await _ipc_broadcast({"action": "open_project",
+                                                        "data": {"path": _cp_pro}})
+                                print(f"[create_project] open_project -> shell: "
+                                      f"{_cp_pro}", flush=True)
+                        except Exception as _cp_exc:
+                            print(f"[create_project] open_project skipped: "
+                                  f"{_cp_exc}", flush=True)
             elif event.kind == "end":
                 # 'end' is run_turn's final event. Do NOT abandon the
                 # generator early — draining it to StopAsyncIteration is
@@ -1332,6 +1415,37 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
                 await ws.send_json({"kind": "previews",
                                       "svgs": preview_svgs,
                                       "session_id": session_id})
+
+        # PCB editor live-refresh (Cursor-style): when a PCB tool rewrote the
+        # board (generate_pcb / auto_layout_pcb / route / zones / drc_autofix),
+        # tell the open pcbnew to silently reload it from disk. pcbnew's AI IPC
+        # client handles `revert` (OpenProjectFiles + KICTL_REVERT, no "discard
+        # changes?" dialog) and is GUARDED on its side to act only when the path
+        # IS the board it has open — so this is safe to broadcast even when the
+        # PCB editor isn't open (no client acts) or only eeschema is. No mtime
+        # touch: KICTL_REVERT reloads unconditionally, which also avoids racing
+        # KiCad's native "file changed on disk - reload?" watcher. Sent twice with
+        # a gap as a debounce safety net (same pattern as the schematic revert).
+        # Gate auto_refresh.refresh_pcb_editor (default true).
+        if generated_pcb_path and Path(generated_pcb_path).exists():
+            import asyncio as _asyncio_pcb
+            try:
+                from envil_agent.intent.engine import _load_layout_config as _lc_pcb
+                _pcb_ar = _lc_pcb().get("auto_refresh", {}) or {}
+            except Exception:
+                _pcb_ar = {}
+            if bool(_pcb_ar.get("refresh_pcb_editor", True)):
+                try:
+                    await _ipc_broadcast({"action": "revert",
+                                            "data": {"path": generated_pcb_path}})
+                    await _asyncio_pcb.sleep(0.15)
+                    await _ipc_broadcast({"action": "revert",
+                                            "data": {"path": generated_pcb_path}})
+                    print(f"[auto-refresh] PCB revert -> pcbnew: "
+                          f"{generated_pcb_path} ipc_clients={len(IPC_CLIENTS)}",
+                          flush=True)
+                except Exception as _exc:
+                    print(f"[auto-refresh] PCB revert skipped: {_exc}", flush=True)
 
     except Exception as e:
         try:

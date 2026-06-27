@@ -43,12 +43,15 @@ def _load_cfg() -> Dict[str, Any]:
 
 
 _DEFAULT_STEPS: List[Dict[str, Any]] = [
+    {"tool": "set_design_rules", "enabled": True},
     {"tool": "auto_place_pcb", "enabled": True},
     {"tool": "auto_outline_pcb", "enabled": True},
     {"tool": "route_pcb_simple", "enabled": True},
     {"tool": "set_track_widths_pcb", "enabled": True},
     {"tool": "auto_zones_pcb", "enabled": True},
     {"tool": "auto_thermal_vias_pcb", "enabled": True},
+    {"tool": "auto_mounting_holes_pcb", "enabled": True},
+    {"tool": "auto_fiducials_pcb", "enabled": True},
     {"tool": "silkscreen_cleanup_pcb", "enabled": True},
     {"tool": "drc_autofix", "enabled": True, "args": {"apply": True, "max_rounds": 2}},
     {"tool": "pcb_verify", "enabled": True},
@@ -142,11 +145,105 @@ async def auto_layout_pcb(args: dict[str, Any]) -> dict[str, Any]:
 
     n_ok = sum(1 for r in results if r["ok"])
     n_steps = len([r for r in results if r["tool"] != "(halted)"])
-    lines = [f"auto_layout_pcb -> {pcb_path.name}  ({n_ok}/{n_steps} steps OK)"]
+
+    # ---- Phase 4: close the loop — repair residual connectivity (Fix 4 / R10) ----
+    # The pipeline runs once top-to-bottom; nets the router abandoned (congested
+    # top layer) or a pour that missed leave unconnected pads. When repair.enabled,
+    # read the DRC, route every still-unconnected net on the back layer, and
+    # re-check, bounded by max_rounds, stopping when clean or no progress.
+    # Connectivity repair is ADDITIVE (adds tracks, never moves placed parts), so
+    # it cannot invalidate existing routing. Reported honestly.
+    repair_cfg = cfg.get("repair", {})
+    if not isinstance(repair_cfg, dict):
+        repair_cfg = {}
+    repair_log: List[str] = []
+    if repair_cfg.get("enabled", False):
+        import json as _json
+        import re as _re
+        max_rounds = int(repair_cfg.get("max_rounds", 2))
+        back_layer = str(repair_cfg.get("route_layer", "B.Cu"))
+        report_path = pcb_path.with_name(pcb_path.stem + "-drc.json")
+
+        async def _unconnected_nets() -> List[str]:
+            try:
+                drc_mod = importlib.import_module("envil_agent.tools.drc_check")
+                await drc_mod.drc_check.handler({"pcb_path": str(pcb_path)})
+                d = _json.loads(report_path.read_text(encoding="utf-8"))
+            except Exception:                               # noqa: BLE001
+                return []
+            nets: set = set()
+            for u in d.get("unconnected_items", []) or []:
+                for it in u.get("items", []) or []:
+                    m = _re.search(r"\[([^\]]+)\]", it.get("description", "") or "")
+                    if m:
+                        nets.add(m.group(1))
+            return sorted(nets)
+
+        prev: Any = None
+        for rnd in range(1, max_rounds + 1):
+            unconnected = await _unconnected_nets()
+            if not unconnected:
+                repair_log.append(f"round {rnd}: 0 unconnected — connectivity clean")
+                break
+            if prev is not None and len(unconnected) >= prev:
+                repair_log.append(
+                    f"round {rnd}: {len(unconnected)} unconnected — no progress, stop")
+                break
+            prev = len(unconnected)
+            try:
+                route_mod = importlib.import_module("envil_agent.tools.route_pcb_simple")
+                rr = await route_mod.route_pcb_simple.handler({
+                    "pcb_path": str(pcb_path),
+                    "force_route_nets": unconnected,
+                    "skip_nets": [],
+                    "layer": back_layer,
+                    "max_pads_per_net": int(repair_cfg.get("max_pads_per_net", 64)),
+                })
+                ok = not rr.get("is_error", False)
+                repair_log.append(
+                    f"round {rnd}: routed {len(unconnected)} unconnected net(s) "
+                    f"on {back_layer}" + ("" if ok else " (router error)"))
+            except Exception as exc:                        # noqa: BLE001
+                repair_log.append(f"round {rnd}: route failed: {type(exc).__name__}")
+                break
+        else:
+            remain = await _unconnected_nets()
+            repair_log.append(
+                f"after {max_rounds} round(s): {len(remain)} net(s) still unconnected")
+
+    # HONEST VERIFICATION: a step running OK is NOT the same as the board being
+    # DRC-clean. Run a final authoritative DRC and surface the REAL count as the
+    # headline, so neither the report nor the agent can claim "DRC fixed" on the
+    # strength of "the drc_autofix step ran". (Verify by running — never trust.)
+    drc_err: Any = None
+    drc_warn: Any = None
+    try:
+        drc_mod = importlib.import_module("envil_agent.tools.drc_check")
+        dr = await drc_mod.drc_check.handler({"pcb_path": str(pcb_path)})
+        if isinstance(dr.get("error_count"), int) and dr["error_count"] >= 0:
+            drc_err = int(dr["error_count"])
+            drc_warn = int(dr.get("warning_count", 0) or 0)
+    except Exception as exc:                                  # noqa: BLE001
+        drc_err = None
+
+    if isinstance(drc_err, int):
+        verdict = "CLEAN" if drc_err == 0 else "NOT CLEAN — fix before fab"
+        head = (f"VERIFIED DRC: {drc_err} error(s), {drc_warn} warning(s) "
+                f"— {verdict}")
+    else:
+        head = "VERIFIED DRC: could not run (count unknown)"
+
+    lines = [f"auto_layout_pcb -> {pcb_path.name}  ({n_ok}/{n_steps} steps OK)",
+             head]
     for r in results:
         mark = "OK " if r["ok"] else ("xx " if r["is_error"] else " - ")
         lines.append(f"  {mark}{r['tool']}: {r['head']}")
+    for line in repair_log:
+        lines.append(f"  repair: {line}")
 
     return {"content": [{"type": "text", "text": "\n".join(lines)}],
             "ok": n_ok == n_steps, "path": str(pcb_path),
-            "steps_ok": n_ok, "steps_total": n_steps, "results": results}
+            "steps_ok": n_ok, "steps_total": n_steps, "results": results,
+            "repair": repair_log,
+            "drc_errors": drc_err, "drc_warnings": drc_warn,
+            "drc_clean": (drc_err == 0) if isinstance(drc_err, int) else None}

@@ -6,7 +6,9 @@
   },
   "build_flow": {
     "_comment": "Cursor / coding-agent build flow (2026-06-22, user: 'first folder create pannitu tha circuit create panna permission kekkanum ... appadi thana cursor claude eppadi work aakuthu'). When folder_first=true (default), a NEW whole-circuit request runs: (1) ask Project name -> (2) call create_project to make the EMPTY project folder+files (loads in Project Files, ALWAYS succeeds) -> (3) ask the design questions -> (4) build_circuit with out_path=<the created .kicad_sch> to fill the circuit INTO that project. The workspace exists before its contents, so a circuit with doubts/errors never costs the user the folder. Read by agent.py:_folder_first_enabled, which appends FOLDER_FIRST_RULE and SUPPRESSES the one-step ASK_ASSUMPTIONS_RULE + PROJECT_NAMING_RULE (whose ordering would contradict it). Set false to restore the legacy one-step flow (ask design questions, then build folder+circuit together in one build_circuit call).",
-    "folder_first": true
+    "folder_first": true,
+    "_confirm_each_step_doc": "Cursor-style step approval (2026-06-25, user: 'erc clean next step update pcb polama kekkanum ... user permission kudutha aprom tha nee aatha pannnum ... aprom tha user ku puriyum ai enna pannuthunu'). When true, the AI runs the build pipeline as APPROVED STEPS instead of one black box: it tells the user what it will do and asks before each major action — ERC check, ERC fix, PCB update, layout, score. Concretely build_circuit STOPS after the schematic (ERC-cleaned) and DEFERS the PCB (summary.pcb.deferred); the agent then asks 'ERC clean — update the PCB now?' and only on OK calls generate_pcb. Read by build_circuit (defer PCB) + agent.py (appends STEP_CONFIRMATION_RULE). Set false for the legacy one-shot build (schematic + PCB + finish in one call).",
+    "confirm_each_step": true
   },
   "project_naming": {
     "_comment": "Cursor-style project naming (2026-06-21, user request: 'cursor folder structure ku user-kitta kekkuma, athu maathiri kicad-layum venum'). When enabled the agent proposes a project name + folder path INSIDE the NEW-circuit build preview (a 'Project:' and 'Folder:' line just above 'Want me to build it?'), and the user can override the name/folder before confirming -- exactly like Cursor showing the file tree before it writes. The agreed name flows build_circuit(project_name=...) -> RouterState.project_name -> graphs/nodes/render.py, which sets ir.name so the per-circuit folder, the .kicad_sch basename, the child sheet files and the title block all follow the user's chosen name instead of the architect's auto ir.name. Read by agent.py:_project_naming_enabled (appends PROJECT_NAMING_RULE to the system prompt) and render_node (the ir.name override, only when project_name is set AND out_path is empty). Set enabled=false (propose_in_preview=false) to restore the fully-automatic naming -- byte-stable: the prompt prefix drops the suffix and, with no project_name in state, render_node is unchanged. Ignored when overwriting an open file (out_path set keeps that file's name).",
@@ -100,6 +102,8 @@
   },
   "ship_design": {
     "_comment": "Phase 18e. One-prompt finisher \u2014 runs ERC, BOM, DRC, Gerbers, 3D render in sequence and returns a single report. Disable any stage by setting `enabled: false` inside its `steps` entry. Set `strict: true` on DRC to fail the report on any DRC error (default is lenient because empty/un-routed boards report 'no Edge.Cuts' which is expected).",
+    "_block_export_comment": "Hard fab-export gate. When true, real DRC errors (>0) BLOCK the Gerber/drill/ZIP stage entirely instead of exporting and merely marking the report NOT READY \u2014 a board with open DRC errors never reaches a manufacturer. Default false preserves the legacy export-anyway behaviour.",
+    "block_export_on_drc": true,
     "enabled": true,
     "steps": {
       "erc": {
@@ -167,6 +171,11 @@
     "use_net_class_width": true,
     "obstacle_inflate_mm": 0.5,
     "_obstacle_inflate_comment": "Pad bbox of OTHER footprints is inflated by this much when checking whether an L-shape crosses a body. Bigger = safer but skips more routes.",
+    "_clearance_aware_comment": "Root-cause fix (2026-06-25) for the simple router creating SHORTS. When true, every candidate track is rejected unless it stays (own_half_width + clearance + obstacle_half_width) away from EVERY other net — both other nets' pads AND their already-routed tracks (tracked per layer this run). Clearance is the board's real Default-netclass clearance from the .kicad_pro (dynamic, no hardcode); falls back to default_clearance_mm. A net that can't be routed within clearance is left as ratsnest, NEVER shorted. Set false for the legacy short-prone behaviour.",
+    "clearance_aware": true,
+    "respect_existing_copper": true,
+    "_respect_existing_copper_comment": "Root-cause fix (2026-06-26) for compose-shorts. route_pcb_simple is called repeatedly in the pipeline (route + ensure_ground_return + repair + ripup); each call previously started with an EMPTY obstacle set and was blind to the copper the earlier calls laid, so it routed over it -> shorting_items / tracks_crossing. true (default) seeds every existing segment + via on the board as an obstacle so each pass keeps clear of all prior copper (other nets); same-net copper is still free to extend. A fresh F8 board has no tracks, so first-pass routing is byte-stable. Set false only to restore the old single-pass-only behaviour.",
+    "default_clearance_mm": 0.2,
     "skip_pad_overlap_mm": 0.05,
     "_skip_pad_overlap_comment": "When the L-segment passes within this distance of the segment endpoints' OWN pad bbox we keep it (it should overlap the pads it connects to). Otherwise we'd reject every valid route.",
     "preview_only": false,
@@ -201,6 +210,19 @@
 
     "enable_astar": true,
     "_enable_astar_comment": "R1.1 (2026-05-26). When L + Z + via all fail, fall through to A* Manhattan-grid search. Pure-Python heapq; only the residual ~5% of edges reach this tier so cost is bounded. Set false to disable and skip those edges instead.",
+    "voltage_clearance": {
+      "enabled": false,
+      "_comment": "R1 (IPC-2221B). When true, the board routing clearance is scaled up to the IPC requirement for the HIGHEST voltage present (voltage parsed from net names: +12V, 3V3, 230V). Conservative board-level bump — always safe, never under-spaced; low-voltage-only boards are unaffected (their max voltage maps to the base clearance). ipc_table is ascending [[max_voltage, clearance_mm]] for external uncoated conductors. false (default) = clearance unchanged = byte-stable.",
+      "ipc_table": [[15, 0.1], [30, 0.1], [50, 0.6], [150, 0.6], [300, 1.25], [500, 2.5], [1000, 4.0]]
+    },
+    "domain_clearance": {
+      "enabled": false,
+      "_comment": "R12 routing-side isolation. When true, a SENSITIVE net (name matches pcb_constraint_model.json pin_signatures.analog: ADC/SENSE/CELL/VREF...) and a NOISY net (matches power_switch sigs or net_signatures.motor_power: SW/GATE/MOTOR...) each route with extra copper clearance to everything, so analog traces keep their distance from switching/motor traces. Reuses the reasoning signatures (no duplicate net list). false (default) = byte-stable.",
+      "sensitive_extra_mm": 0.3,
+      "noisy_extra_mm": 0.3
+    },
+    "route_priority_order": false,
+    "_route_priority_order_comment": "Phase 3 of the Universal PCB engine (R11). When true, nets are routed critical (high-speed/clock) -> power -> signal instead of net-id order, so critical nets claim clean channels before the board congests. Priority is derived from the SAME pcb_constraint_model.json pin_signatures (highspeed/clock/power) — one source of truth, no duplicate net-name list. The router stays clearance-aware, so reordering only changes which net wins a corridor, never makes a short. false (default) = net-id order = byte-stable.",
     "astar_step_mm": 1.27,
     "_astar_step_mm_comment": "Grid pitch for A*. 1.27 mm = 50 mil, matches the schematic-side KiCad grid. Smaller = finer routing but exponentially more nodes; larger = coarser but faster.",
     "astar_bounds_margin_mm": 8.0,
@@ -242,6 +264,83 @@
     }
   },
 
+  "pcb_quality": {
+    "_comment": "Scored 'perfect PCB' analyzer (tool: pcb_quality). READ-ONLY — walks a .kicad_pcb and emits one card: Placement / Routing / Power / Signal-Layers / Manufacturing %, an overall score + verdict, and Apply-Fix suggestions that each name an EXISTING mutating tool. Every threshold below is verified against authoritative sources (cited inline), not invented. Disable the whole tool with enabled=false.",
+    "enabled": true,
+    "_show_percentage_comment": "User prefers plain words over a number (2026-06-25: 'ennaku percentage vendam'). When false, each dimension + the overall show the verdict WORD (EXCELLENT/GOOD/REVIEW/NEEDS WORK) instead of a %, and the agent is told not to quote a score. Set true to restore numeric scoring.",
+    "show_percentage": false,
+
+    "ic_ref_prefixes": ["U"],
+    "_ic_ref_prefixes_comment": "Refdes prefixes treated as ICs (the parts decoupling caps must sit next to). U = standard IC prefix.",
+    "ic_min_pads": 6,
+    "_ic_min_pads_comment": "A footprint with >= this many pads is also treated as an IC even if its refdes isn't in ic_ref_prefixes (catches modules/connectors acting as the main part). 6 excludes 2-pad passives and 3-pad regulators/transistors.",
+
+    "decap_value_patterns": ["^\\s*100\\s*n", "^\\s*0\\.1\\s*[uµ]", "^\\s*0u1", "^\\s*n100"],
+    "_decap_value_patterns_comment": "What counts as a decoupling cap = its Value matches one of these regexes (case-insensitive, matched at start). Default = the universal 100nF / 0.1uF bypass in its common spellings (100n, 0.1u, 0.1µ, 0u1, n100). DATA not CIRCUIT: edit to treat other values as decaps (e.g. add '^\\s*1\\s*u' to include 1uF) — nothing about a specific board is baked into code.",
+    "decap_max_mm": 5.0,
+    "_decap_max_mm_comment": "HEURISTIC PROXY (warn, not error). A 100nF decoupling cap further than this from its nearest IC is flagged. VERIFIED: what actually matters is mounting INDUCTANCE (~1 nH per mm of loop), not raw distance — ideal placement is 1-2 mm, < 3 mm for >100 MHz parts (Sierra Circuits / Cadence). 5 mm is the loose outer bound that catches gross misplacement (the '18 mm away' case) without false-flagging tight-but-not-perfect layouts. Lower to 3.0 for high-speed-strict boards. Sources: protoexpress.com/blog/decoupling-capacitor-placement-guidelines-pcb-design, resources.pcb.cadence.com/blog/2020-decoupling-capacitor-placement-in-pcb-layout",
+
+    "min_board_efficiency": 0.05,
+    "_min_board_efficiency_comment": "ADVISORY ONLY (never scored). If (sum of footprint pad-bbox area / board-outline area) is below this, surface a 'consider shrink-to-fit' suggestion. Set LOW (0.05) on purpose: pad-bbox area badly under-counts the true area a board needs (routing channels, connectors, keepout, mounting holes are all empty of pads), so a higher threshold would false-flag normal boards. No IPC standard for board density — this only catches the egregiously empty outline (e.g. 3 parts on a 100x80 board).",
+    "stack_min_mm": 0.5,
+    "_stack_min_mm_comment": "Placement score: two footprints whose CENTRES are within this distance (mm) count as 'stacked' — the real auto-place failure mode (parts on top of each other / all at 0,0). Centre-based on purpose so a decap placed 1 mm off an IC (ideal practice) is NOT flagged. True courtyard-overlap-at-a-distance is left to kicad-cli DRC, which does it precisely.",
+
+    "gnd_net_regex": "GND|^VSS|^EARTH",
+    "_gnd_net_regex_comment": "Identifies ground nets for the copper-pour / plane check. Matches the GND token anywhere (GND/AGND/DGND/PGND/GNDA) plus VSS (IC ground pin) and EARTH. Deliberately NOT '^G?N?D' which would wrongly match nets like DATA.",
+
+    "weights": {
+      "_comment": "Overall score = weighted average of the dimensions that actually ran (renormalised — a dimension that is n/a, e.g. no power nets, is dropped, not zeroed). Power weighted highest because an under-sized power trace is a burn/brownout risk; manufacturing/DRC next because it gates fab. Must sum is NOT required (renormalised).",
+      "Placement": 0.20,
+      "Routing": 0.20,
+      "Power Integrity": 0.25,
+      "Signal / Layers": 0.15,
+      "Manufacturing": 0.20
+    },
+    "bands": [
+      [90, "EXCELLENT"],
+      [75, "GOOD"],
+      [60, "REVIEW"],
+      [0, "NEEDS WORK"]
+    ],
+    "_bands_comment": "Overall-score -> verdict label. First band whose threshold the score meets wins (descending).",
+
+    "steps": {
+      "drc": true,
+      "_drc_comment": "Fold REAL kicad-cli DRC into the Manufacturing dimension. Set false (or pass skip_drc:true) for a fast static-only score when iterating."
+    },
+
+    "_reference_rules_comment": "Documented-but-not-yet-auto-checked rules from the layer/routing spec, captured here so route_pcb_simple / a future layer-aware check can consume verified values instead of re-researching. NONE of these are enforced by the scorer yet.",
+    "reference_rules": {
+      "stackup_4layer_preferred": ["Signal", "GND", "Power", "Signal"],
+      "_stackup_comment": "SGPS is the standard 4-layer stackup: GND on L2 directly under top-signal gives a low-impedance return path + EMI control; power on L3 couples to L2 for plane capacitance. Source: resources.pcb.cadence.com/blog/best-formats-for-4-layer-pcb-stackups",
+      "orthogonal_routing_2layer": {"top": "horizontal", "bottom": "vertical"},
+      "_orthogonal_comment": "2-layer strict rule: adjacent layers route orthogonally (one H, one V, change direction via a via) -> fewer crossings + less inter-layer crosstalk. Source: resources.pcb.cadence.com/blog/simple-strategies-for-double-sided-2-layer-pcbs",
+      "routing_priority": ["POWER_GND", "CLOCK_DIFFPAIR", "HIGH_SPEED", "ANALOG", "GPIO"],
+      "_routing_priority_comment": "Route order: power/ground + critical clocks & diff-pairs FIRST (stable reference, shortest critical nets), then other high-speed, then sensitive analog, then general GPIO. Source: protoexpress.com/blog/best-high-speed-pcb-routing-practices",
+      "via_current_a_per_drill_mm": {"0.3": 0.9, "0.5": 1.5},
+      "_via_current_comment": "IPC-2152, 20 µm plating, 10 °C rise: a 0.3 mm drill via carries ~0.8-1.0 A; use bigger/multiple vias for power (10 A ~= 10-13x 0.3 mm vias). Source: queenems.com/blog/pcb-via-current-capacity"
+    }
+  },
+
+  "pcb_improve": {
+    "_comment": "Score-driven, GUARDED auto-fix loop (tool: pcb_improve) — the 'Apply Fix' half of the perfect-PCB loop. Scores via pcb_quality, applies the fixes it recommends, re-scores, repeats. Every fix is kept ONLY if the overall score did not drop (board snapshotted + restored on regression), so the percentage is monotonic. Fully dynamic: the fix list is whatever pcb_quality emits for THIS board — no step sequence hardcoded. Contrast auto_layout_pcb, which runs a fixed full pipeline blindly with no score guard.",
+    "enabled": true,
+    "target_score": 90.0,
+    "_target_score_comment": "Stop once the overall pcb_quality score reaches this %. 90 = the 'EXCELLENT' band. Raise toward 100 to push harder (more passes), lower for a quick lift.",
+    "max_passes": 3,
+    "_max_passes_comment": "Hard cap on full score→fix→rescore rounds. Each pass tries every recommended fix tool once. 3 is plenty for the current fix set; the loop also exits early when a pass makes no improvement.",
+    "min_gain": 0.5,
+    "_min_gain_comment": "A fix is KEPT only if it raises the overall score by at least this many points; otherwise the board is reverted to its pre-fix bytes. >0 so a no-op or marginal fix can't churn the file. This is the no-regression guard.",
+    "loop_skip_drc": true,
+    "_loop_skip_drc_comment": "Use the fast static score (no kicad-cli DRC) DURING the loop so iterating is quick; the FINAL reported score always runs real DRC. Set false to score with DRC every iteration (slower, stricter guard).",
+    "fix_tools": ["auto_zones_pcb", "set_track_widths_pcb", "route_pcb_simple", "auto_place_pcb", "auto_outline_pcb", "drc_autofix"],
+    "_fix_tools_comment": "Allowlist of mutating tools the loop may invoke. A pcb_quality finding names one of these as its fix; only listed tools run. Remove one to forbid the loop from using it (e.g. drop auto_place_pcb to keep manual placement).",
+    "fix_tool_args": {
+      "drc_autofix": {"apply": true, "max_rounds": 2}
+    },
+    "_fix_tool_args_comment": "Per-tool extra args merged with {pcb_path}. drc_autofix needs apply:true to actually write fixes. Other tools run with their own config defaults."
+  },
+
   "auto_mounting_holes_pcb": {
     "_comment": "Phase 26a. Drop N NPTH mounting holes on a .kicad_pcb, inset from the corners of the Edge.Cuts outline. Universal — works on any board once auto_outline_pcb has produced an outline. Pure data: change the hole size by editing diameter_mm; M3 default (3.2 mm clearance for an M3 screw with washer). `inset_mm` is the corner-to-hole-center distance. `corner_strategy=4` places one hole at each of the 4 corners (standard); set to 2 to place only diagonally opposite holes for small boards.",
     "enabled": true,
@@ -264,6 +363,19 @@
     "exclude_from_pos_files": true,
     "replace_existing": true,
     "_strategy_comment": "3-fiducial layout: BL + TL + TR (skip BR — asymmetric so P&P can detect orientation). 2-fiducial layout: BL + TR (diagonal). Set count=2 or 3."
+  },
+  "ripup_reroute": {
+    "_comment": "Pure-Python rip-up-and-reroute (tools/ripup_reroute_pcb.py). For each still-unconnected net, rips up the tracks blocking it (other nets' segments inside its pad bbox + ripup_margin_mm), routes it, and re-routes the ripped nets — committing ONLY if kicad-cli DRC then shows fewer unconnected pads, else reverting the board file byte-for-byte. NEVER makes the board worse. No Java/GPU/external router. enabled=false (default) = no-op. Best run after route_pcb_simple + ensure_ground_return; helps track-congested (SMD) boards, not THT pad-congestion.",
+    "enabled": false,
+    "max_rounds": 2,
+    "ripup_margin_mm": 2.0,
+    "max_pads_per_net": 64
+  },
+  "ensure_ground_return": {
+    "_comment": "Phase 3 of the Universal PCB engine (Fix 1, R5). Runs AFTER auto_zones_pcb in the auto_layout step list. Proves every skipped ground net (route_pcb_simple.skip_nets) is served by a FILLED copper zone; for any that is not (pour absent / empty), routes that net on route_layer so ground is never silently orphaned (the NE555 bug: GND skipped by the router AND not poured). No-op when the pour covers ground. The ground-net set is route_pcb_simple.skip_nets (no duplicate list). enabled=false (DEFAULT, SAFE 2026-06-26): on a congested all-THT board the B.Cu GND star can cross signal tracks under the loaded clearance — keep off until isolated; enable per-board on SMD/roomier boards.",
+    "enabled": false,
+    "route_layer": "B.Cu",
+    "max_pads_per_net": 64
   },
   "auto_thermal_vias_pcb": {
     "_comment": "Phase 26c. Add a stitched-via array under exposed-pad (thermal paddle) pads to dump heat from power ICs into internal/back-side copper. Universal: scans every footprint for a pad whose number matches `paddle_pad_numbers`; for each match, drops a configurable via grid centered on the pad. Use after F8 + auto_place_pcb so the paddle pad position is correct.",
@@ -363,7 +475,32 @@
       "wirelength_refine": true,
       "wl_iters": 3,
       "wl_max_step_mm": 5.0,
-      "wl_skip_ref_prefixes": ["J", "P"]
+      "wl_skip_ref_prefixes": ["J", "P"],
+      "_rotation_comment": "Gap-1 rotation optimizer (place_refine.py Phase 1.5). After de-collision, each movable part is tried at the listed orthogonal re-orientations (relative to its current angle) and kept at the one that strictly shortens the half-perimeter wirelength of the nets it touches without creating a new courtyard overlap. Cost-driven only — no per-part rules — so it generalises to any board. Connectors/mechanical parts (rot_skip_ref_prefixes) keep their keyed orientation. Set rotation_optimize=false for byte-stable no-rotation placement.",
+      "rotation_optimize": true,
+      "rotation_angles": [0.0, 90.0, 180.0, 270.0],
+      "rot_skip_ref_prefixes": ["J", "P", "H", "MH", "FID", "MK", "NT", "REF"],
+      "_railfilter_comment": "High-fanout net suppression. GND/VCC rails touch many pads so their centroid sits at the board centre; pulling parts toward it cancels the signal-driven attraction and leaves parts scattered. Every attraction/cost pass (cluster, rotation, wirelength) ignores nets whose fanout exceeds max(wl_rail_min_degree, ceil(wl_rail_fraction * num_parts)) — purely topological (degree, not net names), so it scales: ~GND only on a 15-part board, true power rails on a 100-part board. Verified on ne555_blinker: signal HPWL 126.8->114.6 (-10%), overlaps 0. wl_rail_fraction=0 disables (byte-stable).",
+      "wl_rail_fraction": 0.25,
+      "wl_rail_min_degree": 4,
+      "wl_ignore_net_degree": 0,
+      "_cluster_comment": "Bold force-directed clustering pre-pass (Phase 0): pulls each part most of the way to its signal-net centroid before de-collision. Helps scatter-grid LARGE boards but DEGRADES small dense boards (measured: ne555 signal HPWL 121.7->139.2 worse) because parts collapse then de-collision explodes them. Left OFF by default; enable per-board only when starting from a poor scattered placement.",
+      "cluster_placement": false,
+      "cluster_iters": 8,
+      "cluster_strength": 0.6,
+      "cluster_max_step_mm": 20.0,
+      "_orientation_uniformity_comment": "P5 (assembly DFM). When enabled, same-CLASS parts (grouped by refdes prefix — R, C, ... — not by component name) are snapped to their group's MAJORITY orthogonal orientation, but only when the snap creates no new courtyard overlap. Runs after the wirelength rotation optimizer (which can leave a group mixed). min_group = the smallest group worth unifying. Connectors/mechanical keep their keyed angle. enabled=false (default) -> orientation untouched -> byte-stable.",
+      "orientation_uniformity": {
+        "enabled": false,
+        "min_group": 3
+      },
+      "_constraint_placement_comment": "Phase 2 of the Universal PCB engine (PCB_AI_ARCHITECTURE.md). When enabled, auto_place_pcb runs tools/pcb_reasoning to derive per-part electrical constraints and place_refine consumes them: keep-close pulls each support part (decoupling/clock/filter) toward the higher-criticality part it shares a net with, within its max_dist_mm; keep-away pushes domain-conflicting parts (analog away from switching, RF keepout) apart by min_gap_mm. Conservative: a move is reverted if it creates a courtyard overlap. enabled=false (default) -> place_refine gets constraints=None and output is byte-stable with Phase-1 behaviour. Flip enabled=true to activate reasoning-driven placement.",
+      "constraint_placement": {
+        "enabled": false,
+        "keep_close_iters": 4,
+        "keep_away_iters": 4,
+        "max_step_mm": 5.0
+      }
     }
   },
   "bom_export": {
@@ -976,17 +1113,30 @@
     "_comment": "P27 (2026-06-23). Closed-loop PCB layout orchestrator (tools/auto_layout_pcb.py). The pipeline IS this step list — re-order/disable/add steps here, no Python change. Each step dispatches to that tool's own @tool handler with the same pcb_path; per-step `args` merge over the tool's config defaults. stop_on_error halts on the first failing step (default false: run all, report each). The final step (pcb_verify) gives the board's end state. Runs AFTER footprints exist (F8 or pcb_gen).",
     "enabled": true,
     "stop_on_error": false,
+    "_repair_comment": "Phase 4 of the Universal PCB engine (Fix 4, R10): close the loop. After the step list runs, read the DRC and route every still-unconnected net on route_layer, re-checking up to max_rounds (stops early when connectivity is clean or a round makes no progress). Connectivity repair is ADDITIVE — it adds tracks on the back layer and never moves placed parts. enabled=false (DEFAULT, SAFE) skips the loop. NOTE 2026-06-26: validation showed that on a congested all-THT board, the B.Cu connectivity additions (this + ensure_ground_return) can produce tracks_crossing/shorting under the loaded netclass clearance — keep OFF until that is isolated; enable per-board only on SMD/roomier boards.",
+    "repair": {
+      "enabled": false,
+      "max_rounds": 2,
+      "route_layer": "B.Cu",
+      "max_pads_per_net": 64
+    },
     "steps": [
+      { "tool": "set_design_rules", "enabled": true },
       { "tool": "auto_place_pcb", "enabled": true },
       { "tool": "auto_outline_pcb", "enabled": true },
+      { "tool": "auto_mounting_holes_pcb", "enabled": true },
+      { "tool": "auto_fiducials_pcb", "enabled": true },
       { "tool": "route_pcb_simple", "enabled": true },
       { "tool": "set_track_widths_pcb", "enabled": true },
       { "tool": "auto_zones_pcb", "enabled": true },
+      { "tool": "ensure_ground_return", "enabled": true },
+      { "tool": "ripup_reroute_pcb", "enabled": true },
       { "tool": "auto_thermal_vias_pcb", "enabled": true },
       { "tool": "silkscreen_cleanup_pcb", "enabled": true },
       { "tool": "drc_autofix", "enabled": true, "args": { "apply": true, "max_rounds": 2 } },
       { "tool": "pcb_verify", "enabled": true }
-    ]
+    ],
+    "_steps_note": "Canonical post-import pipeline (manual `auto_layout_pcb` runs ALL of these incl. route). set_design_rules (net classes + fab clearances), mounting holes and fiducials were added 2026-06-24 so the one-shot tool also writes design rules + fab features. The AUTOMATIC post-build finish (build_circuit) runs this same list but SKIPS the tools in pcb_gen.finish_skip_tools (default route_pcb_simple)."
   },
   "ampacity": {
     "_comment": "P26 (2026-06-23). IPC-2221 track-width-for-current engine used by tools/set_track_widths_pcb.py. A net is POWER if its name starts with one of power_net_patterns.patterns; otherwise Default. Each class has a design current; the required width = IPC-2221 area equation (A[mil^2]=(I/(k*dT^0.44))^(1/0.725), width=A/copper_thickness_in_mils) then optionally divided by ipc2152_factor (IPC-2152 allows narrower for the same current — keep 1.0 for conservative pure-2221). Under-sized track segments on a net are widened to its required width (only_widen never shrinks). net_current_a overrides a specific net by name. Verified: 1A/10C/1oz external -> ~0.30mm, matching the published IPC-2221 chart. All knobs here; nothing hardcoded in Python.",
@@ -1490,14 +1640,20 @@
     "open_project_in_shell": true,
     "_update_pcb_after_build_comment": "Cursor-style fully-automatic F8 (2026-06-22, user: 'cursor type i need my ai automatic'). When true (default), after a schematic build the server broadcasts an `update_pcb_from_schematic` IPC message to eeschema, whose AI_IPC_CLIENT calls OnUpdatePCB(true). That opens/docks pcbnew (if needed) and applies the netlist SILENTLY (no Update-PCB modal) via BOARD_NETLIST_UPDATER with the dialog's default options, so footprints land on the board with zero manual steps. Requires the fork rebuild that adds the eeschema `update_pcb_from_schematic` dispatch + pcbnew silent-apply path (cross-probing.cpp MAIL_PCB_UPDATE payload=='auto' -> BOARD_EDITOR_CONTROL::UpdatePCBFromSchematicSilent). Set false to keep F8 manual (press F8 in eeschema yourself). Note: requires footprints assigned to the schematic symbols; symbols with no Footprint field are skipped by the updater.",
     "update_pcb_after_build": false,
-    "_update_pcb_after_build_superseded": "Set FALSE 2026-06-22: superseded by direct file-based PCB generation (see pcb_gen below + tools/build_circuit.py -> layout/pcb_gen.generate_pcb_from_ir). The board is now WRITTEN with footprints placed at build time (Cursor-style, no running-app F8), so the auto-F8 IPC broadcast is off. The eeschema/pcbnew silent-F8 fork path stays available as a dormant capability if you flip this true."
+    "_update_pcb_after_build_superseded": "Set FALSE 2026-06-22: superseded by direct file-based PCB generation (see pcb_gen below + tools/build_circuit.py -> layout/pcb_gen.generate_pcb_from_ir). The board is now WRITTEN with footprints placed at build time (Cursor-style, no running-app F8), so the auto-F8 IPC broadcast is off. The eeschema/pcbnew silent-F8 fork path stays available as a dormant capability if you flip this true.",
+    "_refresh_pcb_editor_comment": "Cursor-style live PCB sync (2026-06-25, user: 'editor refresh work file open and close time like cursor'). When true (default), after any PCB tool rewrites the .kicad_pcb (generate_pcb / auto_layout_pcb / route_pcb_simple / auto_zones_pcb / drc_autofix), the server broadcasts a `revert` IPC carrying the .kicad_pcb path so the open pcbnew silently reloads the board from disk — the same live-reload eeschema already gets for .kicad_sch. Requires the fork rebuild that adds pcbnew's `revert` AI-IPC handler (pcb_edit_frame.cpp: OpenProjectFiles + KICTL_REVERT, guarded to act only on the board it has open). Set false to restore manual File>Revert.",
+    "refresh_pcb_editor": true
   },
   "pcb_gen": {
     "_about": "Direct .kicad_pcb generation (2026-06-22, user: 'cursor type ... AI generates the .kicad_pcb directly'). After a schematic build, tools/build_circuit.py calls layout/pcb_gen.generate_pcb_from_ir(ir, sch_path): resolves each component's footprint, loads the .kicad_mod, grid-places it, assigns pad nets from the IR (symbol pin -> footprint pad via symbol_geom.resolve_pin), and writes a valid populated .kicad_pcb next to the .kicad_sch. No F8, no running KiCad app. Verified loadable by kicad-cli. enabled=false skips it (board stays the empty stub).",
     "enabled": true,
     "require_erc_clean": true,
     "finish_board": true,
-    "_finish_board_note": "Standard-rules foundation (2026-06-22). When true (default), after generating the .kicad_pcb build_circuit chains the existing apply tools to make the board fab-ready: auto_outline_pcb (Edge.Cuts rectangle), set_design_rules (fab netclasses: clearance/track width/via per the configured fab profile), auto_zones_pcb (GND copper pour on F.Cu+B.Cu). Each step is best-effort and never breaks the build; results listed in summary.pcb.finished. Set false to leave the raw placed+netted board (no outline/rules/pour). Routing (tracks) is a separate Phase 2 step.",
+    "_finish_board_note": "Master switch for the automatic post-generation finishing pass. When true (default), after generating the .kicad_pcb build_circuit makes the board follow the full professional rule set; false leaves the raw placed+netted board (no finishing). HOW it finishes is set by finish_via_auto_layout.",
+    "finish_via_auto_layout": true,
+    "_finish_via_auto_layout_note": "Upgrade (2026-06-24). When true (default), the post-build finish delegates to the config-driven auto_layout_pcb orchestrator and runs the FULL pipeline (set_design_rules/net classes, auto_place_pcb re-place + de-collide [block/IC-anchor, NOT the dumb refdes grid pcb_gen wrote], auto_outline_pcb, auto_zones_pcb GND pour, auto_thermal_vias_pcb, auto_mounting_holes_pcb, auto_fiducials_pcb, silkscreen_cleanup_pcb, drc_autofix, pcb_verify) minus finish_skip_tools. Before this, build_circuit ran a hand-rolled 3-step subset (outline + design_rules + ground_pour) on the dumb grid — skipping placement quality, thermal, mounting, silk and DRC, so generated boards ignored most placement/finishing rules. Set false to restore that legacy 3-step finish (results in summary.pcb.finished).",
+    "finish_skip_tools": ["route_pcb_simple", "drc_autofix", "pcb_verify"],
+    "_finish_skip_tools_note": "Pipeline steps the AUTOMATIC post-build finish skips (passed as auto_layout_pcb `skip`). route_pcb_simple: the simple Manhattan router can produce imperfect traces on a dense board, and GND is on the pour, so signal routing is left to the user / FreeRouting. drc_autofix + pcb_verify (added 2026-06-24): both shell out to kicad-cli DRC, which is slow and TIMES OUT on the freshly-generated (unrouted) board — running them inside build_circuit risks overrunning the build turn and giving the chat a false 'failed' result, and DRC on an unrouted board is low-value. The fast, high-value rule steps still run (placement, outline, net classes, GND pour, thermal vias, mounting holes, fiducials, silkscreen). Run drc_check / pcb_verify / auto_layout_pcb explicitly when you want DRC. Set to [] to run the full pipeline incl. route + DRC after every build.",
     "_require_erc_clean_note": "ERC-CLEAN GATE (schematic->PCB rule, 2026-06-22). When true (default), build_circuit generates the .kicad_pcb ONLY if the schematic has zero ERC errors after the self_heal autofix loop (count from final.erc_summary.errors, or a fresh kicad-cli ERC run when that's missing). With open errors it SKIPS generation and returns summary.pcb={blocked:'erc_not_clean', erc_errors:N} so the agent tells the user to fix ERC first — pushing an error-laden schematic to PCB would copy the mistakes onto copper. Warnings do NOT block (only errors). A checker failure leaves the count unknown and generation proceeds (don't fail the board on a tool hiccup). Set false to always generate regardless of ERC.",
     "fp_lib_table": "F:/Ki_CAD/fp-lib-table",
     "_fp_lib_table_note": "fp-lib-table mapping footprint library nicknames to .pretty dirs. ${KIPRJMOD} in its URIs is substituted with kiprjmod_base; remaining ${VARS} resolve from the environment.",

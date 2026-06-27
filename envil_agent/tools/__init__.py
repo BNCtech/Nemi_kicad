@@ -35,11 +35,14 @@ from .auto_place_pcb import auto_place_pcb
 from .auto_thermal_vias_pcb import auto_thermal_vias_pcb
 from .auto_zones_pcb import auto_zones_pcb
 from .pcb_verify import pcb_verify
+from .pcb_quality import pcb_quality
+from .pcb_improve import pcb_improve
 from .route_pcb_simple import route_pcb_simple
 from .silkscreen_cleanup_pcb import silkscreen_cleanup_pcb
 from .set_track_widths_pcb import set_track_widths_pcb
 from .auto_layout_pcb import auto_layout_pcb
 from .build_circuit import build_circuit
+from .generate_pcb import generate_pcb
 from .create_project import create_project
 from .combine_sheets import combine_sheets
 from .convert_to_hierarchy import convert_to_hierarchy
@@ -52,6 +55,7 @@ from .export_docs import export_docs
 from .export_pcb import export_pcb
 from .lint_schematic import lint_schematic
 from .read_schematic import read_schematic
+from .schematic_quality import schematic_quality
 from .render_pcb_3d import render_pcb_3d
 from .set_design_rules import set_design_rules
 from .ship_design import ship_design
@@ -72,6 +76,7 @@ SCHEMATIC_TOOLS = [
     convert_to_hierarchy,
     audit_wires,
     lint_schematic,
+    schematic_quality,
     combine_sheets,
     export_bom,
 ]
@@ -95,6 +100,8 @@ PCB_TOOLS = [
     set_track_widths_pcb,
     auto_layout_pcb,
     pcb_verify,
+    pcb_quality,
+    pcb_improve,
     audit_diff_pairs,
     plan_diff_pair_routes,
 ]
@@ -103,6 +110,7 @@ PCB_TOOLS = [
 # read-only and useful regardless of which panel the user opened from).
 # Available on every page so "ship it" / "package docs" works either way.
 COMMON_TOOLS = [
+    generate_pcb,
     ship_design,
     export_docs,
 ]
@@ -132,7 +140,8 @@ def tools_for_app(app: str | None):
 __all__ = [
     "ALL_TOOLS", "SCHEMATIC_TOOLS", "PCB_TOOLS", "COMMON_TOOLS",
     "tools_for_app",
-    "read_schematic", "assess_request", "create_project", "build_circuit", "apply_ops",
+    "read_schematic", "assess_request", "create_project", "build_circuit",
+    "generate_pcb", "apply_ops",
     "erc_check", "erc_autofix", "drc_check", "drc_autofix",
     "export_pcb", "export_bom", "auto_place_pcb",
     "auto_outline_pcb", "auto_zones_pcb",
@@ -142,8 +151,8 @@ __all__ = [
     "set_design_rules",
     "route_pcb_simple", "silkscreen_cleanup_pcb", "set_track_widths_pcb",
     "auto_layout_pcb",
-    "pcb_verify",
+    "pcb_verify", "pcb_quality", "pcb_improve",
     "ship_design", "export_docs", "convert_to_hierarchy",
     "audit_wires", "audit_diff_pairs", "plan_diff_pair_routes",
-    "combine_sheets", "trace_net", "lint_schematic",
+    "combine_sheets", "trace_net", "lint_schematic", "schematic_quality",
 ]

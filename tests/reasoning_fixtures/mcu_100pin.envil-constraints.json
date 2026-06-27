@@ -1,0 +1,457 @@
+{
+  "ok": true,
+  "source": "ir",
+  "anchor": "U1",
+  "emergent_domains": [
+    "mcu_digital"
+  ],
+  "components": [
+    {
+      "ref": "U1",
+      "role": "controller",
+      "characters": [
+        "clock",
+        "comm",
+        "ground",
+        "highspeed",
+        "io",
+        "power",
+        "reset"
+      ],
+      "pins": 24,
+      "nets": [
+        "+3V3",
+        "GND",
+        "GPIO_PA0",
+        "GPIO_PB0",
+        "GPIO_PB1",
+        "I2C_SCL",
+        "I2C_SDA",
+        "LED_PA5",
+        "NRST",
+        "SENSOR_OS_INT",
+        "SWCLK",
+        "SWDIO",
+        "USB_DM",
+        "USB_DP",
+        "XTAL_IN",
+        "XTAL_OUT"
+      ],
+      "score": 86.0,
+      "constraints": {
+        "is_anchor_candidate": true,
+        "keep_close_to_shared_pin": true,
+        "max_dist_mm": 8.0,
+        "keep_away_from": [
+          "power_switch",
+          "highspeed"
+        ],
+        "min_gap_mm": 6.0,
+        "route_priority": 2,
+        "length_match": true,
+        "is_anchor": true
+      }
+    },
+    {
+      "ref": "U3",
+      "role": "controller",
+      "characters": [
+        "comm",
+        "ground",
+        "power"
+      ],
+      "pins": 8,
+      "nets": [
+        "+3V3",
+        "GND",
+        "I2C_SCL",
+        "I2C_SDA",
+        "SENSOR_OS_INT"
+      ],
+      "score": 51.0,
+      "constraints": {
+        "is_anchor_candidate": true
+      }
+    },
+    {
+      "ref": "U2",
+      "role": "regulator",
+      "characters": [
+        "ground",
+        "power",
+        "power_ctrl"
+      ],
+      "pins": 4,
+      "nets": [
+        "+3V3",
+        "GND",
+        "VIN_5V"
+      ],
+      "score": 37.0,
+      "constraints": {
+        "width_by_current": true,
+        "thermal": true
+      }
+    },
+    {
+      "ref": "Y1",
+      "role": "clock",
+      "characters": [
+        "clock",
+        "io"
+      ],
+      "pins": 2,
+      "nets": [
+        "XTAL_IN",
+        "XTAL_OUT"
+      ],
+      "score": 29.0,
+      "constraints": {
+        "keep_close_to_shared_pin": true,
+        "max_dist_mm": 8.0,
+        "keep_away_from": [
+          "power_switch",
+          "highspeed"
+        ],
+        "min_gap_mm": 6.0
+      }
+    },
+    {
+      "ref": "J3",
+      "role": "connector",
+      "characters": [
+        "ground",
+        "power",
+        "reset"
+      ],
+      "pins": 5,
+      "nets": [
+        "+3V3",
+        "GND",
+        "NRST",
+        "SWCLK",
+        "SWDIO"
+      ],
+      "score": 28.5,
+      "constraints": {}
+    },
+    {
+      "ref": "J2",
+      "role": "connector",
+      "characters": [
+        "ground",
+        "highspeed",
+        "power"
+      ],
+      "pins": 5,
+      "nets": [
+        "GND",
+        "USB_DM_CONN",
+        "USB_DP_CONN",
+        "VIN_5V"
+      ],
+      "score": 27.5,
+      "constraints": {
+        "route_priority": 2,
+        "length_match": true,
+        "keep_away_from": [
+          "power_switch"
+        ],
+        "min_gap_mm": 3.0
+      }
+    },
+    {
+      "ref": "C1",
+      "role": "decoupling",
+      "characters": [
+        "ground",
+        "power"
+      ],
+      "pins": 2,
+      "nets": [
+        "+3V3",
+        "GND"
+      ],
+      "score": 27.0,
+      "constraints": {
+        "keep_close_to_shared_pin": true,
+        "max_dist_mm": 3.0
+      }
+    },
+    {
+      "ref": "C2",
+      "role": "decoupling",
+      "characters": [
+        "ground",
+        "power"
+      ],
+      "pins": 2,
+      "nets": [
+        "+3V3",
+        "GND"
+      ],
+      "score": 27.0,
+      "constraints": {
+        "keep_close_to_shared_pin": true,
+        "max_dist_mm": 3.0
+      }
+    },
+    {
+      "ref": "C3",
+      "role": "decoupling",
+      "characters": [
+        "ground",
+        "power"
+      ],
+      "pins": 2,
+      "nets": [
+        "+3V3",
+        "GND"
+      ],
+      "score": 27.0,
+      "constraints": {
+        "keep_close_to_shared_pin": true,
+        "max_dist_mm": 3.0
+      }
+    },
+    {
+      "ref": "C4",
+      "role": "decoupling",
+      "characters": [
+        "ground",
+        "power"
+      ],
+      "pins": 2,
+      "nets": [
+        "+3V3",
+        "GND"
+      ],
+      "score": 27.0,
+      "constraints": {
+        "keep_close_to_shared_pin": true,
+        "max_dist_mm": 3.0
+      }
+    },
+    {
+      "ref": "C5",
+      "role": "decoupling",
+      "characters": [
+        "ground",
+        "power"
+      ],
+      "pins": 2,
+      "nets": [
+        "+3V3",
+        "GND"
+      ],
+      "score": 27.0,
+      "constraints": {
+        "keep_close_to_shared_pin": true,
+        "max_dist_mm": 3.0
+      }
+    },
+    {
+      "ref": "C6",
+      "role": "decoupling",
+      "characters": [
+        "ground",
+        "power"
+      ],
+      "pins": 2,
+      "nets": [
+        "GND",
+        "VIN_5V"
+      ],
+      "score": 27.0,
+      "constraints": {
+        "keep_close_to_shared_pin": true,
+        "max_dist_mm": 3.0
+      }
+    },
+    {
+      "ref": "C7",
+      "role": "decoupling",
+      "characters": [
+        "ground",
+        "power"
+      ],
+      "pins": 2,
+      "nets": [
+        "+3V3",
+        "GND"
+      ],
+      "score": 27.0,
+      "constraints": {
+        "keep_close_to_shared_pin": true,
+        "max_dist_mm": 3.0
+      }
+    },
+    {
+      "ref": "C8",
+      "role": "timing_cap",
+      "characters": [
+        "ground",
+        "power",
+        "reset"
+      ],
+      "pins": 3,
+      "nets": [
+        "+3V3",
+        "GND",
+        "NRST"
+      ],
+      "score": 23.5,
+      "constraints": {}
+    },
+    {
+      "ref": "J1",
+      "role": "connector",
+      "characters": [
+        "ground",
+        "power"
+      ],
+      "pins": 2,
+      "nets": [
+        "GND",
+        "VIN_5V"
+      ],
+      "score": 21.0,
+      "constraints": {}
+    },
+    {
+      "ref": "C9",
+      "role": "timing_cap",
+      "characters": [
+        "clock",
+        "ground",
+        "io"
+      ],
+      "pins": 2,
+      "nets": [
+        "GND",
+        "XTAL_IN"
+      ],
+      "score": 17.0,
+      "constraints": {
+        "keep_close_to_shared_pin": true,
+        "max_dist_mm": 8.0,
+        "keep_away_from": [
+          "power_switch",
+          "highspeed"
+        ],
+        "min_gap_mm": 6.0
+      }
+    },
+    {
+      "ref": "C10",
+      "role": "timing_cap",
+      "characters": [
+        "clock",
+        "ground",
+        "io"
+      ],
+      "pins": 2,
+      "nets": [
+        "GND",
+        "XTAL_OUT"
+      ],
+      "score": 17.0,
+      "constraints": {
+        "keep_close_to_shared_pin": true,
+        "max_dist_mm": 8.0,
+        "keep_away_from": [
+          "power_switch",
+          "highspeed"
+        ],
+        "min_gap_mm": 6.0
+      }
+    },
+    {
+      "ref": "R1",
+      "role": "pullup_res",
+      "characters": [
+        "power",
+        "reset"
+      ],
+      "pins": 2,
+      "nets": [
+        "+3V3",
+        "NRST"
+      ],
+      "score": 15.0,
+      "constraints": {}
+    },
+    {
+      "ref": "R4",
+      "role": "series_res",
+      "characters": [
+        "comm",
+        "power"
+      ],
+      "pins": 2,
+      "nets": [
+        "+3V3",
+        "I2C_SCL"
+      ],
+      "score": 15.0,
+      "constraints": {}
+    },
+    {
+      "ref": "R5",
+      "role": "series_res",
+      "characters": [
+        "comm",
+        "power"
+      ],
+      "pins": 2,
+      "nets": [
+        "+3V3",
+        "I2C_SDA"
+      ],
+      "score": 15.0,
+      "constraints": {}
+    },
+    {
+      "ref": "R2",
+      "role": "series_res",
+      "characters": [
+        "highspeed"
+      ],
+      "pins": 2,
+      "nets": [
+        "USB_DP",
+        "USB_DP_CONN"
+      ],
+      "score": 11.0,
+      "constraints": {
+        "route_priority": 2,
+        "length_match": true,
+        "keep_away_from": [
+          "power_switch"
+        ],
+        "min_gap_mm": 3.0
+      }
+    },
+    {
+      "ref": "R3",
+      "role": "series_res",
+      "characters": [
+        "highspeed"
+      ],
+      "pins": 2,
+      "nets": [
+        "USB_DM",
+        "USB_DM_CONN"
+      ],
+      "score": 11.0,
+      "constraints": {
+        "route_priority": 2,
+        "length_match": true,
+        "keep_away_from": [
+          "power_switch"
+        ],
+        "min_gap_mm": 3.0
+      }
+    }
+  ]
+}

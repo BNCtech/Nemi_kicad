@@ -1,0 +1,38 @@
+{
+  "_comment": "Scored dynamic schematic reviewer (tool: schematic_quality) — the SCHEMATIC counterpart of pcb_quality. READ-ONLY. It composes the two engines that already audit a .kicad_sch directly (no IR, no per-circuit knowledge): kicad-cli ERC (electrical correctness — floating pins, missing power driver, conflicting outputs) + the declarative wiring lint (config/lint_rules.json: pin-to-wire, dangling ends, junction dots, net-label-on-wire, wire-over-text, acute angles). It emits ONE card: Electrical % / Wiring % / overall score + verdict + an ordered finding list, each finding naming the EXISTING fix tool (erc_autofix / apply_ops). Nothing about any specific board is baked in — works on an NE555 blinker or a 200-part BMS identically. Disable with enabled=false.",
+  "version": 1,
+  "enabled": true,
+
+  "electrical": {
+    "_comment": "Electrical dimension = kicad-cli ERC result. Score starts at 100 and loses error_penalty per ERC error and warning_penalty per ERC warning, floored at 0. ERC is the AUTHORITATIVE electrical check (it builds the real netlist), so errors are weighted heavily. If kicad-cli is unavailable the dimension is reported n/a and DROPPED from the average (never zeroes the board).",
+    "error_penalty": 12.0,
+    "warning_penalty": 3.0,
+    "max_findings": 8,
+    "fix_tool": "erc_autofix"
+  },
+
+  "wiring": {
+    "_comment": "Wiring dimension = the declarative lint engine (the 10-point AI-generation wiring checklist). Score starts at 100 and loses error_penalty per lint error and warning_penalty per lint warning (info issues are surfaced but not scored). Lower penalties than ERC because a wiring-lint warning (e.g. a net label sitting on a wire) is cosmetic/robustness, not a guaranteed electrical fault.",
+    "error_penalty": 8.0,
+    "warning_penalty": 2.0,
+    "info_penalty": 0.0,
+    "max_findings": 8,
+    "fix_tool": "apply_ops"
+  },
+
+  "weights": {
+    "_comment": "Overall = weighted average of the dimensions that actually ran (renormalised — an n/a dimension is dropped, not zeroed). Electrical weighted higher: a real ERC error means the circuit is wrong, while wiring lint is mostly drawing quality.",
+    "Electrical": 0.65,
+    "Wiring": 0.35
+  },
+
+  "bands": [
+    [90, "EXCELLENT"],
+    [75, "GOOD"],
+    [60, "REVIEW"],
+    [0, "NEEDS WORK"]
+  ],
+  "_bands_comment": "Overall-score -> verdict label. First band whose threshold the score meets wins (descending). Same scale as pcb_quality so the two cards read consistently.",
+
+  "_part_rules_note": "Part-aware design rules (decoupling cap per VDD pin, LDO in/out caps, LED series resistor, reset pullup, CAN termination, bus pullups, sense filters …) are enforced at GENERATION time by intent/validate.py against config/design_checklist.json, where the live netlist IR is available. They are intentionally NOT re-run here: reconstructing a trustworthy netlist from an already-placed schematic would duplicate what kicad-cli ERC already does authoritatively. So 'review an existing schematic' = ERC + wiring lint; 'is my design complete' part-checks happen as the board is built."
+}

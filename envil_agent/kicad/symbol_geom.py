@@ -31,7 +31,7 @@ import sexpdata
 
 # Default symbol roots — user's kicad-sym-lib + the KiCad install (if present).
 # Override with $KICAD_SYMBOL_DIR (colon-separated paths).
-from ..settings import sym_lib_dir as _sym_lib_dir
+from ..settings import sym_lib_dir as _sym_lib_dir, envil_home as _envil_home
 
 DEFAULT_SYM_ROOTS = [
     str(_sym_lib_dir()),
@@ -40,10 +40,166 @@ DEFAULT_SYM_ROOTS = [
 ]
 
 
-def _sym_roots() -> List[Path]:
+def _has_symbols(root: Path) -> bool:
+    """A root only counts if it actually holds symbols — either the fork's
+    ``*.kicad_symdir`` folders or flat ``*.kicad_sym`` files. This is what
+    stops a path that merely *exists* (e.g. an empty KiCad install dir, or a
+    stale mount point) from being treated as a usable library."""
+    try:
+        if not root.is_dir():
+            return False
+        for _ in root.glob("*.kicad_symdir"):
+            return True
+        for _ in root.glob("*.kicad_sym"):
+            return True
+    except OSError:
+        return False
+    return False
+
+
+def _kicad_config_dirs() -> List[Path]:
+    """Per-version KiCad config dirs on this machine, newest first. Covers
+    Windows (%APPDATA%/kicad/<ver>), Linux (~/.config/kicad/<ver>) and macOS
+    (~/Library/Preferences/kicad/<ver>)."""
+    bases: List[Path] = []
+    appdata = os.environ.get("APPDATA", "").strip()
+    if appdata:
+        bases.append(Path(appdata) / "kicad")
+    home = Path.home()
+    bases.append(home / ".config" / "kicad")
+    bases.append(home / "Library" / "Preferences" / "kicad")
+    vers: List[Path] = []
+    for base in bases:
+        try:
+            if base.is_dir():
+                vers.extend(p for p in base.iterdir() if p.is_dir())
+        except OSError:
+            continue
+
+    def _key(p: Path):
+        try:
+            return tuple(int(x) for x in p.name.split("."))
+        except ValueError:
+            return (-1,)
+
+    return sorted(vers, key=_key, reverse=True)
+
+
+@lru_cache(maxsize=1)
+def _discover_config_roots() -> Tuple[str, ...]:
+    """Auto-detect the symbol library the *running KiCad app* uses — no
+    hardcoded drive. Reads each ``kicad_common.json`` for its declared
+    environment vars (e.g. the fork's ``ENVIL_LIB_ROOT`` / any
+    ``*_SYMBOL_DIR``) and expands the sibling ``sym-lib-table`` URIs, so the
+    backend resolves symbols from exactly the same place eeschema does.
+    Cached for the process; results are filtered for real symbol content by
+    the caller."""
+    import json
+    import re
+
+    found: List[str] = []
+
+    def _add(val: str, env: dict) -> None:
+        if not val:
+            return
+        env = env if isinstance(env, dict) else {}
+        # Expand ${VAR} against the app's own env block, then the OS env.
+        def _sub(m):
+            k = m.group(1)
+            return env.get(k) or os.environ.get(k) or m.group(0)
+        expanded = re.sub(r"\$\{([^}]+)\}", _sub, val)
+        if "${" in expanded:
+            return  # unresolved variable — skip
+        p = expanded.replace("\\", "/").strip()
+        if p and p not in found:
+            found.append(p)
+
+    for cfg_dir in _kicad_config_dirs():
+        env: dict = {}
+        common = cfg_dir / "kicad_common.json"
+        try:
+            if common.is_file():
+                data = json.loads(common.read_text(encoding="utf-8"))
+                raw_env = (data.get("environment") or {})
+                env = raw_env.get("vars", raw_env) if isinstance(raw_env, dict) else {}
+                if not isinstance(env, dict):
+                    env = {}
+                if isinstance(env, dict):
+                    for k, v in env.items():
+                        if isinstance(v, str) and (
+                            "SYMBOL" in k.upper() or "LIB_ROOT" in k.upper()
+                            or "SYM" in k.upper()):
+                            _add(v, env)
+        except (OSError, ValueError):
+            env = {}
+        # Expand the sym-lib-table URIs and take each library's parent dir —
+        # this is precisely the set of roots the app loads symbols from.
+        table = cfg_dir / "sym-lib-table"
+        try:
+            if table.is_file():
+                txt = table.read_text(encoding="utf-8", errors="ignore")
+                for uri in re.findall(r'\(uri\s+"([^"]+)"', txt):
+                    parent = uri.rsplit("/", 1)[0] if "/" in uri else uri
+                    _add(parent, env)
+        except OSError:
+            pass
+
+    return tuple(found)
+
+
+def _candidate_roots() -> List[str]:
+    """Ordered candidate roots (may include non-existent ones — useful for
+    diagnostics). Priority: explicit $KICAD_SYMBOL_DIR, the app's own config
+    (auto-detected), the bundled lib, then any installed KiCad share dirs."""
     raw = os.environ.get("KICAD_SYMBOL_DIR", "")
     extras = [p for p in raw.split(os.pathsep) if p.strip()] if raw else []
-    return [Path(p) for p in (extras + DEFAULT_SYM_ROOTS) if Path(p).exists()]
+    bundled = str(_envil_home() / "kicad-sym-lib")
+    out: List[str] = []
+    seen: set = set()
+    for p in extras + list(_discover_config_roots()) + [bundled] + DEFAULT_SYM_ROOTS:
+        if not p:
+            continue
+        key = os.path.normcase(os.path.normpath(p))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
+def _sym_roots() -> List[Path]:
+    """Symbol roots that actually contain symbols, in priority order. Dead
+    paths (an unmounted drive, an empty install) are dropped, and the app's
+    real library is auto-discovered — so a stale $KICAD_SYMBOL_DIR can no
+    longer silently zero out the library and make every part look 'missing'."""
+    roots = [Path(p) for p in _candidate_roots()]
+    usable = [p for p in roots if _has_symbols(p)]
+    if usable:
+        return usable
+    # Last resort: any path that at least exists, so the error message can
+    # show what was inspected rather than nothing.
+    return [p for p in roots if p.exists()]
+
+
+def library_status() -> dict:
+    """Pre-flight check: is a usable symbol library reachable on this system?
+    Returns a structured verdict the build pipeline can act on instead of
+    failing deep inside the architect loop and mis-reporting the cause."""
+    roots = _sym_roots()
+    probe: dict = {}
+    for lid in ("Device:R", "Device:C", "Device:LED"):
+        try:
+            load_symbol(lid)
+            probe[lid] = True
+        except Exception:
+            probe[lid] = False
+    ok = bool(roots) and all(probe.values())
+    return {
+        "ok": ok,
+        "roots": [str(r) for r in roots],
+        "searched": _candidate_roots(),
+        "probe": probe,
+    }
 
 
 def _head(node) -> Optional[str]:

@@ -1,0 +1,134 @@
+{
+  "_about": "Phase 1 of the Universal PCB AI Engine (PCB_AI_ARCHITECTURE.md stages 1-3+5). Drives tools/pcb_reasoning.py. Classifies each component from PIN BEHAVIOR (pin names + net names + connection graph), NOT from component-name templates, then scores criticality, picks the placement anchor, and emits per-role constraints. Every signature/weight/threshold is here -- no Python literals, no component-name lists. Signatures are substring/pattern matches on UPPERCASED pin/net names, so an unseen part classifies by behaviour. enabled=false makes the tool a no-op.",
+  "version": 1,
+  "enabled": true,
+
+  "_dynamic_doc": "The engine classifies from PIN BEHAVIOUR + NET TOPOLOGY first (anchor, emergent domain, and most roles need no catalog at all — verified by ablation). Two OPTIONAL refinements handle distinctions that pin behaviour physically cannot make: device CLASS from lib_id (TVS vs LED) and current tier from footprint PACKAGE (power vs small-signal FET). These read a part's electrical CLASS / physical PACKAGE, never its part number, and they generalise to any unseen part. Set either flag false for pure pin+topology reasoning (the engine degrades gracefully — see ablation). At PCB stage the package tier can instead be derived from real pad-copper AREA (fully geometric).",
+  "use_lib_class_hints": true,
+  "use_package_tier": true,
+
+  "_match_doc": "Token-aware matcher tuning (the engine's only algorithm constants — no component knowledge). A pattern hits a name if it is a whole token, a token prefix of >= token_prefix_min chars, or a substring of >= substring_min chars. Stops short tokens like 'IN' matching inside 'TIMING'.",
+  "_layer_recommendation_doc": "R0b: 2 vs 4 layer recommendation, derived from board SIGNALS only — part count, high-speed characters, emergent domains — never a component list. 4-layer when parts >= parts_for_4layer, OR any high-speed char is present (needs a solid reference plane), OR an emergent domain in domains_force_4layer appears. Reported as recommended_layers; advisory (does not force the stackup).",
+  "layer_recommendation": {
+    "parts_for_4layer": 60,
+    "chars_force_4layer": ["highspeed"],
+    "domains_force_4layer": []
+  },
+  "match": {"token_prefix_min": 3, "substring_min": 4},
+  "_controller_sig_doc": "A pin-behaviour 'controller' on a non-anchor part is demoted to peripheral_ic unless it shows one of these real-controller characters (its own clock or a high-speed bus). Distinguishes an MCU from an I2C sensor.",
+  "controller_signature_chars": ["clock", "highspeed"],
+  "default_criticality": 1,
+
+  "_pin_signatures_doc": "Matched as substrings against each component's UPPERCASED pin names (from IR net pins 'REF.PINNAME') and the names of the nets it touches. A component accumulates a set of 'characters' from its hits.",
+  "pin_signatures": {
+    "power":       ["VIN", "VBAT", "VBUS", "VDD", "VCC", "V+", "VSYS", "AVDD", "DVDD", "VDDA", "3V3", "5V", "12V", "VOUT", "VREG"],
+    "power_switch":["SW", "LX", "BOOST", "BST", "VSW", "PHASE", "GATE", "DRAIN", "SOURCE", "VGS", "VDS"],
+    "power_ctrl":  ["FB", "COMP", "EN", "SHDN", "SS", "ADJ", "ILIM", "CSP", "CSN", "ISENSE", "ISEN"],
+    "ground":      ["GND", "VSS", "AGND", "DGND", "PGND", "EGND", "VEE", "GND_"],
+    "clock":       ["XTAL", "XIN", "XOUT", "OSC", "OSCIN", "OSCOUT", "CLKIN", "MCLK"],
+    "highspeed":   ["USB_DP", "USB_DM", "USB_D+", "USB_D-", "DP", "DM", "CANH", "CANL", "CAN_H", "CAN_L", "TMDS", "MIPI", "TX+", "TX-", "RX+", "RX-", "REFCLK", "PCIE"],
+    "comm":        ["SCL", "SDA", "MOSI", "MISO", "SCK", "SCLK", "MModeOSI", "TXD", "RXD", "CANTX", "CANRX", "UART", "USART"],
+    "analog":      ["ADC", "AIN", "AOUT", "AREF", "VREF", "SENSE", "VSENSE", "NTC", "AN", "TEMP", "CELL", "CTRL_V", "CV", "CONTROL"],
+    "reset":       ["RST", "NRST", "RESET", "~{RST}", "MR", "POR", "MCLR"],
+    "io":          ["GPIO", "PA", "PB", "PC", "PD", "IO", "PWM", "OUT", "IN"]
+  },
+
+  "_net_signatures_doc": "Matched against UPPERCASED net names. Emergent domain hints aggregated across the whole board (outputs, not inputs).",
+  "net_signatures": {
+    "rf":          ["ANT", "RF_", "GPS", "GSM", "LORA", "RFIN", "RFOUT", "BLE"],
+    "bms_sense":   ["CELL", "VBAT", "BMS", "BAL"],
+    "motor_power": ["MOTOR", "PHASE", "OUTA", "OUTB", "VMOT", "VM"]
+  },
+
+  "_pin_only_chars_doc": "Characters that may ONLY be set from a component's own PIN names, never from the nets it touches. Being wired to a buck 'SW' node does not make an inductor/diode/resistor a switch -- only a part with its OWN GATE/DRAIN/SOURCE (or an IC's SW) pin is a switch.",
+  "pin_only_chars": ["power_switch"],
+
+  "_lib_class_hints_doc": "Device CLASS read from the KiCad lib_id category (e.g. 'Regulator_Switching', 'Transistor_FET', 'RF_GPS', 'D_TVS', 'Device:L'). This is the part's electrical class -- as legitimate a signal as its refdes prefix (C=cap) or its footprint package -- NOT a part-number template. A lib-class hit wins over the pin-behaviour role_rules. 'mosfet' is tiered to power vs small-signal by footprint (power_packages).",
+  "lib_class_hints": {
+    "regulator":        ["REGULATOR_SWITCHING", "REGULATOR_LINEAR", "REGULATOR_"],
+    "protection_diode": ["D_TVS", "_TVS", "D_ZENER"],
+    "rectifier":        ["D_SCHOTTKY", "D_RECTIFIER", "D_STANDARD"],
+    "power_inductor":   ["L", "INDUCTOR", "FERRITE", "CHOKE"],
+    "rf_module":        ["RF_GPS", "RF_MODULE", "RF_"],
+    "transceiver":      ["INTERFACE_CAN", "INTERFACE_LIN", "INTERFACE_RS", "DRIVER_"],
+    "afe":              ["BATTERY_MANAGEMENT", "AFE_"],
+    "controller":       ["MCU_", "MICROCONTROLLER", "MPU_", "FPGA_"],
+    "mosfet":           ["TRANSISTOR_FET", "Q_NMOS", "Q_PMOS", "Q_MOSFET"],
+    "bjt":              ["TRANSISTOR_BJT"]
+  },
+
+  "_power_packages_doc": "Footprint substrings that indicate a power package (carries amps, needs copper + thermal). A FET in one of these is a power_switch; otherwise it is a small_signal_switch (no width/thermal). Same idea distinguishes a buck pack-current FET from a milliamp cell-balancing FET.",
+  "power_packages": ["DPAK", "D2PAK", "TO-252", "TO-263", "TO-251", "TO-220", "TO-247", "VSON", "VSONP", "POWERPAK", "TDSON", "QFN-16-1EP"],
+  "sense_packages": ["2512", "2010", "2728"],
+
+  "_role_rules_doc": "Ordered. First matching rule sets the component role. 'pins_min'/'pins_max' bound the component pin count; 'has' requires ALL listed characters; 'any' requires ANY; 'prefix' restricts to a refdes prefix (a legitimate device-class hint, e.g. C=capacitor, not a part-name template). 'two_pin_across' = a 2-pin part bridging the two listed character classes (e.g. power+ground -> decoupling).",
+  "role_rules": [
+    {"role": "mechanical",  "prefix": ["H", "MH", "FID", "MK", "NT", "TP"]},
+    {"role": "connector",   "prefix": ["J", "P", "X", "CN"]},
+    {"role": "controller",  "pins_min": 8, "any": ["clock", "comm", "io", "highspeed"], "has": ["power", "ground"]},
+    {"role": "regulator",   "pins_min": 3, "any": ["power_ctrl"], "has": ["power"]},
+    {"role": "power_switch","any": ["power_switch"]},
+    {"role": "clock",       "prefix": ["Y", "X", "XTAL"], "any": ["clock"]},
+    {"role": "decoupling",  "prefix": ["C"], "two_pin_across": ["power", "ground"]},
+    {"role": "filter_cap",  "prefix": ["C"], "two_pin_across": ["analog", "ground"]},
+    {"role": "timing_cap",  "prefix": ["C"]},
+    {"role": "current_sense", "prefix": ["R", "RS"], "any": ["analog", "bms_sense"], "footprint_any": ["2512", "2010", "2728"]},
+    {"role": "pullup_res",  "prefix": ["R"], "two_pin_across_any": [["power", "reset"], ["power", "comm"]]},
+    {"role": "series_res",  "prefix": ["R", "RS"]},
+    {"role": "diode_led",   "prefix": ["D", "LED"]},
+    {"role": "transistor",  "prefix": ["Q", "M"]},
+    {"role": "passive",     "prefix": ["L", "FB", "FL"]}
+  ],
+
+  "_score_doc": "anchor score = sum of weighted terms. connection_count = # distinct nets touched; pin_count from footprint; criticality from criticality_class[role]; power_level = 1 if it touches a power rail. Highest score => placement anchor.",
+  "score_weights": {
+    "connection_count": 1.0,
+    "pin_count": 1.5,
+    "criticality": 6.0,
+    "power_level": 4.0
+  },
+  "criticality_class": {
+    "controller": 5, "afe": 5, "regulator": 4, "power_switch": 4, "clock": 4,
+    "highspeed": 4, "rf_module": 4,
+    "decoupling": 3, "filter_cap": 3, "transistor": 3, "peripheral_ic": 3,
+    "rectifier": 3, "power_inductor": 3, "protection_diode": 3, "current_sense": 3,
+    "transceiver": 3,
+    "comm": 2, "connector": 2, "diode_led": 2, "timing_cap": 2,
+    "small_signal_switch": 2,
+    "series_res": 1, "pullup_res": 1, "passive": 1, "bjt": 2, "mechanical": 0
+  },
+
+  "_constraint_merge_doc": "Characters whose constraints are merged onto a part IN ADDITION to its role constraints (isolation/routing needs that hold regardless of role, e.g. a series resistor on a USB pair still needs length_match). power/power_switch are deliberately EXCLUDED so a small-signal FET that merely carries a power_switch character does NOT inherit high-current width/thermal — that is decided by its role (footprint-tiered).",
+  "constraint_merge_chars": ["highspeed", "rf", "analog", "clock"],
+
+  "_constraints_doc": "Per-role placement/routing constraints emitted into the sidecar for Phase 2/3 to consume. keep_close_to_anchor: stay within max_dist_mm of the anchor pin it shares a net with. keep_away_from: min_gap_mm from components of the listed characters (noise isolation). width_by_current: route widened per ampacity (R2). keepout: reserve copper-free area. All distances in mm.",
+  "constraints": {
+    "decoupling":   {"keep_close_to_shared_pin": true, "max_dist_mm": 3.0},
+    "filter_cap":   {"keep_close_to_shared_pin": true, "max_dist_mm": 4.0, "keep_away_from": ["power_switch"], "min_gap_mm": 5.0},
+    "clock":        {"keep_close_to_shared_pin": true, "max_dist_mm": 8.0, "keep_away_from": ["power_switch", "highspeed"], "min_gap_mm": 6.0},
+    "power_switch": {"width_by_current": true, "keep_away_from": ["analog", "clock"], "min_gap_mm": 5.0, "thermal": true},
+    "regulator":    {"width_by_current": true, "thermal": true},
+    "highspeed":    {"route_priority": 2, "length_match": true, "keep_away_from": ["power_switch"], "min_gap_mm": 3.0},
+    "controller":   {"is_anchor_candidate": true},
+    "afe":          {"is_anchor_candidate": true, "keep_away_from": ["power_switch"], "min_gap_mm": 5.0},
+    "peripheral_ic": {},
+    "small_signal_switch": {},
+    "protection_diode": {"keep_close_to_shared_pin": true, "max_dist_mm": 5.0},
+    "rectifier":    {"width_by_current": true},
+    "power_inductor": {"keep_close_to_shared_pin": true, "max_dist_mm": 6.0, "width_by_current": true},
+    "current_sense": {"width_by_current": true, "keep_away_from": ["power_switch"], "min_gap_mm": 4.0},
+    "rf_module":    {"keepout": true, "edge_preferred": true, "keep_away_from": ["power_switch", "analog"], "min_gap_mm": 8.0},
+    "transceiver":  {"route_priority": 2},
+    "analog":       {"keep_away_from": ["power_switch", "motor_power"], "min_gap_mm": 6.0},
+    "rf":           {"keepout": true, "edge_preferred": true, "keep_away_from": ["power_switch", "analog"], "min_gap_mm": 8.0}
+  },
+
+  "_emergent_domains_doc": "Reported (not used as input). A board is tagged with every domain whose trigger characters appear, so a tracker can be RF+power+digital at once.",
+  "emergent_domains": {
+    "mcu_digital":   {"any_role": ["controller"], "any_char": ["clock", "highspeed", "comm"]},
+    "power_high_current": {"any_role": ["power_switch", "regulator"], "any_char": ["power_switch"]},
+    "bms":           {"any_char": ["analog"], "any_net": ["bms_sense"]},
+    "rf_comm":       {"any_net": ["rf"]},
+    "generic_small": {"fallback": true}
+  }
+}

@@ -160,6 +160,7 @@ def build_context(sch_path: Path) -> Dict[str, Any]:
     bboxes: List[Tuple[str, float, float, float, float]] = []
     pin_positions: List[Tuple[float, float, str]] = []
     pins: List[Dict[str, Any]] = []
+    values: Dict[str, str] = {}        # ref -> Value field (for SHORTED_COMPONENT 0R/DNP exempt)
     text_bboxes: List[Tuple[str, str, float, float, float, float]] = []
     wires: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
     labels: List[Tuple[str, float, float]] = []
@@ -211,6 +212,7 @@ def build_context(sch_path: Path) -> Dict[str, Any]:
                     value = _sval(c[2])
             if not ref or not lib_id:
                 continue
+            values[ref] = value
             try:
                 g = load_symbol(lib_id)
             except Exception:
@@ -366,6 +368,7 @@ def build_context(sch_path: Path) -> Dict[str, Any]:
         "bboxes": bboxes,
         "pin_positions": pin_positions,
         "pins": pins,
+        "values": values,
         "labels": labels,
         "label_names": label_names,
         "junctions": junctions,

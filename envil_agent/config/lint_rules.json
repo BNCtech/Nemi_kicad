@@ -149,6 +149,36 @@
       "params": { "tol_mm": 0.05 }
     },
     {
+      "id": "SHORTED_COMPONENT",
+      "name": "2-terminal part with both pins on one net (silent short)",
+      "selector": "find_shorted_components",
+      "severity": "error",
+      "enabled": false,
+      "_enabled_note": "Shipped 2026-06-24 default-OFF (no engine `enabled` gate before this -> rules ran unconditionally). Flip to true after run_golden.py confirms byte-stability + one visual handover. Detect-only: pairs with COLINEAR_WIRE_BRIDGE; the auto-fix (reroute) is a later, separately-gated step.",
+      "source": "R2/R3 silent-short false-green class; KiCad ERC permits a part shorted across one net (legal but non-functional) so the board passes green while dead. Must run POST-RENDER (.kicad_sch geometry), not on the IR.",
+      "fix_hint": "Both pins of the part sit on the same net, so it does nothing. Re-route so each pin lands on its own net. If the bridge is intentional, set the part to DNP or value 0R (exempt by value). Scale-free: per-part check, every threshold is a param.",
+      "params": {
+        "tol_mm": 0.05,
+        "exempt_values": ["0", "0R", "0OHM", "DNP", "NP", "NC", "DNF"],
+        "exempt_ref_prefixes": []
+      }
+    },
+    {
+      "id": "COLINEAR_WIRE_BRIDGE",
+      "name": "one wire spans both pads of a 2-pin part",
+      "selector": "find_colinear_wire_bridges",
+      "severity": "error",
+      "enabled": false,
+      "_enabled_note": "Shipped 2026-06-24 default-OFF. The geometric inverse of R2 (find_wires_piercing_bodies skips a wire touching the part's own pin -> this exact colinear stub is uncaught). Names the cause so the reroute fix is mechanical. Flip on with SHORTED_COMPONENT after golden + handover.",
+      "source": "Renderer lays a label-stub colinear with a rotated R/C body, bridging its two pins. In KiCad a pin tip on a wire mid-span bonds without a junction dot, so this geometric catch is stricter than the connectivity graph.",
+      "fix_hint": "A single wire segment lies over both pins of the part, shorting it. Split the segment into an L so it lands on only one pin; the freed pad then re-flags as PIN_UNCONNECTED for the architect to wire correctly. The durable fix is in the stub-router: never lay a segment colinear with a component body (the 'wires inside a block' rule).",
+      "params": {
+        "tol_mm": 0.05,
+        "exempt_values": ["0", "0R", "0OHM", "DNP", "NP", "NC", "DNF"],
+        "exempt_ref_prefixes": []
+      }
+    },
+    {
       "id": "R16",
       "name": "drawn wire crosses a block boundary (use a label)",
       "selector": "find_crossblock_wires",
