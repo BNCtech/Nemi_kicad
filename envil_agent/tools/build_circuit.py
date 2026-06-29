@@ -917,6 +917,11 @@ async def build_circuit(args: Dict[str, Any]) -> Dict[str, Any]:
                 final = await _graph().ainvoke(
                     initial, config={"recursion_limit": _recursion_limit})
     except Exception as exc:
+        # Log the FULL traceback so an "internal error in the tool" is diagnosable
+        # (the one-line summary below hid the actual failing line for debugging).
+        import traceback as _tb
+        _tb_str = _tb.format_exc()
+        print(f"[build_circuit] graph invocation failed:\n{_tb_str}", flush=True)
         _mark_run_failed(f"graph invocation failed: {type(exc).__name__}: {exc}")
         return {
             "content": [{"type": "text",

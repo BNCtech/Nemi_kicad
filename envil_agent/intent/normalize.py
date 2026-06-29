@@ -1807,9 +1807,17 @@ def _resolve_ic_lib_ids(ir) -> list:
         cur_part = lib_id.split(":", 1)[1]
         cur_score = _score_candidate(_tokenize_part(value), cur_part)
         if (not cur_loads) or (score > cur_score + margin):
-            warns.append(
-                f"lib_id resolved: {ref} '{value}' {lib_id} -> {best} "
-                f"(value-match {score:.2f} vs current {cur_score:.2f})")
+            # Issue DICT (matches every other normalize warning). Previously this
+            # appended a bare STRING, which crashed validate_only_node's
+            # `i["severity"]` iteration (TypeError: string indices) whenever an IC
+            # lib_id was value-matched — e.g. AMS1117.
+            warns.append({
+                "code": "LIB_ID_RESOLVED",
+                "severity": "warning",
+                "where": "normalize",
+                "text": (f"lib_id resolved: {ref} '{value}' {lib_id} -> {best} "
+                         f"(value-match {score:.2f} vs current {cur_score:.2f})"),
+            })
             comp.lib_id = best
     return warns
 
