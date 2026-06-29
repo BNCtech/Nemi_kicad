@@ -497,7 +497,9 @@ def _compose_card(name: str, report: Dict[str, Any], cfg: Dict[str, Any]) -> Tup
     # The user prefers plain words over a percentage (it reads as a grade, not
     # actionable). When show_percentage is false the card reports each dimension
     # and the overall as a verdict WORD (the band label), not a number.
-    show_pct = bool(cfg.get("show_percentage", True))
+    # Words, never a number, in the chat (user rule: no percentages). Only a
+    # board that explicitly sets show_percentage=true gets numeric scores.
+    show_pct = bool(cfg.get("show_percentage", False))
 
     lines = [f"# PCB QUALITY — {name}"]
     for d in ["Placement", "Routing", "Power Integrity", "Signal / Layers", "Manufacturing"]:

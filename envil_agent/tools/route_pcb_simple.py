@@ -573,6 +573,46 @@ def _inflate_rect(r: Tuple[float, float, float, float],
     return (r[0] - m, r[1] - m, r[2] + m, r[3] + m)
 
 
+def _edge_bbox(root: list) -> Optional[Tuple[float, float, float, float]]:
+    """Bounding box of the Edge.Cuts board outline, in board coords."""
+    xs: List[float] = []
+    ys: List[float] = []
+    for ch in root[1:]:
+        if not isinstance(ch, list):
+            continue
+        if _head(ch) not in ("gr_line", "gr_rect", "gr_poly", "gr_arc", "gr_circle"):
+            continue
+        lyr = _layer_of(ch)
+        if lyr != "Edge.Cuts":
+            continue
+        for key in ("start", "end", "center", "mid"):
+            for c in ch[1:]:
+                if isinstance(c, list) and _head(c) == key and len(c) >= 3:
+                    try:
+                        xs.append(float(c[1])); ys.append(float(c[2]))
+                    except (TypeError, ValueError):
+                        pass
+        pts = _child(ch, "pts") if "_child" in globals() else None
+    if not xs:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _edge_walls(eb: Tuple[float, float, float, float], clr: float
+                ) -> List[Tuple[float, float, float, float]]:
+    """Four obstacle rects covering the forbidden strip within ``clr`` of each
+    board edge, so any route entering it is rejected by the normal obstacle test
+    (keeps tracks off the board edge — the copper-to-edge clearance rule)."""
+    x0, y0, x1, y1 = eb
+    BIG = 1.0e6
+    return [
+        (-BIG, -BIG, x0 + clr, BIG),    # left strip
+        (x1 - clr, -BIG, BIG, BIG),     # right strip
+        (-BIG, -BIG, BIG, y0 + clr),    # top strip
+        (-BIG, y1 - clr, BIG, BIG),     # bottom strip
+    ]
+
+
 def _route_violates(route: List[Tuple[Tuple[float, float], Tuple[float, float]]],
                      seg_layer: str, half_w: float, clearance: float, nid: int,
                      raw_pad_bboxes: List[Tuple[int, Tuple[float, float, float, float]]],
@@ -1124,6 +1164,17 @@ async def route_pcb_simple(args: dict[str, Any]) -> dict[str, Any]:
                     raw_pad_bboxes.append((nid, _pad_bbox(at[0], at[1], sz, sz, 0.0)))
                     seeded_vias += 1
 
+    # ---- R2.2: keep tracks clear of the board edge (copper-to-edge clearance) ----
+    # The router was blind to Edge.Cuts, so a track could route right up to the
+    # board edge -> copper_edge_clearance DRC. Add the strip within edge_clearance
+    # of each edge as an obstacle so every routing tier avoids it. Any board, no
+    # hardcoded geometry (read from the actual outline). Gated.
+    edge_walls: List[Tuple[float, float, float, float]] = []
+    if cfg.get("edge_clearance_enabled", True):
+        _eb = _edge_bbox(root)
+        if _eb is not None:
+            edge_walls = _edge_walls(_eb, float(cfg.get("edge_clearance_mm", 0.5)))
+
     # ---- Net iteration order: priority (R11) or net-id (byte-stable default) ----
     def _net_prio(_nm: str) -> int:
         return 3
@@ -1221,6 +1272,10 @@ async def route_pcb_simple(args: dict[str, Any]) -> dict[str, Any]:
             obstacles = [bb for (other_nid, bb) in all_pad_bboxes
                          if other_nid != nid]
             back_obstacles = obstacles
+        # Board-edge keepout applies to every net, both layers.
+        if edge_walls:
+            obstacles = list(obstacles) + edge_walls
+            back_obstacles = list(back_obstacles) + edge_walls
 
         edges_routed = 0
         edges_skipped = 0

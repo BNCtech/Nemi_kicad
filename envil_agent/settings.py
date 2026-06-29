@@ -38,9 +38,29 @@ def envil_home() -> Path:
 
 
 def out_dir() -> Path:
-    """Where generated projects are written. Override with ``$ENVIL_OUT_DIR``."""
+    """Where generated projects are written.
+
+    Per-user by default: ``<home>/Documents/Anvil`` (e.g.
+    ``C:/Users/<name>/Documents/Anvil`` on Windows). This is the ONE place a
+    project should land — NOT inside the app/backend install tree. The old
+    default (``<install>/_envil_out``) put every user's projects inside the
+    shared program folder, which breaks the moment two people use the same
+    install (and pollutes the source tree). Documents is writable, per-account,
+    and the same convention KiCad itself uses for new projects.
+
+    Override priority:
+      1. ``$ENVIL_OUT_DIR``      — explicit, wins over everything.
+      2. ``<home>/Documents/Anvil`` — the per-user default.
+      3. ``<home>/Anvil``        — fallback if Documents doesn't exist
+                                    (rare; some headless / non-standard homes).
+    """
     override = os.environ.get("ENVIL_OUT_DIR", "").strip()
-    return Path(override).expanduser().resolve() if override else envil_home() / "_envil_out"
+    if override:
+        return Path(override).expanduser().resolve()
+    home = Path.home()
+    docs = home / "Documents"
+    base = docs if docs.is_dir() else home
+    return (base / "Anvil").resolve()
 
 
 def sym_lib_dir() -> Path:

@@ -173,6 +173,9 @@
     "_obstacle_inflate_comment": "Pad bbox of OTHER footprints is inflated by this much when checking whether an L-shape crosses a body. Bigger = safer but skips more routes.",
     "_clearance_aware_comment": "Root-cause fix (2026-06-25) for the simple router creating SHORTS. When true, every candidate track is rejected unless it stays (own_half_width + clearance + obstacle_half_width) away from EVERY other net — both other nets' pads AND their already-routed tracks (tracked per layer this run). Clearance is the board's real Default-netclass clearance from the .kicad_pro (dynamic, no hardcode); falls back to default_clearance_mm. A net that can't be routed within clearance is left as ratsnest, NEVER shorted. Set false for the legacy short-prone behaviour.",
     "clearance_aware": true,
+    "edge_clearance_enabled": true,
+    "edge_clearance_mm": 0.5,
+    "_edge_clearance_comment": "R2.2. Keep routed tracks at least this far from the Edge.Cuts outline (read from the ACTUAL board shape, any board) so the router never makes a copper_edge_clearance DRC error. Dynamic, no fixed geometry. false/0 disables.",
     "respect_existing_copper": true,
     "_respect_existing_copper_comment": "Root-cause fix (2026-06-26) for compose-shorts. route_pcb_simple is called repeatedly in the pipeline (route + ensure_ground_return + repair + ripup); each call previously started with an EMPTY obstacle set and was blind to the copper the earlier calls laid, so it routed over it -> shorting_items / tracks_crossing. true (default) seeds every existing segment + via on the board as an obstacle so each pass keeps clear of all prior copper (other nets); same-net copper is still free to extend. A fresh F8 board has no tracks, so first-pass routing is byte-stable. Set false only to restore the old single-pass-only behaviour.",
     "default_clearance_mm": 0.2,
@@ -359,6 +362,9 @@
     "inset_mm": 5.0,
     "pad_diameter_mm": 1.0,
     "mask_opening_mm": 2.0,
+    "min_clearance_mm": 0.5,
+    "pour_clearance_extra_mm": 0.3,
+    "_clearance_comment": "min_clearance_mm = keep each fiducial this far from existing pads (mounting holes). pour_clearance_extra_mm = extra gap added to the fiducial's mask radius so the GND pour stays outside its mask opening (kills solder_mask_bridge). The fiducial's clearance is COMPUTED from its own mask/pad size — works for any fiducial, nothing hardcoded.",
     "library_id": "Fiducial:Fiducial_1mm_Mask2mm",
     "exclude_from_pos_files": true,
     "replace_existing": true,
@@ -815,7 +821,9 @@
       "shall i build",
       "shall i go ahead",
       "should i go ahead",
-      "confirm to use the suggestion"
+      "confirm to use the suggestion",
+      "confirm the suggestion",
+      "project name?"
     ],
     "options": [
       {
@@ -1178,14 +1186,19 @@
     "enabled": true,
     "regression_guard": "on",
     "_regression_guard_note": "'on' = revert the .kicad_pcb to its pre-fix snapshot whenever a round raises the total violation count (errors+warnings). 'off' = keep whatever the fix produced (still re-checked and reported honestly).",
-    "max_rounds": 1,
-    "_max_rounds_note": "Default 1 = apply once, re-check, report. Raise (e.g. 3) for an iterate-to-plateau loop; the orchestrator passes this per call.",
+    "max_rounds": 2,
+    "_max_rounds_note": "Default 2 = apply the phase-ordered plan, re-check, and run one more pass if it strictly improved (iterate-to-plateau). Each fix is kept only if it does not raise the total (per-fix guard), so more rounds never make the board worse. Raise to 3-4 for stubborn dense boards; the orchestrator may also pass this per call.",
+    "_guard_note": "regression_guard 'on' = per-fix ERRORS-FIRST guard (snapshot -> run one fix -> re-DRC -> keep only if it did not ADD a hard error or swap in a new error-signature, else restore that fix). Warnings never block an error fix, so a re-route that clears a short but leaves a net unrouted (a warning) is still kept. This is why a clear+reroute that fails to fully reconnect can never undo the placement/pour fixes earlier in the same round. 'off' = apply every fix unchecked (fast, unsafe).",
+    "signature_regression_guard": true,
+    "_signature_guard_note": "ERC parity (mirrors erc_autofix.signature_regression_guard). When true, a fix is reverted if the error COUNT is unchanged but a brand-new error-signature (type@location) appeared — i.e. it swapped one error for a different one. When the error count DROPS the fix is accepted outright, so re-routes that move copper to new coordinates are never wrongly reverted. Set false for count-only behaviour.",
+    "_strategy_note": "Each violation TYPE dispatches to the PCB tool that actually repairs it, applied in phase order (outline -> place -> route -> pour -> silk). Routing-caused copper errors (shorting_items / clearance / copper_edge_clearance / track_dangling) clear the bad copper and re-route clearance-aware via route_pcb_simple replace=true. Add/override here without touching code; set enabled:false to leave a type report-only.",
     "strategies": {
       "invalid_outline": {
         "enabled": true,
         "action": "auto_outline_pcb"
       },
       "unconnected_item": {
+        "_comment": "Pour GND (fixes the bulk of unconnected GND pads). Unconnected SIGNAL nets are reconnected by the clear+reroute the routing-error types trigger on the same board.",
         "enabled": true,
         "action": "auto_zones_pcb",
         "args": {
@@ -1202,15 +1215,51 @@
       "lib_footprint_issues": {
         "enabled": false
       },
+      "shorting_items": {
+        "_comment": "Two nets' copper touch. Clear the shorting tracks and re-route clearance-aware (replace=true wipes the bad copper first). Guarded per-fix.",
+        "enabled": true,
+        "action": "route_pcb_simple",
+        "args": { "replace": true }
+      },
+      "tracks_crossing": {
+        "enabled": true,
+        "action": "route_pcb_simple",
+        "args": { "replace": true }
+      },
       "clearance": {
-        "_comment": "Left report-only: a clearance error caused by overlapping footprints is cleared as a SIDE EFFECT of the courtyards_overlap fix below; a track-to-track clearance error needs manual re-routing, so we never blindly move parts for it.",
-        "enabled": false
+        "_comment": "Copper-to-copper too close. A track-to-track clearance hit is fixed by a clean clearance-aware re-route; a pad-to-pad one is opened by the courtyards_overlap place-refine that runs in the earlier phase. Per-fix guard reverts if the re-route does not help.",
+        "enabled": true,
+        "action": "route_pcb_simple",
+        "args": { "replace": true }
+      },
+      "copper_edge_clearance": {
+        "_comment": "Track too close to the board edge. route_pcb_simple keeps an edge keepout; re-routing with replace=true pulls the offending track in.",
+        "enabled": true,
+        "action": "route_pcb_simple",
+        "args": { "replace": true }
+      },
+      "track_dangling": {
+        "_comment": "A track that does not reach a pad. Re-routing the net removes the stub.",
+        "enabled": true,
+        "action": "route_pcb_simple",
+        "args": { "replace": true }
+      },
+      "starved_thermal": {
+        "_comment": "A pad's thermal-relief spokes can't carry the connection. Re-pour the zones so the spokes are rebuilt.",
+        "enabled": true,
+        "action": "auto_zones_pcb"
+      },
+      "solder_mask_bridge": {
+        "_comment": "Two solder-mask openings merge. Usually adjacent parts too close -> spread them in place. Same-footprint pin bridges revert harmlessly under the guard.",
+        "enabled": true,
+        "action": "auto_place_pcb",
+        "args": { "refine_only": true }
       },
       "hole_to_hole_clearance": {
         "enabled": false
       },
       "courtyards_overlap": {
-        "_comment": "Auto-fixable: dispatches to auto_place_pcb in refine_only mode, which pushes overlapping footprint courtyards apart in place (no re-gridding). Guarded by the re-check + snapshot revert. Also resolves the clearance errors that the same overlap produced.",
+        "_comment": "Auto-fixable: dispatches to auto_place_pcb in refine_only mode, which pushes overlapping footprint courtyards apart in place (no re-gridding). Also resolves the clearance/mask errors that the same overlap produced.",
         "enabled": true,
         "action": "auto_place_pcb",
         "args": {
@@ -1218,7 +1267,7 @@
         }
       },
       "silk_overlap": {
-        "_comment": "Dispatches to silkscreen_cleanup_pcb once that tool is installed; until then it is reported only (the dispatch fails gracefully).",
+        "_comment": "Dispatches to silkscreen_cleanup_pcb to nudge the reference text clear of pads/copper.",
         "enabled": true
       }
     }

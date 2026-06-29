@@ -139,9 +139,14 @@ def _edge_bbox(root: list) -> Optional[Tuple[float, float, float, float]]:
 
 def _make_fiducial(x: float, y: float, lib_id: str,
                     pad_size_mm: float, mask_size_mm: float,
-                    exclude_from_pos: bool) -> list:
+                    exclude_from_pos: bool, pour_clearance_mm: float = 0.0) -> list:
     """Build one fiducial footprint node — SMD pad on F.Cu + F.Mask
-    opening per IPC-7351 standard. solder_mask_margin = (mask - pad)/2."""
+    opening per IPC-7351 standard. solder_mask_margin = (mask - pad)/2.
+
+    ``pour_clearance_mm`` is written as the pad's own ``clearance`` so the GND
+    copper pour keeps that distance from the fiducial — the STANDARD fix for the
+    "solder mask aperture bridges different nets" DRC (the pour must stay outside
+    the fiducial's mask opening). Fiducials are meant to be isolated copper."""
     mask_margin = max(0.0, (mask_size_mm - pad_size_mm) / 2.0)
     nodes: List[Any] = [
         sexpdata.Symbol("footprint"),
@@ -165,6 +170,8 @@ def _make_fiducial(x: float, y: float, lib_id: str,
     ]
     if mask_margin > 0:
         pad.append([sexpdata.Symbol("solder_mask_margin"), mask_margin])
+    if pour_clearance_mm > 0:
+        pad.append([sexpdata.Symbol("clearance"), round(pour_clearance_mm, 3)])
     nodes.append(pad)
     return nodes
 
@@ -183,6 +190,69 @@ def _is_fiducial(node: list, lib_id_match: str) -> bool:
 # ---------------------------------------------------------------------------
 # Tool entry
 # ---------------------------------------------------------------------------
+
+def _rot(dx: float, dy: float, deg: float) -> Tuple[float, float]:
+    if not deg:
+        return dx, dy
+    import math
+    a = math.radians(-deg)          # KiCad places CW (-deg), board Y down
+    c, s = math.cos(a), math.sin(a)
+    return c * dx - s * dy, s * dx + c * dy
+
+
+def _pad_keepouts(root: list) -> List[Tuple[float, float, float]]:
+    """(x, y, radius) keep-out circle for every existing pad on the board, in
+    board coords — radius = half the pad's larger dimension + a mask margin, so a
+    fiducial kept this far from the centre cannot bridge its solder mask."""
+    import math
+    outs: List[Tuple[float, float, float]] = []
+    for fp in root[1:]:
+        if not (isinstance(fp, list) and _head(fp) == "footprint"):
+            continue
+        fat = next((c for c in fp[1:] if isinstance(c, list) and _head(c) == "at"), None)
+        try:
+            fx, fy = float(fat[1]), float(fat[2])
+            fr = float(fat[3]) if len(fat) > 3 else 0.0
+        except (TypeError, ValueError, IndexError):
+            continue
+        for ch in fp[1:]:
+            if not (isinstance(ch, list) and _head(ch) == "pad"):
+                continue
+            pat = next((c for c in ch[1:] if isinstance(c, list) and _head(c) == "at"), None)
+            psz = next((c for c in ch[1:] if isinstance(c, list) and _head(c) == "size"), None)
+            try:
+                px, py = float(pat[1]), float(pat[2])
+                w, h = float(psz[1]), float(psz[2])
+            except (TypeError, ValueError, IndexError):
+                continue
+            dx, dy = _rot(px, py, fr)
+            outs.append((fx + dx, fy + dy, max(w, h) / 2.0))
+    return outs
+
+
+def _place_clear(x: float, y: float, keepouts: List[Tuple[float, float, float]],
+                 fid_r: float, clearance: float, cx: float, cy: float,
+                 step: float, max_steps: int) -> Tuple[float, float]:
+    """Nudge a fiducial corner candidate TOWARD the board centre until it clears
+    every existing pad's keep-out by `clearance`. Inward is safe — it moves away
+    from the corner mounting holes. Returns the first clear spot (or the best try)."""
+    import math
+    def _clear(tx: float, ty: float) -> bool:
+        for (kx, ky, kr) in keepouts:
+            if math.hypot(tx - kx, ty - ky) < (fid_r + kr + clearance):
+                return False
+        return True
+    if _clear(x, y):
+        return x, y
+    vx, vy = cx - x, cy - y
+    d = math.hypot(vx, vy) or 1.0
+    ux, uy = vx / d, vy / d
+    for i in range(1, max_steps + 1):
+        nx, ny = x + ux * step * i, y + uy * step * i
+        if _clear(nx, ny):
+            return nx, ny
+    return x + ux * step * max_steps, y + uy * step * max_steps
+
 
 @tool(
     name="auto_fiducials_pcb",
@@ -274,10 +344,25 @@ async def auto_fiducials_pcb(args: dict[str, Any]) -> dict[str, Any]:
     else:
         positions = [bl]
 
+    # Keep each fiducial clear of every existing pad (mounting holes especially)
+    # so its solder-mask opening can't bridge them — the root cause of the
+    # solder_mask_bridge DRC errors. Dynamic: a clearance search, no hardcoded
+    # positions. clearance from config (min_clearance_mm).
+    keepouts = _pad_keepouts(root)
+    clr = float(args.get("min_clearance_mm", cfg.get("min_clearance_mm", 0.5)))
+    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    fid_r = mask_d / 2.0
+    # Pad clearance that keeps the GND pour OUTSIDE the fiducial's mask opening:
+    # mask extends (mask-pad)/2 past the pad edge; add a mask gap so the pour's
+    # copper is clear of the opening (kills the solder_mask_bridge DRC). Dynamic
+    # from the fiducial's own geometry — works for any pad/mask size.
+    pour_clr = (mask_d - pad_d) / 2.0 + float(cfg.get("pour_clearance_extra_mm", 0.3))
     for (x, y) in positions:
+        x, y = _place_clear(x, y, keepouts, fid_r, clr, cx, cy,
+                            step=0.5, max_steps=40)
         x = round(x / 0.01) * 0.01
         y = round(y / 0.01) * 0.01
-        root.append(_make_fiducial(x, y, lib_id, pad_d, mask_d, exclude))
+        root.append(_make_fiducial(x, y, lib_id, pad_d, mask_d, exclude, pour_clr))
 
     try:
         pcb_path.write_text(_emit(root), encoding="utf-8")

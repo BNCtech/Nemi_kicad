@@ -148,15 +148,14 @@ async def pcb_improve(args: dict[str, Any]) -> dict[str, Any]:
                 continue
             new, _ = await _score(pcb_path, loop_skip_drc)
             if new is not None and new >= current + eps:
-                log.append(f"pass{p+1} {t}: {current:.0f}% → {new:.0f}%  (kept)")
+                log.append(f"  {t}: helped")
                 current = new
                 applied.append({"tool": t, "score": round(new, 1)})
                 improved = True
             else:
                 # GUARD: regression or no gain — revert this fix
                 pcb_path.write_text(snapshot, encoding="utf-8")
-                shown = f"{new:.0f}%" if new is not None else "n/a"
-                log.append(f"pass{p+1} {t}: {current:.0f}% → {shown}  (reverted)")
+                log.append(f"  {t}: did not help (undone)")
         if not improved:
             break
 
@@ -167,16 +166,24 @@ async def pcb_improve(args: dict[str, Any]) -> dict[str, Any]:
     verdict_bands = [(float(t), str(l)) for t, l in cfg.get("bands", [
         [90, "EXCELLENT"], [75, "GOOD"], [60, "REVIEW"], [0, "NEEDS WORK"],
     ])]
-    lines = [f"# PCB IMPROVE — {pcb_path.name}",
-             f"  Before: {baseline:.0f}%",
-             f"  After:  {final:.0f}% — {band_for(final, verdict_bands)}"]
-    delta = final - baseline
-    lines.append(f"  Gain:   {'+' if delta >= 0 else ''}{delta:.0f}%")
+    # Words, not numbers (feedback_no_percentage_scores). Show % only if the
+    # board explicitly turns show_percentage on.
+    show_pct = bool(cfg.get("show_percentage", False))
+    before_band = band_for(baseline, verdict_bands)
+    after_band = band_for(final, verdict_bands)
+    if show_pct:
+        lines = [f"# PCB IMPROVE — {pcb_path.name}",
+                 f"  Before: {baseline:.0f}% ({before_band})",
+                 f"  After:  {final:.0f}% ({after_band})"]
+    else:
+        lines = [f"# PCB IMPROVE — {pcb_path.name}",
+                 f"  Was: {before_band}",
+                 f"  Now: {after_band}"]
     lines.append("")
     if applied:
-        lines.append("  Applied:")
+        lines.append("  Fixed:")
         for a in applied:
-            lines.append(f"    ✓ {a['tool']} → {a['score']:.0f}%")
+            lines.append(f"    - {a['tool']}")
     else:
         lines.append("  No fix improved the score (already optimal for the "
                      "available tools, or board needs manual work).")
@@ -189,6 +196,7 @@ async def pcb_improve(args: dict[str, Any]) -> dict[str, Any]:
     return {
         "content": [{"type": "text", "text": "\n".join(lines)}],
         "ok": True,
+        "path": str(pcb_path),          # so the server captures it -> live PCB reload
         "pcb_path": str(pcb_path),
         "before": round(baseline, 1),
         "after": round(final, 1),

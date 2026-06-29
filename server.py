@@ -533,6 +533,95 @@ async def ws_chat(ws: WebSocket):
                                           "session_id": session_id})
                 continue
 
+            if kind == "export_gerbers":
+                # One-click "Download Gerbers" button. Runs DRC (honest gate)
+                # then export_pcb (gerbers + drill + pick&place + zip) WITHOUT
+                # the LLM — deterministic, instant, zero tokens. Emits
+                # `gerbers_ready` so the chat shows an "Open Folder" button.
+                # Universal: works on any .kicad_pcb, all flags from
+                # layout_config.json:pcb_export — no per-circuit logic here.
+                pf2 = (msg.get("pcb_file") or pcb_path or "").strip()
+                if not pf2 and schematic_path and schematic_path.endswith(".kicad_sch"):
+                    pf2 = schematic_path[:-len(".kicad_sch")] + ".kicad_pcb"
+                if not (pf2 and Path(pf2).exists()):
+                    await ws.send_json({"kind": "error",
+                                          "text": "No PCB file found yet — build a "
+                                                  "circuit first, then I can make the "
+                                                  "Gerber files.",
+                                          "session_id": session_id})
+                    continue
+                await ws.send_json({"kind": "status",
+                                      "text": "Making the Gerber files…",
+                                      "session_id": session_id})
+                try:
+                    from envil_agent.tools._pcb_sexpr import (
+                        dispatch_tool as _dispatch_gerber)
+                    # Honest DRC gate — never present the board as ready to
+                    # order if it still has rule violations. -1 = couldn't run.
+                    _drc_errors = -1
+                    try:
+                        _drc = await _dispatch_gerber("drc_check",
+                                                       {"pcb_path": pf2})
+                        if not _drc.get("is_error"):
+                            _drc_errors = int(_drc.get("error_count", -1))
+                    except Exception:
+                        _drc_errors = -1
+                    _exp = await _dispatch_gerber("export_pcb",
+                                                   {"pcb_path": pf2, "zip": True})
+                    if _exp.get("is_error") or not _exp.get("ok"):
+                        await ws.send_json({"kind": "error",
+                                              "text": "Could not make the Gerber "
+                                                      "files automatically. Open the "
+                                                      "board in KiCad and use "
+                                                      "File → Fabrication Outputs "
+                                                      "→ Gerbers.",
+                                              "session_id": session_id})
+                        continue
+                    await ws.send_json({
+                        "kind": "gerbers_ready",
+                        "zip_path": _exp.get("zip_path", ""),
+                        "output_dir": _exp.get("output_dir", ""),
+                        "files": _exp.get("files", []),
+                        "drc_errors": _drc_errors,
+                        "drc_clean": (_drc_errors == 0),
+                        "session_id": session_id,
+                    })
+                    print(f"[export_gerbers] {pf2} -> "
+                          f"{_exp.get('zip_path','')} drc_errors={_drc_errors}",
+                          flush=True)
+                except Exception as _ge:
+                    print(f"[export_gerbers] failed: {_ge}", flush=True)
+                    await ws.send_json({"kind": "error",
+                                          "text": "Could not make the Gerber files.",
+                                          "session_id": session_id})
+                continue
+
+            if kind == "open_path":
+                # "Open Folder" button: reveal the gerbers folder in the OS
+                # file manager so the user can drag the zip to the fab house.
+                # Local desktop app — the path is a folder the backend itself
+                # just wrote next to the user's project.
+                _op = (msg.get("path") or "").strip()
+                try:
+                    if _op and Path(_op).exists():
+                        try:
+                            os.startfile(_op)            # Windows: open folder
+                        except AttributeError:
+                            import subprocess as _sp
+                            _opener = ("open" if sys.platform == "darwin"
+                                       else "xdg-open")
+                            _sp.Popen([_opener, _op])
+                        await ws.send_json({"kind": "status",
+                                              "text": "Opened the folder.",
+                                              "session_id": session_id})
+                    else:
+                        await ws.send_json({"kind": "error",
+                                              "text": "That folder no longer exists.",
+                                              "session_id": session_id})
+                except Exception as _oe:
+                    print(f"[open_path] failed: {_oe}", flush=True)
+                continue
+
             if kind == "message":
                 sf = msg.get("schematic_file") or ""
                 pf = msg.get("pcb_file") or ""
@@ -1016,6 +1105,29 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
                     # reload at turn end, the same way eeschema does for .kicad_sch.
                     elif p and p.lower().endswith(".kicad_pcb"):
                         generated_pcb_path = p
+                    # Some PCB tools (pcb_improve / "Fix all", pcb_quality) return
+                    # the board under "pcb_path", NOT "path" — so the capture above
+                    # missed them and the open PCB editor never got a reload after
+                    # a fix. Capture "pcb_path" too so EVERY board-touching tool
+                    # triggers the turn-end pcbnew revert.
+                    pp = event.tool_result.get("pcb_path") or ""
+                    if pp and pp.lower().endswith(".kicad_pcb"):
+                        generated_pcb_path = pp
+                    # Fab bundle: when export_pcb / ship_design produce a
+                    # Gerber zip, surface the same "Open Folder" card the
+                    # one-click button uses — so the natural-language path
+                    # ("download the gerbers") gets the folder shortcut too.
+                    _zp = event.tool_result.get("zip_path") or ""
+                    if _zp and _zp.lower().endswith(".zip"):
+                        await ws.send_json({
+                            "kind": "gerbers_ready",
+                            "zip_path": _zp,
+                            "output_dir": event.tool_result.get("output_dir", ""),
+                            "files": event.tool_result.get("files", []),
+                            "drc_errors": -1,
+                            "drc_clean": False,
+                            "session_id": session_id,
+                        })
                     cps = event.tool_result.get("child_paths") or []
                     if isinstance(cps, list):
                         for cp in cps:
