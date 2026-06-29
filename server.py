@@ -263,6 +263,27 @@ async def _ipc_handle(reader: asyncio.StreamReader,
         print(f"[IPC] eeschema disconnected: {addr}", flush=True)
 
 
+def _user_state_dir() -> Path:
+    """Per-user, install-location-independent state dir, IDENTICAL to the path the
+    shell resolves first in TryConnectAiIpc() (kicad_manager_frame.cpp):
+        Windows : %LOCALAPPDATA%\\orchestrator
+        macOS   : ~/Library/Application Support/orchestrator
+        Linux   : $XDG_STATE_HOME/orchestrator  (else ~/.local/state/orchestrator)
+    The dev tree and the exe share a folder, so the old <src>/ipc_port.txt happened
+    to be found on this machine — but on a shared/installed copy the exe lives
+    elsewhere and never sees it, so the shell falls back to a dead port and the
+    'open this project in the tree' command never arrives. Writing here too makes
+    discovery work on every machine regardless of where the exe/backend live."""
+    import sys
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA", "").strip() or str(Path.home() / "AppData" / "Local")
+    elif sys.platform == "darwin":
+        base = str(Path.home() / "Library" / "Application Support")
+    else:
+        base = os.environ.get("XDG_STATE_HOME", "").strip() or str(Path.home() / ".local" / "state")
+    return Path(base) / "orchestrator"
+
+
 async def _start_ipc() -> int:
     pinned = os.environ.get("IPC_PORT", "52344").strip()
     try:
@@ -272,8 +293,16 @@ async def _start_ipc() -> int:
     server = await asyncio.start_server(
         _ipc_handle, "127.0.0.1", port, reuse_address=True,
     )
-    # Write the port for the eeschema plugin to discover
+    # Write the port for the eeschema plugin AND the shell to discover. The
+    # per-user state dir is what the shell reads FIRST and is the only one that is
+    # the same on a shared/installed copy as on the dev machine.
+    _state_dir = _user_state_dir()
+    try:
+        _state_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
     port_files = [
+        _state_dir / "ipc_port.txt",
         Path(tempfile.gettempdir()) / "envil_ipc_port.txt",
         Path(__file__).resolve().parent / "ipc_port.txt",
     ]
