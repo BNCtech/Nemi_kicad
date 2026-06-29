@@ -595,10 +595,18 @@ def _target_root() -> Path:
 
 
 def _refresh_caches() -> None:
-    """Drop the lru_caches so the new symbol resolves without a restart."""
+    """Drop the lru_caches so the new symbol resolves without a restart.
+
+    All THREE resolution caches must be cleared, not just load_symbol:
+    ``_all_symbols`` is the flat index the value-keyed resolver scans, and
+    ``resolve_lib_id_by_value`` is itself memoized (maxsize=2048) — and the
+    RETRIEVE step above already called it for this part and cached a
+    '(None) not found' miss. Without clearing it, the architect's value-keyed
+    lookup keeps returning that stale miss even though the symbol now exists,
+    so the just-created part still looks missing on the next build."""
     try:
         from ..kicad import symbol_geom as sg
-        for fn in ("load_symbol", "_all_symbols"):
+        for fn in ("load_symbol", "_all_symbols", "resolve_lib_id_by_value"):
             obj = getattr(sg, fn, None)
             if obj is not None and hasattr(obj, "cache_clear"):
                 obj.cache_clear()
