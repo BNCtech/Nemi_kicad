@@ -46,6 +46,7 @@ from .generate_pcb import generate_pcb
 from .create_project import create_project
 from .combine_sheets import combine_sheets
 from .convert_to_hierarchy import convert_to_hierarchy
+from .create_symbol import create_symbol
 from .drc_autofix import drc_autofix
 from .drc_check import drc_check
 from .erc_autofix import erc_autofix
@@ -68,6 +69,7 @@ SCHEMATIC_TOOLS = [
     read_schematic,
     assess_request,
     create_project,
+    create_symbol,
     build_circuit,
     apply_ops,
     erc_check,
@@ -140,8 +142,8 @@ def tools_for_app(app: str | None):
 __all__ = [
     "ALL_TOOLS", "SCHEMATIC_TOOLS", "PCB_TOOLS", "COMMON_TOOLS",
     "tools_for_app",
-    "read_schematic", "assess_request", "create_project", "build_circuit",
-    "generate_pcb", "apply_ops",
+    "read_schematic", "assess_request", "create_project", "create_symbol",
+    "build_circuit", "generate_pcb", "apply_ops",
     "erc_check", "erc_autofix", "drc_check", "drc_autofix",
     "export_pcb", "export_bom", "auto_place_pcb",
     "auto_outline_pcb", "auto_zones_pcb",
