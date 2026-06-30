@@ -56,6 +56,9 @@ from .render_pcb_3d import render_pcb_3d
 from .set_design_rules import set_design_rules
 from .ship_design import ship_design
 from .trace_net import trace_net
+from .edit_symbol import edit_symbol
+from .create_footprint import create_footprint
+from .create_component import create_component
 
 # Schematic-side tools — every verb here reads or edits a .kicad_sch.
 # Running these from pcbnew makes no sense (the user is not looking at
@@ -74,6 +77,9 @@ SCHEMATIC_TOOLS = [
     lint_schematic,
     combine_sheets,
     export_bom,
+    edit_symbol,
+    create_footprint,
+    create_component,
 ]
 
 # PCB-side tools — every verb here reads or edits a .kicad_pcb. Running
@@ -146,4 +152,7 @@ __all__ = [
     "ship_design", "export_docs", "convert_to_hierarchy",
     "audit_wires", "audit_diff_pairs", "plan_diff_pair_routes",
     "combine_sheets", "trace_net", "lint_schematic",
+    "edit_symbol",
+    "create_footprint",
+    "create_component",
 ]

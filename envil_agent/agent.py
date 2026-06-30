@@ -74,6 +74,9 @@ _TOOL_RUN_LABEL = {
     "apply_ops": "Apply Operation",
     "erc_autofix": "ERC Auto-fix",
     "erc_check": "ERC Check",
+    "edit_symbol": "Edit Symbol",
+    "create_footprint": "Create Footprint",
+    "create_component": "Create Component",
     "read_schematic": "Read Schematic",
     "read_pcb": "Read PCB",
     "route_pcb": "PCB Routing",
@@ -507,6 +510,85 @@ Force a preview when the user explicitly asks: "preview first" /
     any count not present in the tool output. If the tool failed
     to re-run ERC (e.g. kicad-cli timed out), say "I couldn't
     verify the new error count" rather than inventing one.
+
+2b0. EDIT SYMBOL — call edit_symbol when the user wants to modify a
+    symbol in the local .kicad_sym library (not a schematic component
+    instance). This is a LIBRARY-LEVEL change that persists across every
+    future schematic that uses the part.
+    Triggers: "rename pin N in <part>", "change pin type for <part>",
+    "add a pin to <part>", "remove pin N from <part>",
+    "set MPN / Datasheet / Description for <part>",
+    "edit the <part> symbol", "fix the <part> library symbol".
+    Args:
+      {"lib_id": "<LibNick>:<PartName>",   # e.g. "Timer:NE555"
+       "ops": [                             # one or more ops in order
+         {"op": "rename_pin",       "number": "1",  "new_name": "PGND"},
+         {"op": "change_pin_etype", "number": "2",  "etype": "power_in"},
+         {"op": "set_property",     "key": "MPN",   "value": "LM555CN"},
+         {"op": "add_pin",    "number": "9", "name": "NC",
+          "etype": "no_connect", "x": 0, "y": -7.62, "rot": 270},
+         {"op": "remove_pin",       "number": "9"},
+         {"op": "move_pin",         "number": "3",
+          "x": 5.08, "y": 0.0, "rot": 180},
+         {"op": "rename_pin_number","old_number":"3","new_number":"9"},
+         {"op": "change_pin_length","number":"3","length":2.54}
+       ]}
+    The tool writes the .kicad_sym file directly and clears the symbol
+    cache. After it returns, report which ops succeeded or failed.
+
+2b1. CREATE FOOTPRINT — call create_footprint when the user wants to
+    generate a PCB footprint (.kicad_mod) for a component in the local
+    symbol library. The tool reads the symbol's Datasheet URL, sends the
+    PDF to Claude, extracts package dimensions (pitch, pad size, body
+    outline, courtyard), then generates and saves the .kicad_mod file.
+    It also updates the symbol's Footprint property automatically.
+    Triggers: "create footprint for <part>", "generate footprint",
+    "make PCB footprint for <part>", "draw footprint",
+    "I need the footprint too", "footprint pannu" (Tanglish).
+    Args:
+      {"lib_id":        "<LibNick>:<PartName>",  # e.g. "Timer:NE555"
+       "fp_lib_nick":   "<nick>",  # optional, defaults to symbol lib nick
+       "fp_name":       "<name>",  # optional, defaults to part name
+       "datasheet_url": "<url>"}   # optional, read from symbol if empty
+    The tool generates the .kicad_mod and saves it to
+      fp_lib_dir()/<fp_lib_nick>.pretty/<fp_name>.kicad_mod
+    Supported packages: DIP, SIP (THT); SOIC, TSSOP, SSOP, MSOP (SMD 2-row);
+    SOT-23 (3/5/6 pin); QFP, TQFP, LQFP (4-side SMD); QFN, DFN (no-lead SMD).
+    Pre-condition: the symbol MUST have a valid Datasheet URL set
+    (use edit_symbol with op=set_property, key=Datasheet if missing).
+    After it returns, confirm the file path and package type to the user.
+
+2b2. CREATE COMPONENT — call create_component when the user wants to create
+    a brand-new part that does NOT yet exist in the KiCad standard library.
+    This is a ONE-SHOT tool: reads the datasheet ONCE, then:
+      (1) generates a schematic symbol with all pins correctly typed,
+      (2) generates a PCB footprint with correct pads + courtyard,
+      (3) links Footprint, Datasheet, MPN, Manufacturer, Description on the symbol,
+      (4) registers both libraries in sym-lib-table and fp-lib-table.
+    Triggers: "create symbol for <part>", "add new component <part>",
+    "add <part> to my library", "I need a KiCad symbol for <part>",
+    "create part <part> from datasheet", "new component pannu" (Tanglish),
+    "create symbol and footprint for <part>".
+
+    DATASHEET URL — NEVER ask the user for it. If not provided:
+      1. Call WebSearch with query "<part_number> datasheet filetype:pdf site:mouser.com OR site:digikey.com OR site:ti.com OR site:trinamic.com OR site:analog.com"
+      2. Pick the first result that is a direct .pdf URL (contains ".pdf" in the URL).
+      3. If no PDF URL found in results, try WebSearch "<part_number> datasheet PDF download"
+         and pick the first .pdf link.
+      4. Pass that URL as datasheet_url. Do this silently — do NOT ask the user first.
+    If after two searches still no PDF URL is found, THEN tell the user:
+      "I couldn't auto-locate the <part> datasheet PDF. Please share a direct
+       PDF link (e.g. from Mouser/Digikey/manufacturer site) and I'll create
+       the symbol immediately."
+
+    Args:
+      {"lib_id":        "Custom:PartName",  # default nick is Custom
+       "datasheet_url": "<direct PDF link>"}
+    Do NOT use edit_symbol + create_footprint separately for brand-NEW parts
+    — always prefer create_component which does both in one datasheet fetch.
+    After it returns, tell the user to reload KiCad libraries
+    (close + reopen KiCad, or Preferences > Manage Libraries > OK)
+    so the new symbol appears under the Custom library ready to place.
 
 2b3. AUDIT WIRES — call audit_wires when the user asks to check for
     body-piercing wires / verify wire routing follows the professional

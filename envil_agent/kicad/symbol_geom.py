@@ -33,11 +33,20 @@ import sexpdata
 # Override with $KICAD_SYMBOL_DIR (colon-separated paths).
 from ..settings import sym_lib_dir as _sym_lib_dir
 
-DEFAULT_SYM_ROOTS = [
-    str(_sym_lib_dir()),
-    "C:/Program Files/KiCad/9.0/share/kicad/symbols",
-    "C:/Program Files/KiCad/8.0/share/kicad/symbols",
-]
+def _kicad_user_sym_dirs() -> list:
+    """KiCad per-user symbol dirs (Documents/KiCad/<ver>/symbols) for versions 7-10."""
+    from pathlib import Path as _P
+    base = _P.home() / "Documents" / "KiCad"
+    return [str(base / v / "symbols") for v in ("10.0", "9.0", "8.0", "7.0")]
+
+DEFAULT_SYM_ROOTS = (
+    [str(_sym_lib_dir())]
+    + _kicad_user_sym_dirs()
+    + [
+        "C:/Program Files/KiCad/9.0/share/kicad/symbols",
+        "C:/Program Files/KiCad/8.0/share/kicad/symbols",
+    ]
+)
 
 
 def _sym_roots() -> List[Path]:
