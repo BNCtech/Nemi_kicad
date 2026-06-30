@@ -132,10 +132,13 @@ def _parse_netlist(text: str, fallback_name: str) -> Optional[TopologyIR]:
                       components=components, nets=nets)
 
 
-async def schematic_to_ir(sch_path: str, timeout: float = 60.0
-                          ) -> Optional[TopologyIR]:
-    """Run kicad-cli on a temp copy of the schematic and parse the netlist into
-    a TopologyIR. Returns None on any failure (missing cli, locked, parse)."""
+async def _run_netlist_text(sch_path: str, timeout: float = 60.0
+                            ) -> Optional[str]:
+    """Run `kicad-cli sch export netlist` on a throwaway copy of the project and
+    return the raw kicadsexpr netlist text (None on any failure). Shared by
+    `schematic_to_ir` and the net-role classifier so there is ONE netlister
+    invocation policy + lock-dodge. Copies the whole project to a temp dir first
+    so it works while the original is open/locked in KiCad."""
     sch = Path(sch_path)
     if not sch.exists() or sch.suffix.lower() != ".kicad_sch":
         return None
@@ -145,8 +148,6 @@ async def schematic_to_ir(sch_path: str, timeout: float = 60.0
 
     tmpdir = Path(tempfile.mkdtemp(prefix="envil_netlist_"))
     try:
-        # Copy the whole project so hierarchical sheets resolve, then run on the
-        # copy (works while the original is open/locked in KiCad).
         for pat in ("*.kicad_sch", "*.kicad_pro"):
             for f in sch.parent.glob(pat):
                 shutil.copy2(f, tmpdir / f.name)
@@ -170,7 +171,16 @@ async def schematic_to_ir(sch_path: str, timeout: float = 60.0
             return None
         if not out.exists():
             return None
-        return _parse_netlist(out.read_text(encoding="utf-8", errors="replace"),
-                              sch.stem)
+        return out.read_text(encoding="utf-8", errors="replace")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+async def schematic_to_ir(sch_path: str, timeout: float = 60.0
+                          ) -> Optional[TopologyIR]:
+    """Run kicad-cli on a temp copy of the schematic and parse the netlist into
+    a TopologyIR. Returns None on any failure (missing cli, locked, parse)."""
+    text = await _run_netlist_text(sch_path, timeout)
+    if not text:
+        return None
+    return _parse_netlist(text, Path(sch_path).stem)

@@ -45,6 +45,15 @@ except ImportError:
     ToolResultBlock = None  # type: ignore
     UserMessage = None      # type: ignore
 
+# Extended-thinking content block (the model's streamed reasoning). Optional —
+# only present on SDK builds that support adaptive/extended thinking, so import
+# defensively. None on older SDKs => the run_turn handler below is skipped and
+# behaviour is byte-identical to before.
+try:
+    from claude_agent_sdk import ThinkingBlock
+except ImportError:
+    ThinkingBlock = None    # type: ignore
+
 # LangSmith tracing — driven by LANGCHAIN_* env vars in .env. The decorator
 # is a no-op when langsmith isn't installed or LANGCHAIN_TRACING_V2 is unset,
 # so the import is safe in every environment.
@@ -72,6 +81,7 @@ except ImportError:
 _TOOL_RUN_LABEL = {
     "build_circuit": "Circuit Design",
     "generate_pcb": "Generate PCB",
+    "update_pcb": "Update PCB (F8)",
     "apply_ops": "Apply Operation",
     "erc_autofix": "ERC Auto-fix",
     "erc_check": "ERC Check",
@@ -810,6 +820,26 @@ Force a preview when the user explicitly asks: "preview first" /
     so user can revert). After calling, suggest re-running drc_check
     so the user sees DRC against the new rules.
 
+2u. USER'S OWN DESIGN RULES — Envil ships default rules (IPC + fab), but
+    EACH USER can add their own on top, and you ANALYSE what they say.
+    Whenever the user states a fab/standard/policy preference, call
+    add_design_rule with the rule analysed into structured fields.
+    Triggers: "my fab min trace is 0.2mm", "always keep mains 8mm apart",
+    "I use JLCPCB 4-layer", "no via under the BGA", "use green soldermask",
+    "set my rule …", "remember my preference …", "our company standard is …".
+    Decide the `kind`: override (a numeric param like min_track_width_mm),
+    directive (a conditional/spatial rule -> KiCad .kicad_dru, give a
+    `condition` + `constraint`), selection (fab_profile / stackup_profile /
+    acceptance_class / copper_weight), or preference (a non-DRC note).
+    Always pass `text` = the user's exact words; pass `project_path` and
+    `scope` ('project' for this board only, else 'user' for all their boards).
+    If the tool returns a `warning` (the rule is LOOSER than the IPC/fab
+    floor) you MUST surface that warning to the user — it is applied anyway
+    (warn-but-allow), but they must know the board may fail DRC/fab.
+    The saved rules take effect the next time set_design_rules runs (it
+    layers user+project rules over the fab defaults, project winning).
+    Use list_design_rules to show active rules, remove_design_rule to delete.
+
 2f. PCB DRC — call drc_check tool when the user asks to verify the
     PCB (Design Rules Check, clearance check, drc errors, find PCB
     issues, fab-readiness check).
@@ -921,18 +951,33 @@ Force a preview when the user explicitly asks: "preview first" /
     (U/Q/D/J/R/C/L) and lays out a grid. Run AFTER F8 (Update PCB)
     not before — empty PCBs have nothing to place.
 
-2f. GENERATE PCB (schematic -> board) — call generate_pcb tool to
-    populate an EMPTY .kicad_pcb from the schematic and run the full
-    layout finish. THIS IS THE AI's OWN "F8": NEVER tell the user to
-    press F8 / "Update PCB from Schematic" — call generate_pcb instead.
-    Call it when:
+2f. PUSH SCHEMATIC -> PCB. There are TWO tools, and picking the right one
+    is critical — they produce DIFFERENT boards:
+
+    * update_pcb = KiCad's NATIVE "Update PCB from Schematic" (the real F8).
+      Incremental ECO sync: adds/removes/updates footprints + nets while
+      PRESERVING the user's existing placement, routing and zones. This is
+      what the user gets pressing F8. USE update_pcb whenever the user says
+      "update the PCB", "push to PCB", "sync the board", or after you edit an
+      EXISTING / hand-drawn board. Never regenerate a board the user already
+      laid out — that throws away their work.
+
+    * generate_pcb = regenerate from scratch + AUTO-PLACE everything + full
+      finish (outline, GND pour, vias…). Correct ONLY for an EMPTY board's
+      first population. Use generate_pcb when:
       - build_circuit reported the PCB was blocked ("erc_not_clean") and
         ERC is NOW clean (you just ran erc_autofix / fixed it), OR
       - the user asks to lay out / score a board whose .kicad_pcb is
         empty (0 footprints) but the schematic is built, OR
-      - the user says "update the PCB", "push to PCB", "generate the board".
-    PATH — CRITICAL: use the path ALREADY in this turn's context. Pass
-    {"sch_path": <the 'Working schematic:' header path>}. If only a
+      - the user explicitly asks to "generate the board" / "auto-lay-out
+        from scratch" (a fresh layout, not an update).
+    DECISION RULE: if the .kicad_pcb already has footprints -> update_pcb
+    (preserve the layout). If it is empty / brand-new -> generate_pcb. When
+    the user says "update PCB from schematic" / "press F8" / "sync", that is
+    ALWAYS update_pcb. NEVER tell the user to press F8 themselves — call the
+    tool.
+    PATH — CRITICAL (BOTH tools): use the path ALREADY in this turn's context.
+    Pass {"sch_path": <the 'Working schematic:' header path>}. If only a
     'Working PCB:' header is present, pass that .kicad_pcb path (the tool
     derives the sibling .kicad_sch). NEVER ask the user "what is the full
     path?" — the open file's path is in the Working header / snapshot above,
@@ -1007,8 +1052,9 @@ DEFAULT_MODEL = (
 class TurnEvent:
     """One streamable event from an agent turn.
 
-    kind: 'text' for streamed prose, 'tool_use' for a tool invocation,
-    'tool_result' for the tool's reply, 'end' when the turn finishes.
+    kind: 'thinking' for streamed reasoning, 'text' for streamed prose,
+    'tool_use' for a tool invocation, 'tool_result' for the tool's reply,
+    'end' when the turn finishes.
     """
     kind: str
     text: str = ""
@@ -1309,9 +1355,11 @@ The gated steps, in order:
   1. After build_circuit returns (schematic built; its `pcb` is `deferred`):
      report ERC briefly (e.g. "Schematic built, ERC clean.") and ask:
        "Update the PCB now?"   -> STOP.
-     On OK: call generate_pcb {sch_path: <the .kicad_sch>}. NEVER tell the user
-     to press F8.
-  2. After generate_pcb (board populated + laid out): ask
+     On OK: this is a BRAND-NEW empty board -> call generate_pcb
+     {sch_path: <the .kicad_sch>} (auto-place + finish). For a board that
+     ALREADY has placement, call update_pcb instead (native F8, preserves it).
+     NEVER tell the user to press F8.
+  2. After generate_pcb / update_pcb (board populated): ask
        "Run the quality check / score the board?"   -> STOP.
      On OK: call pcb_quality.
   3. Manual ERC flow (user asks to check / fix ERC): ask "Run ERC check now?"
@@ -1476,11 +1524,33 @@ def build_client(*, model: Optional[str] = None,
         sys_prompt_value = {"type": "file", "path": str(_sp_path)}
     except OSError:
         pass  # keep inline string; small prompts still fit the cmdline
+    # Extended thinking — when chat_ui.thinking.enabled, ask the model to
+    # surface its reasoning so the chat can show a collapsible "Thinking" panel
+    # (Claude.ai-style) instead of the fake rotating "Analyzing/Designing"
+    # label. Adaptive by default so the model only reasons when the task
+    # warrants it; budget_tokens>0 forces a fixed budget. None => off =>
+    # ClaudeAgentOptions default => byte-identical to before.
+    _thinking_cfg = None
+    try:
+        from .intent.engine import _load_layout_config as _lc_think
+        _tc = (_lc_think().get("chat_ui", {}) or {}).get("thinking", {}) or {}
+        if _tc.get("enabled", False):
+            _display = _tc.get("display", "summarized")
+            _budget = int(_tc.get("budget_tokens", 0) or 0)
+            if _budget > 0:
+                _thinking_cfg = {"type": "enabled",
+                                 "budget_tokens": _budget,
+                                 "display": _display}
+            else:
+                _thinking_cfg = {"type": "adaptive", "display": _display}
+    except Exception:
+        _thinking_cfg = None
     options = ClaudeAgentOptions(
         model=model or DEFAULT_MODEL,
         system_prompt=sys_prompt_value,
         mcp_servers={"envil": server},
         allowed_tools=allowed,
+        thinking=_thinking_cfg,
         # Disable the built-in Claude-Code preset (Bash, Read, Edit,
         # ToolSearch, WebSearch, ...). The SDK's default is `tools=None`
         # which loads that preset and surfaces our MCP tools as DEFERRED
@@ -1580,6 +1650,100 @@ def _build_pcb_snapshot_block(pcb_path: str) -> str:
         return (f"(PCB snapshot unavailable: {type(exc).__name__}: {exc})\n\n")
 
 
+def _build_project_manifest_block(active_schematic: Optional[str],
+                                  active_pcb: Optional[str]) -> str:
+    """List every KiCad design file in the project folder, one line each, so
+    the single common AI has whole-PROJECT awareness — not just the file the
+    user currently has open. The user can then ask about / edit ANY file in the
+    project and the AI already knows it exists and roughly what's in it (it
+    reads a file's full contents via its tools when it needs detail).
+
+    Gated by unified_chat.project_awareness (default True). Off => "" =>
+    byte-identical to before. The folder is derived from whichever active path
+    is set (both design files live in the project folder)."""
+    _max = 24
+    try:
+        from .intent.engine import _load_layout_config as _lc
+        _cfg = (_lc().get("unified_chat", {}) or {})
+        if not bool(_cfg.get("project_awareness", True)):
+            return ""
+        _max = int(_cfg.get("project_awareness_max_files", 24) or 24)
+    except Exception:
+        _max = 24
+
+    from pathlib import Path as _P
+    proj_dir = None
+    for p in (active_schematic, active_pcb):
+        if not p:
+            continue
+        try:
+            cand = _P(p).parent
+        except Exception:
+            continue
+        if cand.exists():
+            proj_dir = cand
+            break
+    if proj_dir is None:
+        return ""
+
+    active = {str(_P(x)) for x in (active_schematic, active_pcb) if x}
+
+    design = []
+    try:
+        for entry in sorted(proj_dir.iterdir()):
+            if not entry.is_file():
+                continue
+            name = entry.name
+            # Skip backups / autosaves / lock files — only real design docs.
+            if (name.startswith("_autosave") or name.endswith("-bak")
+                    or name.endswith(".lck") or "~" in name):
+                continue
+            if entry.suffix.lower() in (".kicad_pro", ".kicad_sch", ".kicad_pcb"):
+                design.append(entry)
+    except OSError:
+        return ""
+    if not design:
+        return ""
+
+    lines = []
+    summarized = 0
+    for entry in design:
+        sfx = entry.suffix.lower()
+        mark = "  [ACTIVE — open in front of the user now]" \
+            if str(entry) in active else ""
+        if sfx == ".kicad_pro":
+            lines.append(f"- {entry.name} — KiCad project file{mark}")
+            continue
+        info = " — schematic" if sfx == ".kicad_sch" else " — board"
+        if summarized < _max:
+            try:
+                if sfx == ".kicad_sch":
+                    from .kicad import read_summary as _rs
+                    s = _rs(entry)
+                    info = (f" — schematic: {s.component_count} parts, "
+                            f"{s.wire_count} wires, "
+                            f"{s.global_label_count} global labels")
+                else:
+                    from .kicad import read_pcb_summary as _rp
+                    s = _rp(entry)
+                    info = (f" — board: {s.footprint_count} footprints, "
+                            f"{s.track_count} tracks, {s.zone_count} zones")
+                summarized += 1
+            except Exception:
+                pass  # keep the bare type label
+        lines.append(f"- {entry.name}{info}{mark}")
+
+    return (
+        "Project files — you are ONE assistant with full awareness of the whole "
+        "project below. You can read or edit ANY of these files, not only the "
+        "active one; pick the right file for the user's request (open/read a "
+        "file's full contents with your tools when you need detail):\n"
+        f"Project folder: {proj_dir}\n"
+        + "\n".join(lines)
+        + "\n\n"
+    )
+
+
 @traceable(run_type="chain", name="Chat",
            process_inputs=_run_turn_inputs, reduce_fn=_run_turn_reduce)
 async def run_turn(
@@ -1637,10 +1801,15 @@ async def run_turn(
     # show ONLY the schematic snapshot. When app is unset we fall back
     # to the legacy schematic-only behaviour for backward compat.
     a = (app or "").strip().lower()
+    # Whole-project awareness: a manifest of EVERY design file in the project
+    # folder so the one common AI knows the user can ask about / edit any file,
+    # not just the active one. Gated; "" when disabled or no project folder.
+    manifest_block = _build_project_manifest_block(schematic, pcb)
     if a in ("pcb", "pcbnew", "board") and pcb:
         snapshot_block = _build_pcb_snapshot_block(pcb)
         framed = (
             f"{history_block}"
+            f"{manifest_block}"
             f"Working PCB: {pcb}\n\n"
             f"{snapshot_block}"
             f"User prompt: {prompt}"
@@ -1649,12 +1818,14 @@ async def run_turn(
         snapshot_block = _build_snapshot_block(schematic)
         framed = (
             f"{history_block}"
+            f"{manifest_block}"
             f"Working schematic: {schematic}\n\n"
             f"{snapshot_block}"
             f"User prompt: {prompt}"
         )
     else:
-        framed = (history_block + prompt) if history_block else prompt
+        framed = (history_block + manifest_block + prompt) \
+            if (history_block or manifest_block) else prompt
     last_tool_name = ""
     # Reset the per-turn build_circuit guard so this turn gets exactly one real
     # build; any re-call the model makes is short-circuited instantly (kills the
@@ -1699,7 +1870,14 @@ async def run_turn(
                 # AssistantMessage carries text + tool_use blocks
                 if isinstance(message, AssistantMessage):
                     for block in message.content:
-                        if isinstance(block, TextBlock):
+                        if ThinkingBlock is not None and isinstance(block, ThinkingBlock):
+                            # Streamed reasoning -> collapsible "Thinking" panel
+                            # in the chat. Only arrives when chat_ui.thinking is
+                            # enabled; otherwise this branch never fires.
+                            _tk = getattr(block, "thinking", "") or ""
+                            if _tk:
+                                yield TurnEvent(kind="thinking", text=_tk)
+                        elif isinstance(block, TextBlock):
                             yield TurnEvent(kind="text", text=block.text)
                         elif isinstance(block, ToolUseBlock):
                             last_tool_name = block.name

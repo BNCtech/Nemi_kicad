@@ -1,0 +1,124 @@
+{
+  "_about": "IPC standard numeric tables as pure data — the machine-readable twin of IPC_STANDARDS.md (repo root). Consumed by set_design_rules / a future .kicad_dru emitter to enforce the ELECTRICAL minimums IPC defines (clearance by voltage, width by current, annular/plating by acceptance class) on top of the fab DFM floors in fab_profiles.json. The governing rule for every parameter is final = max(IPC_electrical_here, fab_DFM_floor, class_floor) — honour whichever is most conservative. Add/repoint values here with no Python change.",
+  "_units": "all distances mm unless a key says otherwise. Voltage in volts (DC or AC peak between conductors). Current in amperes. Copper thickness in micrometres (um). 1 mil = 0.0254 mm.",
+  "_provenance": "Researched online 2026-06-30 (multi-agent verify harness). Verification pass was truncated by an API session limit: IPC-4761 via types and copper-weight defs are 3-vote confirmed; clearance/width/class tables are 3+-source corroborated AND match the 2026-06-26-verified PCB_RULES.md R1/R2 — high-confidence DRAFT. Items flagged _uncertain need re-verify before high-voltage tape-out.",
+  "_sources": "IPC-2221B Table 6-1 (magma.ca PDF, smpspowersupply.com, protoexpress); IPC-2152 (smps.us, pcbsync); IPC-7351B (pcbsync, pcblibraries); IPC-6012/A-610 (protoexpress, altium, raypcb); IPC-4761 (eurocircuits primary PDF); copper weight (jlcpcb primary).",
+
+  "default_acceptance_class": 2,
+
+  "acceptance_classes": {
+    "_comment": "IPC-A-610 / IPC-6012 acceptance classes. class_floor values are applied as max() against fab_profiles minimums. annular_ring_external/internal in mm; plating_min_um is average hole-wall copper. conductor_width_reduction_pct is the max allowed narrowing of a fabricated conductor vs the designed width.",
+    "1": {
+      "name": "General electronic products",
+      "annular_ring_external_mm": 0.0,
+      "annular_ring_internal_mm": 0.0,
+      "plating_min_um": 20,
+      "conductor_width_reduction_pct": 30,
+      "external_breakout_allowed": true,
+      "_notes": "Annular ring effectively tangency/breakout-defined; limited-life products."
+    },
+    "2": {
+      "name": "Dedicated service electronic products",
+      "annular_ring_external_mm": 0.05,
+      "annular_ring_internal_mm": 0.0,
+      "plating_min_um": 20,
+      "conductor_width_reduction_pct": 20,
+      "external_breakout_allowed": true,
+      "_notes": "DEFAULT. External ring 0.05 mm with up to 90 deg breakout permitted; internal breakout allowed."
+    },
+    "3": {
+      "name": "High-performance / harsh environment",
+      "annular_ring_external_mm": 0.05,
+      "annular_ring_internal_mm": 0.025,
+      "plating_min_um": 25,
+      "conductor_width_reduction_pct": 20,
+      "external_breakout_allowed": false,
+      "_notes": "Medical/aero/auto-safety. No external breakout. Some fabs demand 0.075 mm external ring — upgrade if required."
+    }
+  },
+
+  "clearance_by_voltage": {
+    "_comment": "IPC-2221B Table 6-1. Pick the row whose max_v >= the peak voltage between the two nets, read the column for the board condition. Default condition for Envil 2-layer boards = external_uncoated. Emit as a .kicad_dru conditional clearance rule keyed on net voltage (KiCad's flat Constraints page cannot express voltage-dependent clearance).",
+    "default_condition": "external_uncoated",
+    "bands": [
+      {"max_v": 15,  "internal_mm": 0.05, "external_uncoated_mm": 0.10, "external_coated_mm": 0.05},
+      {"max_v": 30,  "internal_mm": 0.05, "external_uncoated_mm": 0.10, "external_coated_mm": 0.05},
+      {"max_v": 50,  "internal_mm": 0.10, "external_uncoated_mm": 0.60, "external_coated_mm": 0.13},
+      {"max_v": 100, "internal_mm": 0.10, "external_uncoated_mm": 0.60, "external_coated_mm": 0.13},
+      {"max_v": 150, "internal_mm": 0.20, "external_uncoated_mm": 0.60, "external_coated_mm": 0.40},
+      {"max_v": 170, "internal_mm": 0.20, "external_uncoated_mm": 1.25, "external_coated_mm": 0.40},
+      {"max_v": 250, "internal_mm": 0.20, "external_uncoated_mm": 1.25, "external_coated_mm": 0.40},
+      {"max_v": 300, "internal_mm": 0.20, "external_uncoated_mm": 1.25, "external_coated_mm": 0.40},
+      {"max_v": 500, "internal_mm": 0.25, "external_uncoated_mm": 2.50, "external_coated_mm": 0.80}
+    ],
+    "above_500v_per_volt_mm": {
+      "_comment": "For peak V > 500: clearance = (value at 500 V) + adder * (V - 500). Adders reconcile to the 1000 V column from smpspowersupply.",
+      "_uncertain": "protoexpress quoted internal=0.025 (10x); we use the self-consistent 0.0025. Re-verify before >500 V tape-out.",
+      "internal": 0.0025,
+      "external_uncoated": 0.005,
+      "external_coated": 0.00305
+    }
+  },
+
+  "width_by_current": {
+    "_comment": "IPC-2152 practical trace width vs current, 1 oz (35 um) EXTERNAL copper, ~10-20 degC rise. Pick the row whose max_a >= the net's current. For internal copper IPC-2152 shows nearly the same width (the old 50% derate is obsolete). For 2 oz copper a same-width trace carries ~1.5x; or scale width down ~0.6x for the same current.",
+    "rule_of_thumb_mil_per_amp": 25,
+    "copper_weight_ampacity_exponent": 0.725,
+    "bands": [
+      {"max_a": 0.5, "width_mm": 0.30},
+      {"max_a": 1.0, "width_mm": 0.60},
+      {"max_a": 2.0, "width_mm": 1.10},
+      {"max_a": 3.0, "width_mm": 1.70},
+      {"max_a": 5.0, "width_mm": 2.80}
+    ],
+    "formula_ipc2221_legacy": {
+      "_comment": "I = k * dT^0.44 * A^0.725 ; A = cross-section in mil^2, dT = rise in degC. Solve for A then width = A / thickness.",
+      "k_external": 0.048,
+      "k_internal": 0.024
+    },
+    "formula_ipc2152_area_mil2": {
+      "_comment": "A[mil^2] = (117.555*dT^-0.913 + 1.15) * I^(0.84*dT^-0.108 + 1.159). Validated within 3% of IPC-2152 chart at I=10A,dT=20C. width = A / thickness_mil.",
+      "c1": 117.555, "e1": -0.913, "c2": 1.15, "c3": 0.84, "e3": -0.108, "c4": 1.159
+    }
+  },
+
+  "courtyard_density_levels": {
+    "_comment": "IPC-7351B. courtyard_excess_mm is added around a footprint's max physical/land extent to form the keep-out used by place_refine de-collision. Default level B. Values are general headline numbers; the standard tabulates excess per component family (chip/SOIC/QFP/BGA) for exact work.",
+    "_uncertain": "sources split: Nominal 0.20 vs 0.25, Most 0.40 vs 0.50. Using the larger (more conservative) of each.",
+    "default_level": "B",
+    "levels": {
+      "A": {"name": "Most material / Maximum", "courtyard_excess_mm": 0.50, "use": "low-density, prototype, hand-solder, rework"},
+      "B": {"name": "Nominal / Median",        "courtyard_excess_mm": 0.25, "use": "standard production (default)"},
+      "C": {"name": "Least material / Minimum","courtyard_excess_mm": 0.10, "use": "high-density, fine-pitch, space-constrained"}
+    }
+  },
+
+  "controlled_impedance": {
+    "_comment": "IPC-2141A / IPC-2221 targets. Geometry (width/gap for these Z) lives in net_classes.json + stackup_profiles.json; this is the standard-side index. ohms.",
+    "single_ended_se_ohm": 50,
+    "diff_usb_ohm": 90,
+    "diff_ethernet_ohm": 100,
+    "diff_can_ohm": 120,
+    "_note": "50 ohm single-ended is impractical on 2-layer 1.6 mm (needs ~3 mm trace) -> controlled impedance requires 4-layer. See stackup_profiles.json auto_select."
+  },
+
+  "via_protection_ipc4761": {
+    "_comment": "IPC-4761 via protection types (3-0 verified against the primary standard PDF). Reference only; modelled when via-in-pad (Type VII) is needed under fine-pitch BGA.",
+    "I": "Tented — dry-film mask bridged over via, hole empty (I-a one side, I-b both)",
+    "II": "Tented and covered",
+    "III": "Plugged — hole plugged with mask/resin",
+    "IV": "Plugged and covered",
+    "V": "Filled — hole fully filled, no cap",
+    "VI": "Filled and covered",
+    "VII": "Filled and capped — plated over; basis for via-in-pad",
+    "partially_filled": "Separate category; hole partially filled"
+  },
+
+  "copper_weights_um": {
+    "_comment": "Finished copper thickness by weight (1 oz = 35 um verified primary). ampacity scales as area^0.725, so heavier copper carries more current at the same width but coarsens min trace/space.",
+    "0.5": 17.5,
+    "1": 35,
+    "2": 70,
+    "3": 105
+  }
+}

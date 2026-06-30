@@ -43,6 +43,7 @@ from .set_track_widths_pcb import set_track_widths_pcb
 from .auto_layout_pcb import auto_layout_pcb
 from .build_circuit import build_circuit
 from .generate_pcb import generate_pcb
+from .update_pcb import update_pcb
 from .create_project import create_project
 from .combine_sheets import combine_sheets
 from .convert_to_hierarchy import convert_to_hierarchy
@@ -55,6 +56,11 @@ from .export_bom import export_bom
 from .export_docs import export_docs
 from .export_pcb import export_pcb
 from .lint_schematic import lint_schematic
+from .manage_design_rules import (
+    add_design_rule,
+    list_design_rules,
+    remove_design_rule,
+)
 from .read_schematic import read_schematic
 from .schematic_quality import schematic_quality
 from .render_pcb_3d import render_pcb_3d
@@ -119,8 +125,12 @@ PCB_TOOLS = [
 # Available on every page so "ship it" / "package docs" works either way.
 COMMON_TOOLS = [
     generate_pcb,
+    update_pcb,
     ship_design,
     export_docs,
+    add_design_rule,
+    list_design_rules,
+    remove_design_rule,
 ]
 
 ALL_TOOLS = SCHEMATIC_TOOLS + PCB_TOOLS + COMMON_TOOLS
@@ -149,7 +159,7 @@ __all__ = [
     "ALL_TOOLS", "SCHEMATIC_TOOLS", "PCB_TOOLS", "COMMON_TOOLS",
     "tools_for_app",
     "read_schematic", "assess_request", "create_project", "create_symbol",
-    "build_circuit", "generate_pcb", "apply_ops",
+    "build_circuit", "generate_pcb", "update_pcb", "apply_ops",
     "erc_check", "erc_autofix", "drc_check", "drc_autofix",
     "export_pcb", "export_bom", "auto_place_pcb",
     "auto_outline_pcb", "auto_zones_pcb",
@@ -160,6 +170,7 @@ __all__ = [
     "route_pcb_simple", "silkscreen_cleanup_pcb", "set_track_widths_pcb",
     "auto_layout_pcb",
     "pcb_verify", "pcb_quality", "pcb_improve",
+    "add_design_rule", "list_design_rules", "remove_design_rule",
     "ship_design", "export_docs", "convert_to_hierarchy",
     "audit_wires", "audit_diff_pairs", "plan_diff_pair_routes",
     "combine_sheets", "trace_net", "lint_schematic", "schematic_quality",

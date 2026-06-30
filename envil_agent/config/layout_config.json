@@ -2,7 +2,10 @@
   "_about": "Universal layout-engine config. All thresholds, conventions, and weights live here. No circuit names or component-specific logic \u2014 edits to this file change behavior across every circuit class without code changes.",
   "unified_chat": {
     "_comment": "One-AI mode (2026-06-18, user policy 'now only one ai'). When enabled the chat exposes ALL tools (schematic + PCB) and a unified system prompt regardless of which editor opened the panel, so a single assistant runs the whole flow (build/edit schematic -> ERC -> PCB place/route -> DRC -> Gerber) and edits an existing design OR creates one from scratch. Read by agent.py:_unified_chat_enabled. Set enabled=false to restore the legacy per-editor page-scoped behaviour (eeschema panel = schematic tools only, pcbnew panel = PCB tools only). 2026-06-21: user reverted to page-scoped. 2026-06-22: user RE-ENABLED -- wants ONE COMMON AI for the whole KiCad ('appadi illa common ai for whole kicad'), not sch-page=sch-prompt / pcb-page=pcb-prompt. This also removes the stale-PCB-scope-blocks-build problem since the prompt+tools no longer depend on the panel's reported page.",
-    "enabled": true
+    "enabled": true,
+    "_project_awareness_comment": "Whole-project understanding (2026-06-30). When true, every chat turn is given a manifest of EVERY KiCad design file in the project folder (.kicad_pro/.kicad_sch/.kicad_pcb) with a one-line summary each (parts/wires for schematics, footprints/tracks for boards) and the active file marked. So the one common AI knows the whole project — the user can ask about or edit ANY file, not just the one open in front of them. project_awareness_max_files caps how many files get the deep one-line summary (the rest are listed by name+type) to keep big projects fast. false => no manifest, byte-identical to before. Read by agent.py:_build_project_manifest_block.",
+    "project_awareness": true,
+    "project_awareness_max_files": 24
   },
   "build_flow": {
     "_comment": "Cursor / coding-agent build flow (2026-06-22, user: 'first folder create pannitu tha circuit create panna permission kekkanum ... appadi thana cursor claude eppadi work aakuthu'). When folder_first=true (default), a NEW whole-circuit request runs: (1) ask Project name -> (2) call create_project to make the EMPTY project folder+files (loads in Project Files, ALWAYS succeeds) -> (3) ask the design questions -> (4) build_circuit with out_path=<the created .kicad_sch> to fill the circuit INTO that project. The workspace exists before its contents, so a circuit with doubts/errors never costs the user the folder. Read by agent.py:_folder_first_enabled, which appends FOLDER_FIRST_RULE and SUPPRESSES the one-step ASK_ASSUMPTIONS_RULE + PROJECT_NAMING_RULE (whose ordering would contradict it). Set false to restore the legacy one-step flow (ask design questions, then build folder+circuit together in one build_circuit call).",
@@ -224,8 +227,8 @@
       "sensitive_extra_mm": 0.3,
       "noisy_extra_mm": 0.3
     },
-    "route_priority_order": false,
-    "_route_priority_order_comment": "Phase 3 of the Universal PCB engine (R11). When true, nets are routed critical (high-speed/clock) -> power -> signal instead of net-id order, so critical nets claim clean channels before the board congests. Priority is derived from the SAME pcb_constraint_model.json pin_signatures (highspeed/clock/power) — one source of truth, no duplicate net-name list. The router stays clearance-aware, so reordering only changes which net wins a corridor, never makes a short. false (default) = net-id order = byte-stable.",
+    "route_priority_order": true,
+    "_route_priority_order_comment": "Phase 3 of the Universal PCB engine (R11). When true, nets are routed critical (high-speed/clock) -> power -> signal instead of net-id order, so critical nets claim clean channels before the board congests. Priority is derived from the SAME pcb_constraint_model.json pin_signatures (highspeed/clock/power) — one source of truth, no duplicate net-name list. The router stays clearance-aware, so reordering only changes which net wins a corridor, never makes a short. Enabled 2026-06-30 (was false/net-id order); set false to restore byte-stable net-id order.",
     "astar_step_mm": 1.27,
     "_astar_step_mm_comment": "Grid pitch for A*. 1.27 mm = 50 mil, matches the schematic-side KiCad grid. Smaller = finer routing but exponentially more nodes; larger = coarser but faster.",
     "astar_bounds_margin_mm": 8.0,
@@ -667,6 +670,12 @@
       "enabled": true,
       "interval_seconds": 10,
       "text": "Still working — generating the schematic ({elapsed}s elapsed)…"
+    },
+    "thinking": {
+      "_comment": "Stream the model's real reasoning to the chat as a collapsible 'Thinking' panel (Claude.ai-style), replacing the fake rotating 'Analyzing/Designing' label. budget_tokens>0 uses fixed-budget extended thinking (--max-thinking-tokens N) — the classic mode supported by ALL thinking-capable models incl. the default Haiku 4.5, so it is the safe default. Set budget_tokens=0 to use 'adaptive' instead (model decides depth; needs an adaptive-capable model like Opus 4.7+). display 'summarized' returns Anthropic's summarized thinking (recommended), 'omitted' returns none. enabled=false => no thinking events emitted, byte-identical to before. Restart the chat server after changing.",
+      "enabled": true,
+      "budget_tokens": 4096,
+      "display": "summarized"
     }
   },
 

@@ -1,0 +1,57 @@
+{
+  "_about": "Schema + policy for USER-ADDED design rules layered on top of the Envil defaults (IPC_STANDARDS.md / ipc_constraints.json / fab_profiles.json / net_classes.json). Each user (and each project) can add their own rules in plain language; the agent ANALYSES the rule, fills the structured fields below, and add_design_rule persists it. set_design_rules then resolves baseline + user + project into the effective rule set. Pure data + policy — no per-user constants in code.",
+  "_model": "Layered: Layer0 = Envil defaults (ships). Layer1 = per-user overlay (applies to all that user's boards). Layer2 = per-project overlay (this board only). Precedence at resolve time: PROJECT > USER > DEFAULT. Each user has a different overlay file, so each user gets different rules.",
+  "_units": "distances mm. 1 mil = 0.0254 mm.",
+
+  "enabled": true,
+  "apply_in_set_design_rules": true,
+  "emit_kicad_dru": true,
+
+  "storage": {
+    "_comment": "Where overlays live. user overlay = one file per user under user_dir; project overlay = a sidecar next to the .kicad_pro. {user} is replaced by the user_id (default 'default'). Resolved against ENVIL_HOME / the project folder at runtime.",
+    "user_dir": "ai_backend/envil_agent/config/user_rules",
+    "user_file": "{user}.json",
+    "project_sidecar_suffix": ".envil-rules.json",
+    "managed_dru_marker": "# ENVIL-MANAGED — default (IPC) + user design rules; safe to regenerate"
+  },
+
+  "safety_policy": {
+    "_comment": "What happens when a user rule is LOOSER than the IPC/fab safety floor. Chosen: warn_but_allow — the user stays in control, but every looser-than-floor rule carries a visible warning the agent must surface. block = reject looser rules. allow_silent = no warning.",
+    "mode": "warn_but_allow",
+    "warning_template": "'{text}' sets {parameter}={value}{unit}, which is LOOSER than the {floor_source} floor of {floor}{unit}. Board may fail DRC/fab. Applied anyway (warn_but_allow)."
+  },
+
+  "kinds": {
+    "_comment": "A user rule is exactly one of these kinds. The agent picks the kind when it analyses the user's words.",
+    "override": "Set a known numeric design-rule parameter (from overridable_parameters below). Floor-checked. e.g. 'my fab min trace is 0.2mm' -> parameter=min_track_width_mm, value=0.2.",
+    "directive": "A conditional/spatial rule that maps to a KiCad custom rule (.kicad_dru): a condition + a constraint. e.g. 'keep mains nets 8mm apart' -> condition on netclass, constraint clearance min 8mm. Not floor-checked (it is usually STRICTER).",
+    "selection": "Pick a named profile/option: fab_profile, stackup_profile, acceptance_class, copper_weight. e.g. 'I use JLCPCB 4-layer'.",
+    "preference": "A non-DRC design preference recorded for the agent to honour (e.g. 'green soldermask', 'SMD on top only', 'label every test point'). Stored + surfaced; no automatic geometry change."
+  },
+
+  "overridable_parameters": {
+    "_comment": "Catalog of numeric parameters a user 'override' rule may set. kicad_key = the .kicad_pro board.design_settings.rules key written. fab_key = the fab_profiles.json key whose value is the manufacturing floor. safe_direction='larger' means a BIGGER value is more conservative, so a user value SMALLER than the floor triggers the safety warning (min_* params). 'smaller' is the inverse (none today). Pure data — add a row to allow a new override.",
+    "min_track_width_mm":         {"kicad_key": "min_track_width",           "fab_key": "min_track_width_mm",          "safe_direction": "larger", "about": "minimum copper trace width"},
+    "min_clearance_mm":           {"kicad_key": "min_clearance",             "fab_key": "min_clearance_mm",            "safe_direction": "larger", "about": "minimum copper-to-copper spacing"},
+    "min_via_diameter_mm":        {"kicad_key": "min_via_diameter",          "fab_key": "min_via_diameter_mm",         "safe_direction": "larger", "about": "minimum via outer diameter"},
+    "min_through_hole_diameter_mm":{"kicad_key": "min_through_hole_diameter", "fab_key": "min_through_hole_diameter_mm", "safe_direction": "larger", "about": "minimum drilled hole diameter"},
+    "min_annular_ring_mm":        {"kicad_key": "min_via_annular_width",     "fab_key": "min_annular_ring_mm",         "safe_direction": "larger", "about": "minimum via annular ring"},
+    "min_hole_to_hole_mm":        {"kicad_key": "min_hole_to_hole",          "fab_key": "min_hole_to_hole_mm",         "safe_direction": "larger", "about": "minimum hole-to-hole spacing"},
+    "min_hole_to_copper_mm":      {"kicad_key": "min_hole_clearance",        "fab_key": "min_hole_to_copper_mm",       "safe_direction": "larger", "about": "minimum hole-to-copper spacing"},
+    "min_edge_to_copper_mm":      {"kicad_key": "min_copper_edge_clearance", "fab_key": "min_edge_to_copper_mm",       "safe_direction": "larger", "about": "minimum board-edge-to-copper clearance"},
+    "min_silk_text_height_mm":    {"kicad_key": "min_text_height",           "fab_key": "min_silk_text_height_mm",     "safe_direction": "larger", "about": "minimum silkscreen text height"},
+    "min_silk_width_mm":          {"kicad_key": "min_text_thickness",        "fab_key": "min_silk_width_mm",           "safe_direction": "larger", "about": "minimum silkscreen line width"}
+  },
+
+  "directive_constraints": {
+    "_comment": "Constraint types a 'directive' rule may carry, mapped to KiCad .kicad_dru constraint keywords. The agent fills constraint.type + the numeric bound; condition is a KiCad rule condition expression (e.g. \"A.NetClass == 'POWER'\" or \"A.insideArea('bga')\"). See IPC_STANDARDS.md §8.",
+    "clearance":     {"dru": "clearance",        "bound": "min", "unit": "mm", "about": "copper-to-copper spacing"},
+    "track_width":   {"dru": "track_width",      "bound": "min", "unit": "mm", "about": "conductor width"},
+    "annular_width": {"dru": "annular_width",    "bound": "min", "unit": "mm", "about": "via annular ring"},
+    "hole_clearance":{"dru": "hole_clearance",   "bound": "min", "unit": "mm", "about": "hole-to-copper"},
+    "edge_clearance":{"dru": "edge_clearance",   "bound": "min", "unit": "mm", "about": "copper-to-edge"},
+    "length":        {"dru": "length",           "bound": "max", "unit": "mm", "about": "track length"},
+    "via_count":     {"dru": "via_count",        "bound": "max", "unit": "",   "about": "vias on a net"},
+    "disallow":      {"dru": "disallow",         "bound": "none","unit": "",   "about": "prohibit object type (track/via/hole/zone/footprint) under a condition"}
+  }
+}

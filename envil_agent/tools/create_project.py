@@ -111,8 +111,23 @@ async def create_project(args: Dict[str, Any]) -> Dict[str, Any]:
                                       f"{type(exc).__name__}: {exc}")}],
                 "is_error": True}
 
+    # Write the Envil/IPC DEFAULT design rules into the fresh project so they are
+    # present in KiCad's Design Rule Editor the first time it is opened — before
+    # any build. Gated (default_rules.json:apply_on_create_project). Best-effort:
+    # never let it fail project creation.
+    default_rules_written = False
+    try:
+        from ..intent import default_rules as _dr
+        if _dr.apply_on_create_project():
+            from .set_design_rules import set_design_rules as _sdr
+            await _sdr.handler({"pcb_path": pro_path})
+            default_rules_written = True
+    except Exception:
+        pass
+
     result = {
         "status": "created",
+        "default_rules": default_rules_written,
         "path": str(sch_path).replace("\\", "/"),
         "project": str(pro_path).replace("\\", "/"),
         "dir": str(proj_dir).replace("\\", "/"),

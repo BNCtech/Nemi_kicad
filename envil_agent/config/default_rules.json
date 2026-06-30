@@ -1,0 +1,25 @@
+{
+  "_about": "Which Envil/IPC DEFAULT rules get pushed INTO the KiCad project so they show in KiCad's Design Rule Editor. Flat numeric floors merge (as max) into board.design_settings.rules (the Constraints page); conditional IPC rules (voltage clearance) are generated from ipc_constraints.json and written as custom rules into <project>.kicad_dru, in the SAME managed file the user rules use. Defaults sit UNDER the user overlay (precedence USER > DEFAULT). Pure data — no numbers duplicated here; the voltage table is read live from ipc_constraints.json.",
+  "_layering": "set_design_rules order: (1) fab profile -> Constraints, (2) THESE class floors max()'d on top, (3) user/project overrides on top (can go looser with a warning). DRU file = default voltage-clearance rules + user directives, regenerated together.",
+
+  "enabled": true,
+  "emit_to_project": true,
+  "_apply_on_create_project_comment": "When true, create_project runs set_design_rules on the brand-new empty project so the default rules (fab Constraints + net classes + IPC voltage-clearance .kicad_dru) are written immediately — they show in KiCad's Design Rule Editor the first time the project is opened, before any build. Set false to only write defaults when a build / 'apply design rules' runs.",
+  "apply_on_create_project": true,
+
+  "acceptance_class_floors": {
+    "_comment": "Apply the acceptance-class minimums from ipc_constraints.json:acceptance_classes[default_acceptance_class] as a floor (max) on the matching KiCad Constraints key. Only annular ring maps to a KiCad DRC check (plating thickness is a fab spec KiCad does not verify). map: ipc_constraints class field -> kicad rules key.",
+    "enabled": true,
+    "map": {
+      "annular_ring_external_mm": "min_via_annular_width"
+    }
+  },
+
+  "voltage_clearance_rules": {
+    "_comment": "Generate IPC-2221B clearance-by-voltage custom rules (KiCad's flat Constraints page cannot express 'clearance depends on net voltage'). One rule per distinct clearance tier, keyed on a high-voltage NET CLASS the user assigns their net to. Read live from ipc_constraints.json:clearance_by_voltage.bands using the column named in `condition_field`. Bands at/below `min_voltage_v` are skipped (already covered by the fab/default clearance). netclass name = `{netclass_prefix}{bandMaxV}V` (e.g. HV_300V). These rules are visible in the Design Rule Editor immediately and become active the moment a net is put in that class.",
+    "enabled": true,
+    "condition_field": "external_uncoated",
+    "min_voltage_v": 30,
+    "netclass_prefix": "HV_"
+  }
+}

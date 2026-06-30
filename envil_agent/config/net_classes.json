@@ -2,6 +2,19 @@
   "_about": "Net-class catalogue. Each entry defines per-class trace width, clearance, via geometry, and (for differential pairs) coupled-pair gap + width. Entries are written verbatim into `.kicad_pro -> net_settings.classes`. `assignment_patterns` is the regex-based net-name -> class mapping fed into `net_settings.netclass_patterns` so freshly imported nets snap to the right class without manual assignment.",
   "_units": "all in mm. KiCad stores ohms only on the diff-pair side via geometry — actual impedance depends on the chosen stackup_profile, NOT this file. Pair this with stackup_profiles.json when picking diff_pair_width / diff_pair_gap.",
   "_default_class": "Default",
+  "_assign_by_pins_comment": "When true, set_design_rules also reads the schematic netlist and classifies each net by its connected pin TYPES (power_in/power_out → POWER, etc.), adding an explicit exact-name netclass assignment ONLY where the wildcard assignment_patterns below would miss it (a rail named 'RAIL', an analog line named 'SENSOR_OUT'…). Purely additive — never removes a wildcard rule. false = name-pattern-only (byte-stable). Costs one extra kicad-cli netlist run per set_design_rules call.",
+  "assign_by_pins": true,
+
+  "role_assignment": {
+    "_comment": "Pin-aware net-role → class mapping consumed by layout/net_roles.py. ORDERED — the first entry that matches wins, so 'ground' is listed before 'power' (GND pins share the 'power_in' pintype with VCC, so only the NAME distinguishes them). `signature` indexes pcb_constraint_model.json:pin_signatures (substring-matched against the net NAME); `class` is one of the classes above to assign; optional `pintypes` lets the role ALSO match by a connected pin's KiCad pintype so a rail classifies as POWER even when its name carries no hint. Pure data — add a role, repoint a class, or change the power-pin definition with no code edit.",
+    "order": [
+      {"signature": "ground",    "class": "GND"},
+      {"signature": "power",     "class": "POWER", "pintypes": ["power_in", "power_out"]},
+      {"signature": "highspeed", "class": "HIGH_SPEED"},
+      {"signature": "clock",     "class": "CLOCK"},
+      {"signature": "analog",    "class": "ANALOG"}
+    ]
+  },
 
   "classes": {
     "Default": {

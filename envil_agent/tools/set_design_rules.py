@@ -372,9 +372,108 @@ async def set_design_rules(args: dict[str, Any]) -> dict[str, Any]:
             if _apply_diff_pair_dimensions(pro, diff_rows):
                 presets_changed = True
 
+    pins_assigned: List[str] = []
     if not skip_classes:
         classes_changed, classes_names = _apply_net_classes(pro, nc_cfg)
         patterns_changed = _apply_netclass_patterns(pro, nc_cfg)
+
+        # Pin-aware net-role assignment (gated `net_classes.json:assign_by_pins`,
+        # default on). The wildcard patterns above only catch conventionally
+        # NAMED nets; this reads the schematic netlist and classifies each net by
+        # its connected pin TYPES too, so a rail named "RAIL" or an analog line
+        # named "SENSOR_OUT" still lands in POWER / ANALOG. Adds an explicit
+        # exact-name pattern (which wins, being first) ONLY where the wildcards
+        # would otherwise drop the net to Default — purely additive, never
+        # removes a wildcard rule. Silent no-op when there's no schematic or the
+        # netlister can't run (-> name-only behaviour, byte-stable).
+        if bool(nc_cfg.get("assign_by_pins", True)):
+            sch = pro_path.with_suffix(".kicad_sch")
+            if sch.exists():
+                role_map: Dict[str, str] = {}
+                try:
+                    from ..layout.net_roles import classify_project_nets
+                    role_map = await classify_project_nets(str(sch))
+                except Exception:
+                    role_map = {}
+                if role_map:
+                    import fnmatch
+                    ns = _ensure(pro, "net_settings")
+                    existing = ns.get("netclass_patterns", []) or []
+
+                    def _class_via_wildcards(nm: str) -> str:
+                        up = nm.upper()
+                        for r in existing:
+                            pat = str(r.get("pattern", "")).upper()
+                            if pat and fnmatch.fnmatchcase(up, pat):
+                                return str(r.get("netclass") or "Default")
+                        return "Default"
+
+                    extra = []
+                    for nm, cls in sorted(role_map.items()):
+                        if _class_via_wildcards(nm) == cls:
+                            continue  # wildcard already assigns it correctly
+                        extra.append({"netclass": cls, "pattern": nm})
+                        pins_assigned.append(f"{nm}->{cls}")
+                    if extra:
+                        ns["netclass_patterns"] = extra + existing
+                        patterns_changed = True
+
+    # User/project rule overlay (gated user_rules_schema.json). Layers the
+    # caller's OWN rules on top of the fab/IPC defaults: numeric overrides patch
+    # board.design_settings.rules; conditional directives are emitted to a
+    # <project>.kicad_dru. Precedence PROJECT > USER > default. warn_but_allow:
+    # a looser-than-floor override is applied with a surfaced warning.
+    overlay_applied: List[str] = []
+    overlay_warnings: List[str] = []
+    overlay_prefs: List[str] = []
+    default_applied: List[str] = []
+    dru_note = ""
+    dru_rules: List[dict] = []
+    try:
+        from ..intent import user_rules as _ur
+        from ..intent import default_rules as _dr
+
+        ds_rules = _ensure(pro, "board", "design_settings", "rules")
+
+        # (a) DEFAULT layer: Envil/IPC defaults pushed INTO KiCad so they show in
+        # the Design Rule Editor. Flat acceptance-class floors max()'d onto the
+        # Constraints; IPC-2221B voltage-clearance generated as custom rules.
+        if _dr.is_enabled():
+            for kkey, val in _dr.class_floors().items():
+                cur = float(ds_rules.get(kkey, 0.0) or 0.0)
+                if val > cur:
+                    ds_rules[kkey] = float(val)
+                    default_applied.append(f"{kkey}>={val}")
+            if _dr.emit_to_project():
+                dru_rules.extend(_dr.voltage_clearance_dru_rules())
+
+        # (b) USER layer on top (precedence USER > DEFAULT). Numeric overrides
+        # patch the Constraints (warn_but_allow lets them go looser); directives
+        # join the same managed .kicad_dru.
+        if _ur.apply_in_set_design_rules():
+            user_id = str(args.get("user_id", "default") or "default")
+            res = _ur.resolve(user_id, str(pro_path), fab_name)
+            for kkey, val in (res.get("overrides") or {}).items():
+                if ds_rules.get(kkey) != float(val):
+                    ds_rules[kkey] = float(val)
+                    overlay_applied.append(f"{kkey}={val}")
+            overlay_warnings = res.get("warnings") or []
+            overlay_prefs = res.get("preferences") or []
+            dru_rules.extend(res.get("directives") or [])
+
+        # (c) Emit the combined default + user custom rules ONCE.
+        if dru_rules and bool(_ur.load_schema().get("emit_kicad_dru", False)):
+            dres = _ur.emit_dru(dru_rules, str(pro_path))
+            if dres.get("wrote"):
+                n_def = len(_dr.voltage_clearance_dru_rules()) if _dr.is_enabled() else 0
+                overlay_applied.append(
+                    f"{dres['wrote']} .kicad_dru rule(s) "
+                    f"({n_def} default + {dres['wrote'] - n_def} user)")
+            if dres.get("note"):
+                dru_note = dres["note"]
+    except Exception:
+        # Overlay must never break the core rule push.
+        pass
 
     # Write back. Use indent=2 + sort_keys=False to keep KiCad's
     # field ordering stable on diffs (KiCad reads either way but humans
@@ -413,13 +512,30 @@ async def set_design_rules(args: dict[str, Any]) -> dict[str, Any]:
         summary_lines.append(
             f"  netclass_patterns: "
             f"{'updated' if patterns_changed else 'in sync'}")
+        if pins_assigned:
+            summary_lines.append(
+                f"  pin-role assignments ({len(pins_assigned)}): "
+                + ", ".join(pins_assigned[:8])
+                + (" …" if len(pins_assigned) > 8 else ""))
     else:
         summary_lines.append("  net classes: skipped")
+    if default_applied:
+        summary_lines.append(f"  IPC default floors: {', '.join(default_applied)}")
+    if overlay_applied:
+        summary_lines.append(f"  user/project rules: {', '.join(overlay_applied)}")
+    for w in overlay_warnings:
+        summary_lines.append(f"  ⚠ {w}")
+    if overlay_prefs:
+        summary_lines.append(f"  preferences noted: {'; '.join(overlay_prefs)}")
+    if dru_note:
+        summary_lines.append(f"  note: {dru_note}")
     if bak:
         summary_lines.append(f"  backup: {bak.name}")
 
     return {
         "content": [{"type": "text", "text": "\n".join(summary_lines)}],
+        "user_rules_applied": overlay_applied,
+        "user_rules_warnings": overlay_warnings,
         "ok": True,
         "pro_path": str(pro_path),
         "fab_profile": fab_name,
@@ -428,5 +544,6 @@ async def set_design_rules(args: dict[str, Any]) -> dict[str, Any]:
         "classes_changed": classes_changed,
         "classes_applied": classes_names,
         "patterns_changed": patterns_changed,
+        "pins_assigned": pins_assigned,
         "backup": str(bak) if bak else "",
     }

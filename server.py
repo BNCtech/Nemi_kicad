@@ -1095,7 +1095,15 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
 
         async def _handle_event(event) -> None:
             nonlocal generated_path
-            if event.kind == "text":
+            if event.kind == "thinking":
+                # Streamed model reasoning -> collapsible "Thinking" panel in
+                # the chat. Only emitted when chat_ui.thinking is enabled; the
+                # chat client appends these into one panel per turn and
+                # collapses it once the real reply text starts.
+                await ws.send_json({"kind": "thinking",
+                                      "text": event.text,
+                                      "session_id": session_id})
+            elif event.kind == "text":
                 full_reply.append(event.text)
                 await ws.send_json({"kind": "message_chunk",
                                       "text": event.text,
@@ -1125,6 +1133,24 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
                 # all their .kicad_sch files refreshed in eeschema, not
                 # just the parent.
                 if event.tool_result:
+                    # Native "Update PCB from Schematic" (the real F8). The
+                    # update_pcb tool returns action == "update_pcb_native"; run
+                    # the placement-preserving ECO sync IN the app immediately
+                    # (eeschema's OnUpdatePCB) instead of generate_pcb's
+                    # regenerate-from-IR. This is what makes "AI update PCB"
+                    # match "manual F8" — same incremental sync, same board.
+                    if event.tool_result.get("action") == "update_pcb_native":
+                        _usch = event.tool_result.get("sch_path") or ""
+                        if _usch:
+                            try:
+                                await _ipc_broadcast(
+                                    {"action": "update_pcb_from_schematic",
+                                     "data": {"path": _usch}})
+                                print(f"[update_pcb] native F8 -> eeschema: "
+                                      f"{_usch}", flush=True)
+                            except Exception as _ue:
+                                print(f"[update_pcb] IPC skipped: {_ue}",
+                                      flush=True)
                     p = event.tool_result.get("path") or ""
                     if p and p.lower().endswith(".kicad_sch"):
                         generated_path = p
@@ -1216,6 +1242,7 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
                 # GeneratorExit is painted on every build in LangSmith).
                 return
 
+        _cancelled = False   # set True if a "cancel" WS message arrives mid-turn
         if not _hb_on:
             # Original path — unchanged behaviour when heartbeat disabled.
             async for event in run_turn(user_text,
@@ -1270,10 +1297,44 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
 
             _pump_task = asyncio.create_task(_pump())
             _t0 = asyncio.get_running_loop().time()
+            _cancelled = False
             try:
                 while True:
+                    # Race: next queue item vs. next WS message (for cancel).
+                    _q_task  = asyncio.ensure_future(asyncio.wait_for(_q.get(), timeout=_hb_int))
+                    _ws_task = asyncio.ensure_future(ws.receive_text())
+                    done, pending_tasks = await asyncio.wait(
+                        {_q_task, _ws_task}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    # Cancel the loser so neither leaks.
+                    for t in pending_tasks:
+                        t.cancel()
+                        try:
+                            await t
+                        except BaseException:
+                            pass
+
+                    # WS side won — check for cancel message.
+                    if _ws_task in done:
+                        try:
+                            _in = json.loads(_ws_task.result())
+                            if _in.get("kind") == "cancel":
+                                _cancelled = True
+                                break
+                            # Any other mid-stream message (e.g. ping) — ignore.
+                        except Exception:
+                            pass
+                        # Discard the queue result too if the WS side interrupted.
+                        if _q_task in done:
+                            try:
+                                _q_task.result()
+                            except Exception:
+                                pass
+                        continue
+
+                    # Queue side won.
                     try:
-                        event = await asyncio.wait_for(_q.get(), timeout=_hb_int)
+                        event = _q_task.result()
                     except asyncio.TimeoutError:
                         elapsed = int(asyncio.get_running_loop().time() - _t0)
                         # If the client has gone this send raises, ending
@@ -1311,7 +1372,17 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
             if _pump_err:
                 raise _pump_err[0]
 
-        text = "".join(full_reply).strip() or "(no reply)"
+            if _cancelled:
+                await ws.send_json({"kind": "reply",
+                                      "text": "Stopped.",
+                                      "session_id": session_id})
+                await ws.send_json({"kind": "done", "session_id": session_id})
+                return   # skip the rest of _stream_agent_turn; ws_chat loop continues
+
+        # The full assistant reply = every streamed text chunk concatenated.
+        # (Without this the persist + reply + confirm-button code below
+        # references an undefined `text` and the whole turn NameErrors.)
+        text = "".join(full_reply)
 
         # Persist this turn to session history so the NEXT turn sees
         # what the user asked + what the agent said. Required for
