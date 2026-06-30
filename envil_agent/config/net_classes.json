@@ -35,7 +35,7 @@
       "microvia_drill_mm": 0.1,
       "priority": 100,
       "pcb_color": "rgba(220, 50, 50, 0.700)",
-      "schematic_color": "rgba(220, 50, 50, 0.700)"
+      "schematic_color": "rgba(0, 0, 0, 0.000)"
     },
 
     "GND": {
@@ -52,7 +52,7 @@
       "microvia_drill_mm": 0.1,
       "priority": 100,
       "pcb_color": "rgba(0, 0, 0, 0.500)",
-      "schematic_color": "rgba(0, 0, 0, 0.500)"
+      "schematic_color": "rgba(0, 0, 0, 0.000)"
     },
 
     "HIGH_SPEED": {
@@ -69,7 +69,7 @@
       "microvia_drill_mm": 0.1,
       "priority": 200,
       "pcb_color": "rgba(255, 165, 0, 0.700)",
-      "schematic_color": "rgba(255, 165, 0, 0.700)"
+      "schematic_color": "rgba(0, 0, 0, 0.000)"
     },
 
     "CLOCK": {
@@ -86,7 +86,7 @@
       "microvia_drill_mm": 0.1,
       "priority": 150,
       "pcb_color": "rgba(255, 200, 0, 0.700)",
-      "schematic_color": "rgba(255, 200, 0, 0.700)"
+      "schematic_color": "rgba(0, 0, 0, 0.000)"
     },
 
     "DIFF_USB": {
@@ -103,7 +103,7 @@
       "microvia_drill_mm": 0.1,
       "priority": 250,
       "pcb_color": "rgba(50, 100, 220, 0.700)",
-      "schematic_color": "rgba(50, 100, 220, 0.700)"
+      "schematic_color": "rgba(0, 0, 0, 0.000)"
     },
 
     "DIFF_ETH": {
@@ -120,7 +120,7 @@
       "microvia_drill_mm": 0.1,
       "priority": 250,
       "pcb_color": "rgba(50, 180, 100, 0.700)",
-      "schematic_color": "rgba(50, 180, 100, 0.700)"
+      "schematic_color": "rgba(0, 0, 0, 0.000)"
     },
 
     "ANALOG": {
@@ -137,7 +137,7 @@
       "microvia_drill_mm": 0.1,
       "priority": 300,
       "pcb_color": "rgba(150, 50, 200, 0.700)",
-      "schematic_color": "rgba(150, 50, 200, 0.700)"
+      "schematic_color": "rgba(0, 0, 0, 0.000)"
     }
   },
 

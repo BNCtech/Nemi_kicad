@@ -51,38 +51,79 @@ def _load_cfg() -> Dict[str, Any]:
 # `kicad-cli pcb drc --format json`): courtyards_overlap / clearance /
 # silk_overlap / lib_footprint_issues / unconnected_items. Legacy aliases are
 # kept so older KiCad report schemas still match.
+# Shorthand fix actions (single edit-point so the dispatch table reads clearly).
+_ROUTE = ("route_pcb_simple", {"replace": True})   # clear messy copper + clean reroute
+_PLACE = ("auto_place_pcb", {"refine_only": True}) # spread parts in place
+_POUR_GND = ("auto_zones_pcb", {"net": "GND"})     # GND copper pour
+_REPOUR = ("auto_zones_pcb", {})                   # re-pour all zones
+_SILK = ("silkscreen_cleanup_pcb", {})             # move silk off pads/copper
+
 _BUILTIN_FIX: Dict[str, Tuple[str, Dict[str, Any]]] = {
     "invalid_outline":     ("auto_outline_pcb", {}),
-    "unconnected_item":    ("auto_zones_pcb", {"net": "GND"}),
-    "unconnected_items":   ("auto_zones_pcb", {"net": "GND"}),
-    # Footprint courtyards overlapping → push them apart in place. Side-effect:
-    # also clears the `clearance` errors caused by the same physical overlap.
-    "courtyards_overlap":  ("auto_place_pcb", {"refine_only": True}),
-    "courtyard_overlap":   ("auto_place_pcb", {"refine_only": True}),  # alias
-    # Silkscreen fixes dispatch to the DFA cleanup tool when it is installed;
-    # until then they fall through gracefully (ModuleNotFoundError handled) and
-    # the guard keeps the board safe.
-    "silk_overlap":            ("silkscreen_cleanup_pcb", {}),
-    "silk_over_copper":        ("silkscreen_cleanup_pcb", {}),
-    "silkscreen_overlap":      ("silkscreen_cleanup_pcb", {}),  # alias
-    "overlapping_silkscreen":  ("silkscreen_cleanup_pcb", {}),  # alias
+    # Unconnected nets: pour GND (catches the bulk of unconnected GND pads). Any
+    # unconnected SIGNAL nets are reconnected by the clear+reroute that the
+    # routing-error types below trigger on the same board.
+    "unconnected_item":    _POUR_GND,
+    "unconnected_items":   _POUR_GND,
+    # ----- Routing-caused copper errors (the dominant errors on a routed board).
+    # The proper fix is NOT "leave it to the human" — it is to clear the messy /
+    # shorting tracks and re-route them clearance-aware (route_pcb_simple already
+    # honours per-net clearance + board-edge keepout). replace=true wipes the bad
+    # copper first so two-net shorts and clearance hits are removed at the source.
+    "shorting_items":        _ROUTE,
+    "tracks_crossing":       _ROUTE,   # alias seen on some KiCad builds
+    "clearance":             _ROUTE,
+    "clearance_violation":   _ROUTE,   # alias
+    "copper_edge_clearance": _ROUTE,
+    "track_dangling":        _ROUTE,
+    # ----- Footprint courtyards overlapping → push them apart in place. Side-
+    # effect: also clears the `clearance`/`solder_mask_bridge` the overlap caused.
+    "courtyards_overlap":  _PLACE,
+    "courtyard_overlap":   _PLACE,     # alias
+    # Two solder-mask openings merging into one bridge — usually adjacent parts
+    # too close; spreading them apart opens the gap. (Same-footprint pin bridges
+    # are a library/mask-rule matter and revert harmlessly under the guard.)
+    "solder_mask_bridge":  _PLACE,
+    # A pad starved of thermal-relief spokes from its zone → re-pour the zones so
+    # the connection is rebuilt with full spokes.
+    "starved_thermal":     _REPOUR,
+    # Silkscreen on pads / copper → DFA cleanup tool nudges the text clear.
+    "silk_overlap":            _SILK,
+    "silk_over_copper":        _SILK,
+    "silkscreen_overlap":      _SILK,  # alias
+    "overlapping_silkscreen":  _SILK,  # alias
 }
 
+# Logical phase order so a single round applies fixes in the order a human would:
+# draw the board, place the parts, route, pour, then tidy silk. Without this the
+# plan ran alphabetically (auto_zones before route), pouring around copper that
+# was about to be torn up and re-laid.
+_PHASE_RANK: Dict[str, int] = {
+    "auto_outline_pcb":        0,
+    "auto_place_pcb":          1,
+    "route_pcb_simple":        2,
+    "set_track_widths_pcb":    3,
+    "auto_zones_pcb":          4,
+    "auto_thermal_vias_pcb":   4,
+    "silkscreen_cleanup_pcb":  5,
+}
+
+
+def _phase_rank(action: str) -> int:
+    return _PHASE_RANK.get(action, 3)
+
+
 # Types we deliberately leave to the human — listing them keeps the report
-# honest about WHY they weren't touched.
+# honest about WHY they weren't touched. (Routing/placement-fixable types were
+# MOVED out of here into _BUILTIN_FIX above — they are now auto-repaired.)
 _REPORT_ONLY_REASON: Dict[str, str] = {
     "lib_footprint_issues":   ("footprint differs from library — open PCB Editor "
                                "-> Update Footprints from Library"),
     "lib_footprint_mismatch": ("footprint differs from library — open PCB Editor "
                                "-> Update Footprints from Library"),
-    "clearance":              ("clearance — usually clears once courtyards_overlap "
-                               "is fixed; otherwise re-route the track or relax the rule"),
-    "clearance_violation":    "clearance — move parts apart or relax the net-class rule",
     "hole_to_hole_clearance": "drill spacing — move the holes apart",
     "hole_near_hole":         "drill spacing — move the holes apart",
     "annular_width":          "annular ring — increase pad/via size or shrink drill",
-    "track_dangling":         "dangling track — route it to a pad or delete it",
-    "shorting_items":         "two nets touch — re-route the offending track",
 }
 
 
@@ -94,17 +135,46 @@ def _violation_summary(issues: List[Dict[str, Any]]) -> Dict[str, int]:
     return out
 
 
+def _error_signatures(issues: List[Dict[str, Any]]) -> set:
+    """Set of stable signatures for ERROR-severity violations ONLY — mirrors
+    erc_autofix's _error_signature_set. Warnings never enter the set, so a fix
+    that clears an error but leaves a new warning (e.g. a re-route that drops a
+    short but leaves a net unrouted) is NOT punished by the guard.
+
+    A signature is ``type@<item-location>``. drc_check already renders each item
+    as 'desc @ (x, y)', so the coordinate is baked in. The signature set is only
+    compared when the error COUNT is unchanged — to catch a 'swap' (one error
+    cleared, a different one introduced at the same count). When the count drops
+    the fix is accepted outright, so re-routes that legitimately move copper to
+    new positions are never reverted for it."""
+    sigs: set = set()
+    for v in issues:
+        if (v.get("severity") or "").lower() != "error":
+            continue
+        vt = v.get("type", "")
+        items = v.get("items") or []
+        if items:
+            for it in items:
+                sigs.add(f"{vt}@{it}")
+        else:
+            sigs.add(f"{vt}@-")
+    return sigs
+
+
 async def _measure(pcb_path: Path) -> Dict[str, Any]:
-    """Run drc_check and return {errors, warnings, total, issues, ok, error?}."""
+    """Run drc_check and return {errors, warnings, total, issues, err_sigs, ok, error?}."""
     DRC = importlib.import_module("envil_agent.tools.drc_check")
     res = await DRC.drc_check.handler({"pcb_path": str(pcb_path)})
     if res.get("is_error"):
         return {"error": res.get("content", [{}])[0].get("text", "DRC failed"),
-                "errors": -1, "warnings": -1, "total": -1, "issues": []}
+                "errors": -1, "warnings": -1, "total": -1, "issues": [],
+                "err_sigs": set()}
     err = int(res.get("error_count", 0))
     warn = int(res.get("warning_count", 0))
+    issues = res.get("issues") or []
     return {"errors": err, "warnings": warn, "total": err + warn,
-            "issues": res.get("issues") or [], "ok": err == 0}
+            "issues": issues, "err_sigs": _error_signatures(issues),
+            "ok": err == 0}
 
 
 def _plan_for(counts: Dict[str, int],
@@ -137,36 +207,103 @@ def _plan_for(counts: Dict[str, int],
 
 
 async def _apply_plan(pcb_path: Path,
-                      plan: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Execute every fix action once (deduped by (tool, args))."""
+                      plan: List[Dict[str, Any]],
+                      *, guard_per_fix: bool, sig_guard: bool,
+                      start_errors: int, start_total: int,
+                      start_sigs: set) -> Tuple[List[Dict[str, Any]], int, int, set]:
+    """Execute the fix actions in PHASE order (deduped by (tool, args)).
+
+    Per-fix guard — ERC parity (mirrors erc_autofix's per_fix + signature guard).
+    For each fix: snapshot -> run -> re-DRC, then decide KEEP / REVERT by:
+
+      * REVERT if the ERROR count rose (a fix must never add a hard error), OR
+      * REVERT if the error count is unchanged BUT a NEW error-signature appeared
+        (a 'swap' — one error cleared, a different one introduced; ``sig_guard``),
+      * otherwise KEEP.
+
+    Errors lead, exactly like ERC: warnings never trip the guard, so a re-route
+    that drops a short but leaves a net as an unrouted *warning* is still kept.
+    When the error count DROPS the fix is accepted outright (no signature check),
+    so re-routes that move copper to new coordinates are never wrongly reverted.
+
+    Returns (applied, errors, total, err_sigs) after the kept fixes.
+    """
     applied: List[Dict[str, Any]] = []
     seen: set = set()
-    for step in plan:
+    cur_err = start_errors
+    cur_total = start_total
+    cur_sigs = set(start_sigs)
+    # Order the actionable steps by logical phase (place before route before pour).
+    actionable = [s for s in plan
+                  if s.get("action") not in ("skip", "report_only", "")]
+    actionable.sort(key=lambda s: _phase_rank(s.get("action", "")))
+    for step in actionable:
         action = step.get("action", "")
-        if action in ("skip", "report_only", ""):
-            continue
         args = step.get("args") or {}
         key = (action, tuple(sorted((k, str(v)) for k, v in args.items())))
         if key in seen:
             continue
         seen.add(key)
         try:
+            snap = pcb_path.read_bytes()
+        except OSError as exc:
+            applied.append({"action": action, "args": args, "ok": False,
+                            "kept": False, "result": f"snapshot failed: {exc}"})
+            continue
+        try:
             mod = importlib.import_module(f"envil_agent.tools.{action}")
             tool_fn = getattr(mod, action)
-            ta = {"pcb_path": str(pcb_path), **args}
-            r = await tool_fn.handler(ta)
-            applied.append({
-                "action": action, "args": args,
-                "ok": bool(r.get("ok", False)) and not r.get("is_error", False),
-                "result": (r.get("content", [{}])[0].get("text", "") or "")[:240],
-            })
+            r = await tool_fn.handler({"pcb_path": str(pcb_path), **args})
+            ran_ok = bool(r.get("ok", False)) and not r.get("is_error", False)
+            txt = (r.get("content", [{}])[0].get("text", "") or "")[:200]
         except ModuleNotFoundError:
             applied.append({"action": action, "args": args, "ok": False,
-                            "result": f"tool '{action}' not installed yet — skipped"})
+                            "kept": False,
+                            "result": f"tool '{action}' not installed — skipped"})
+            continue
         except Exception as exc:                          # noqa: BLE001
+            pcb_path.write_bytes(snap)
             applied.append({"action": action, "args": args, "ok": False,
+                            "kept": False,
                             "result": f"{type(exc).__name__}: {exc}"})
-    return applied
+            continue
+
+        if not guard_per_fix:
+            applied.append({"action": action, "args": args, "ok": ran_ok,
+                            "kept": True, "result": txt})
+            continue
+
+        # Per-fix guard: re-measure and decide keep/revert (errors-first).
+        after = await _measure(pcb_path)
+        if after.get("error") is not None:
+            pcb_path.write_bytes(snap)
+            applied.append({"action": action, "args": args, "ok": ran_ok,
+                            "kept": False, "result": "re-check failed; reverted"})
+            continue
+        new_err = int(after.get("errors", cur_err))
+        new_total = int(after.get("total", cur_total))
+        new_sigs = after.get("err_sigs") or set()
+        introduced = (new_sigs - cur_sigs) if sig_guard else set()
+
+        if new_err > cur_err:
+            verdict = (False, f"added {new_err - cur_err} error(s); reverted")
+        elif new_err == cur_err and introduced:
+            verdict = (False, f"swapped in {len(introduced)} new error(s); reverted")
+        else:
+            verdict = (True, "")
+
+        keep, why = verdict
+        if not keep:
+            pcb_path.write_bytes(snap)
+            applied.append({"action": action, "args": args, "ok": ran_ok,
+                            "kept": False, "result": f"{why}. {txt}"})
+        else:
+            de = cur_err - new_err
+            cur_err, cur_total, cur_sigs = new_err, new_total, new_sigs
+            note = (f"{de} fewer error(s) -> {new_err} err. " if de > 0 else "")
+            applied.append({"action": action, "args": args, "ok": ran_ok,
+                            "kept": True, "result": note + txt})
+    return applied, cur_err, cur_total, cur_sigs
 
 
 @tool(
@@ -240,85 +377,102 @@ async def drc_autofix(args: dict[str, Any]) -> dict[str, Any]:
                 "ok": True, "violations": issues, "plan": plan,
                 "before": base["total"], "applied": None}
 
-    # ---- Apply with snapshot + closed-loop re-check ----
+    # ---- Apply (phase-ordered, per-fix guarded) + closed-loop re-check ----
+    # Guard granularity: per-fix when on (each fix kept only if it does not ADD a
+    # hard error or swap in a new error-signature — see _apply_plan), so a
+    # re-route that fails to fully reconnect can never undo the placement/pour
+    # fixes that already helped, and warnings never block an error fix.
+    guard_per_fix = (guard != "off")
+    sig_guard = bool(cfg.get("signature_regression_guard", True))
     rounds: List[Dict[str, Any]] = []
+    prev_err = base["errors"]
     prev_total = base["total"]
-    cur_counts = counts
+    prev_sigs = base.get("err_sigs") or set()
     cur_plan = plan
     final_total = prev_total
+    final_err = prev_err
 
     for rnd in range(max_rounds):
         actionable = [s for s in cur_plan
                       if s["action"] not in ("skip", "report_only", "")]
         if not actionable:
             break
-        try:
-            snapshot = pcb_path.read_bytes()
-        except OSError as exc:
-            return {"content": [{"type": "text",
-                                  "text": f"ERROR: cannot snapshot board: {exc}"}],
-                    "is_error": True}
 
-        applied = await _apply_plan(pcb_path, cur_plan)
+        applied, kept_err, kept_total, kept_sigs = await _apply_plan(
+            pcb_path, cur_plan,
+            guard_per_fix=guard_per_fix, sig_guard=sig_guard,
+            start_errors=prev_err, start_total=prev_total, start_sigs=prev_sigs)
+
+        # Authoritative re-measure for re-planning + reporting.
         after = await _measure(pcb_path)
-
-        reverted = False
-        if after.get("error") is not None:
-            # DRC broke after the edit — restore and stop.
-            pcb_path.write_bytes(snapshot)
-            reverted = True
-            after = {"errors": prev_total, "warnings": 0, "total": prev_total,
-                     "issues": [], "note": "re-check failed; reverted"}
-        elif guard != "off" and after["total"] > prev_total:
-            pcb_path.write_bytes(snapshot)
-            reverted = True
-            after = {**after, "total": prev_total,
-                     "note": "regression — reverted to snapshot"}
+        if after.get("error") is None:
+            after_err = after["errors"]
+            after_total = after["total"]
+            after_sigs = after.get("err_sigs") or set()
+            after_issues = after.get("issues") or []
+        else:
+            after_err, after_total, after_sigs, after_issues = (
+                kept_err, kept_total, kept_sigs, [])
 
         rounds.append({"round": rnd + 1, "before": prev_total,
-                       "after": after["total"], "reverted": reverted,
-                       "applied": applied})
-        final_total = after["total"]
+                       "after": after_total, "before_err": prev_err,
+                       "after_err": after_err, "applied": applied})
+        final_total = after_total
+        final_err = after_err
 
-        if reverted or after["total"] >= prev_total:
-            break                                   # no progress / reverted → stop
-        # Re-plan from the post-fix state for the next round.
-        prev_total = after["total"]
-        cur_counts = _violation_summary(after.get("issues") or [])
+        # Keep iterating while a round still removed an error OR a warning.
+        if after_err >= prev_err and after_total >= prev_total:
+            break                                   # plateaued → stop
+        prev_err = after_err
+        prev_total = after_total
+        prev_sigs = after_sigs
+        cur_counts = _violation_summary(after_issues)
         cur_plan = _plan_for(cur_counts, strategies)
 
-    # ---- Report ----
-    _delta = final_total - base["total"]            # negative = fewer violations
-    if _delta == 0:
-        _delta_txt = "  (no change)"
-    elif _delta < 0:
-        _delta_txt = f"  ({-_delta} fewer)"
-    else:
-        _delta_txt = f"  ({_delta} MORE)"
+    # ---- Report (errors lead — they are the fab gate, exactly like ERC) ----
+    def _delta_txt(before: int, after: int) -> str:
+        d = after - before
+        if d == 0:
+            return "  (no change)"
+        return f"  ({-d} fewer)" if d < 0 else f"  ({d} MORE)"
+
     lines = [f"DRC auto-fix on {pcb_path.name}",
-             f"  total violations: {base['total']} -> {final_total}{_delta_txt}"]
+             f"  errors:  {base['errors']} -> {final_err}{_delta_txt(base['errors'], final_err)}",
+             f"  total:   {base['total']} -> {final_total}{_delta_txt(base['total'], final_total)}"]
     lines.append("  violations by type (initial):")
     for vt, n in sorted(counts.items()):
         lines.append(f"    {vt}: {n}")
     for rinfo in rounds:
         lines.append("")
-        tag = " [REVERTED]" if rinfo["reverted"] else ""
-        lines.append(f"Round {rinfo['round']}: {rinfo['before']} -> "
-                     f"{rinfo['after']}{tag}")
+        lines.append(f"Round {rinfo['round']}: "
+                     f"{rinfo.get('before_err', '?')} -> {rinfo.get('after_err', '?')} errors "
+                     f"({rinfo['before']} -> {rinfo['after']} total)")
         for a in rinfo["applied"]:
-            mark = "OK " if a["ok"] else "xx "
+            # kept = the fix helped/held; "--" = ran but undone by guard; xx = failed.
+            if a.get("kept"):
+                mark = "OK "
+            elif a.get("ok"):
+                mark = "-- "
+            else:
+                mark = "xx "
             lines.append(f"  {mark}{a['action']}: {a['result'][:110]}")
-    # Honest closing line.
-    if final_total == 0:
-        lines.append("\nDRC clean.")
-    elif final_total < base["total"]:
-        lines.append(f"\nReduced to {final_total} remaining — re-run or fix the "
-                     f"report-only items by hand.")
+    # Honest closing line — errors first.
+    if final_err == 0 and final_total == 0:
+        lines.append("\nDRC clean — 0 errors, 0 warnings.")
+    elif final_err == 0:
+        lines.append(f"\n0 errors — board passes the DRC error gate. "
+                     f"{final_total} warning(s) remain (footprint-library sync, "
+                     f"unrouted nets, or cosmetic silk — none block fabrication).")
+    elif final_err < base["errors"]:
+        lines.append(f"\nReduced to {final_err} error(s) — re-run, or the rest need "
+                     f"manual placement/routing or a design-rule change.")
     else:
-        lines.append("\nNo automatic improvement — remaining items need manual "
+        lines.append("\nNo automatic improvement — remaining errors need manual "
                      "placement/routing or a design-rule change.")
 
     return {"content": [{"type": "text", "text": "\n".join(lines)}],
             "ok": True, "path": str(pcb_path),
+            "errors_before": base["errors"], "errors_after": final_err,
             "before": base["total"], "after": final_total,
+            "drc_clean": final_err == 0,
             "violations": issues, "plan": plan, "rounds": rounds}

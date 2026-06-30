@@ -1,0 +1,46 @@
+{
+  "ir": {
+    "name": "vehicle_tracker",
+    "circuit_type": "telematics_tracker",
+    "components": [
+      {"ref": "J1", "lib_id": "Connector:Conn_01x02_Pin", "value": "12V_IN", "footprint": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical"},
+      {"ref": "Q1", "lib_id": "Device:Q_PMOS_GSD", "value": "SQM50P03", "footprint": "Package_TO_SOT_SMD:TO-252-3_TabPin2"},
+      {"ref": "R1", "lib_id": "Device:R", "value": "100k", "footprint": "Resistor_SMD:R_0603_1608Metric"},
+      {"ref": "D2", "lib_id": "Device:D_TVS", "value": "SMBJ24A", "footprint": "Diode_SMD:D_SMB"},
+      {"ref": "U1", "lib_id": "Regulator_Switching:TPS5430", "value": "TPS5430", "footprint": "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"},
+      {"ref": "L1", "lib_id": "Device:L", "value": "15uH", "footprint": "Inductor_SMD:L_Bourns-SRR1260"},
+      {"ref": "D1", "lib_id": "Device:D_Schottky", "value": "B340A", "footprint": "Diode_SMD:D_SMA"},
+      {"ref": "C1", "lib_id": "Device:C", "value": "10uF", "footprint": "Capacitor_SMD:C_0805_2012Metric"},
+      {"ref": "C2", "lib_id": "Device:C", "value": "10uF", "footprint": "Capacitor_SMD:C_0805_2012Metric"},
+      {"ref": "C3", "lib_id": "Device:C", "value": "22uF", "footprint": "Capacitor_SMD:C_0805_2012Metric"},
+      {"ref": "R2", "lib_id": "Device:R", "value": "10k", "footprint": "Resistor_SMD:R_0603_1608Metric"},
+      {"ref": "R3", "lib_id": "Device:R", "value": "3k24", "footprint": "Resistor_SMD:R_0603_1608Metric"},
+      {"ref": "U2", "lib_id": "MCU_ST_STM32L4:STM32L432KCUx", "value": "STM32L432KC", "footprint": "Package_DFN_QFN:QFN-32-1EP_5x5mm_P0.5mm_EP3.45x3.45mm"},
+      {"ref": "C4", "lib_id": "Device:C", "value": "100nF", "footprint": "Capacitor_SMD:C_0402_1005Metric"},
+      {"ref": "U3", "lib_id": "RF_GPS:NEO-6M", "value": "NEO-6M", "footprint": "RF_GPS:ublox_NEO-6M"},
+      {"ref": "U4", "lib_id": "RF_Module:SIM800L", "value": "SIM800L", "footprint": "RF_Module:SIM800L"},
+      {"ref": "J2", "lib_id": "Connector:Conn_Coaxial", "value": "GPS_ANT", "footprint": "Connector_Coaxial:U.FL_Molex_73412-0110_Vertical"},
+      {"ref": "J3", "lib_id": "Connector:Conn_Coaxial", "value": "GSM_ANT", "footprint": "Connector_Coaxial:U.FL_Molex_73412-0110_Vertical"}
+    ],
+    "nets": [
+      {"name": "+12V_RAW", "pins": ["J1.1", "Q1.SOURCE", "D2.2"], "is_power": true},
+      {"name": "+12V", "pins": ["Q1.DRAIN", "U1.VIN", "C1.1"], "is_power": true},
+      {"name": "GND", "pins": ["J1.2", "D2.1", "R1.2", "U1.GND", "C1.2", "D1.2", "C2.2", "C3.2", "R3.2", "U2.VSS", "C4.2", "U3.GND", "U4.GND", "J2.2", "J3.2"], "is_power": true},
+      {"name": "GATE", "pins": ["Q1.GATE", "R1.1"]},
+      {"name": "SW", "pins": ["U1.SW", "L1.1", "D1.1"]},
+      {"name": "+3V3", "pins": ["L1.2", "C2.1", "C3.1", "R2.1", "U2.VDD", "C4.1", "U3.VCC", "U4.VBAT"], "is_power": true},
+      {"name": "FB", "pins": ["U1.FB", "R2.2", "R3.1"]},
+      {"name": "EN", "pins": ["U1.EN", "U2.GPS_EN"]},
+      {"name": "NRST", "pins": ["U2.NRST"]},
+      {"name": "GPS_TXD", "pins": ["U3.TXD", "U2.USART1_RX"]},
+      {"name": "GPS_RXD", "pins": ["U3.RXD", "U2.USART1_TX"]},
+      {"name": "GSM_TXD", "pins": ["U4.TXD", "U2.USART2_RX"]},
+      {"name": "GSM_RXD", "pins": ["U4.RXD", "U2.USART2_TX"]},
+      {"name": "GPS_ANT", "pins": ["U3.RFIN", "J2.1"]},
+      {"name": "GSM_ANT", "pins": ["U4.ANT", "J3.1"]}
+    ],
+    "blocks": [],
+    "buses": [],
+    "notes": ""
+  }
+}

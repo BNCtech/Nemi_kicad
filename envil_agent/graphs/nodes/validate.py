@@ -113,7 +113,16 @@ def validate_only_node(state: Dict[str, Any]) -> Dict[str, Any]:
         }
     prompt = str(state.get("prompt") or "")
     norm_warnings = state.get("norm_warnings") or []
-    issues = dedupe_issues(validate_ir(ir, prompt=prompt)) + norm_warnings
+    # Defensive: coerce any stray non-dict issue (a bare string from a producer)
+    # into a proper warning dict, so the `i["severity"]` iteration below can never
+    # crash the whole build on a type mismatch (TypeError: string indices).
+    def _as_issue(x: Any) -> Dict[str, Any]:
+        if isinstance(x, dict):
+            return x
+        return {"code": "NORMALIZE", "severity": "warning",
+                "where": "normalize", "text": str(x)}
+    issues = [_as_issue(i) for i in
+              (dedupe_issues(validate_ir(ir, prompt=prompt)) + list(norm_warnings))]
 
     feedback = ""
     if has_errors(issues):

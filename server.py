@@ -106,6 +106,20 @@ def _classify(filename: str, content_type: Optional[str]) -> str:
 IPC_CLIENTS: Set[asyncio.StreamWriter] = set()
 IPC_PENDING: deque = deque(maxlen=32)
 
+# Sticky "open this project" state. open_project is a STATE-SYNC message, not a
+# fire-once event: the SHELL must end up on the latest project no matter WHEN it
+# connects. Two ordering hazards made the tree stay empty (observed in the live
+# log as `ipc_clients=0` at broadcast time):
+#   1. The broadcast fires while the shell is briefly disconnected (e.g. right
+#      after a backend restart) -> it lands in IPC_PENDING.
+#   2. IPC_PENDING is drained into the FIRST client to (re)connect and then
+#      cleared -> that client is usually an eeschema editor, which IGNORES
+#      open_project, so the shell (connecting a moment later) gets nothing.
+# Fix: remember the most recent open_project and replay it to EVERY newly
+# connected client. Editors discard the action; only the shell acts on it, and
+# its handler skips a redundant reload when the project is already active.
+IPC_LAST_OPEN_PROJECT: Optional[Dict[str, Any]] = None
+
 # Per-session conversation history. Each entry is a list of
 # {role: 'user'|'assistant', text: str} turns, oldest first. The agent
 # replays this in every run_turn() call so the model has memory across
@@ -152,6 +166,28 @@ async def _ipc_send(writer: asyncio.StreamWriter, payload: Dict[str, Any]) -> No
 
 
 async def _ipc_broadcast(payload: Dict[str, Any]) -> None:
+    # open_project handling: (1) absolutize the path, (2) remember it as sticky.
+    if isinstance(payload, dict) and payload.get("action") == "open_project":
+        # The SHELL resolves a relative path against ITS cwd (the install bin
+        # folder), not the backend's — so a relative `name/name.kicad_pro` fails
+        # wxFileExists() in the shell handler and LoadProject() never runs (the
+        # "folder created on disk but tree stays empty" symptom). Resolve to an
+        # absolute path here, at the single broadcast chokepoint, so every
+        # open_project (mid-turn create_project AND end-of-turn auto-refresh)
+        # sends a path the shell can actually open. resolve() is lexical-safe
+        # even if the file does not exist yet and is a no-op when already absolute.
+        try:
+            _d = payload.get("data") or {}
+            _p = _d.get("path") or ""
+            if _p and not Path(_p).is_absolute():
+                _abs = str(Path(_p).resolve()).replace("\\", "/")
+                payload = {**payload, "data": {**_d, "path": _abs}}
+        except Exception:
+            pass  # never let path math break the broadcast
+        # Remember the latest open_project so a client that connects (or
+        # reconnects) AFTER this broadcast still gets it — see above.
+        global IPC_LAST_OPEN_PROJECT
+        IPC_LAST_OPEN_PROJECT = payload
     if not IPC_CLIENTS:
         IPC_PENDING.append(payload)
         return
@@ -189,6 +225,15 @@ async def _ipc_handle(reader: asyncio.StreamReader,
                 await _ipc_send(writer, q)
             except Exception:
                 break
+    # Sticky state-sync: replay the latest open_project to THIS client too, so a
+    # shell that connects after the broadcast (or reconnects after a backend
+    # restart) still lands on the current project. Sent to every client; editors
+    # ignore open_project, the shell loads it (and no-ops if already active).
+    if IPC_LAST_OPEN_PROJECT is not None:
+        try:
+            await _ipc_send(writer, IPC_LAST_OPEN_PROJECT)
+        except Exception:
+            pass
     try:
         while True:
             length_bytes = await reader.readexactly(4)
@@ -218,6 +263,27 @@ async def _ipc_handle(reader: asyncio.StreamReader,
         print(f"[IPC] eeschema disconnected: {addr}", flush=True)
 
 
+def _user_state_dir() -> Path:
+    """Per-user, install-location-independent state dir, IDENTICAL to the path the
+    shell resolves first in TryConnectAiIpc() (kicad_manager_frame.cpp):
+        Windows : %LOCALAPPDATA%\\orchestrator
+        macOS   : ~/Library/Application Support/orchestrator
+        Linux   : $XDG_STATE_HOME/orchestrator  (else ~/.local/state/orchestrator)
+    The dev tree and the exe share a folder, so the old <src>/ipc_port.txt happened
+    to be found on this machine — but on a shared/installed copy the exe lives
+    elsewhere and never sees it, so the shell falls back to a dead port and the
+    'open this project in the tree' command never arrives. Writing here too makes
+    discovery work on every machine regardless of where the exe/backend live."""
+    import sys
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA", "").strip() or str(Path.home() / "AppData" / "Local")
+    elif sys.platform == "darwin":
+        base = str(Path.home() / "Library" / "Application Support")
+    else:
+        base = os.environ.get("XDG_STATE_HOME", "").strip() or str(Path.home() / ".local" / "state")
+    return Path(base) / "orchestrator"
+
+
 async def _start_ipc() -> int:
     pinned = os.environ.get("IPC_PORT", "52344").strip()
     try:
@@ -227,8 +293,16 @@ async def _start_ipc() -> int:
     server = await asyncio.start_server(
         _ipc_handle, "127.0.0.1", port, reuse_address=True,
     )
-    # Write the port for the eeschema plugin to discover
+    # Write the port for the eeschema plugin AND the shell to discover. The
+    # per-user state dir is what the shell reads FIRST and is the only one that is
+    # the same on a shared/installed copy as on the dev machine.
+    _state_dir = _user_state_dir()
+    try:
+        _state_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
     port_files = [
+        _state_dir / "ipc_port.txt",
         Path(tempfile.gettempdir()) / "envil_ipc_port.txt",
         Path(__file__).resolve().parent / "ipc_port.txt",
     ]
@@ -486,6 +560,95 @@ async def ws_chat(ws: WebSocket):
                                           "text": "No PCB file found yet — build a "
                                                   "circuit first.",
                                           "session_id": session_id})
+                continue
+
+            if kind == "export_gerbers":
+                # One-click "Download Gerbers" button. Runs DRC (honest gate)
+                # then export_pcb (gerbers + drill + pick&place + zip) WITHOUT
+                # the LLM — deterministic, instant, zero tokens. Emits
+                # `gerbers_ready` so the chat shows an "Open Folder" button.
+                # Universal: works on any .kicad_pcb, all flags from
+                # layout_config.json:pcb_export — no per-circuit logic here.
+                pf2 = (msg.get("pcb_file") or pcb_path or "").strip()
+                if not pf2 and schematic_path and schematic_path.endswith(".kicad_sch"):
+                    pf2 = schematic_path[:-len(".kicad_sch")] + ".kicad_pcb"
+                if not (pf2 and Path(pf2).exists()):
+                    await ws.send_json({"kind": "error",
+                                          "text": "No PCB file found yet — build a "
+                                                  "circuit first, then I can make the "
+                                                  "Gerber files.",
+                                          "session_id": session_id})
+                    continue
+                await ws.send_json({"kind": "status",
+                                      "text": "Making the Gerber files…",
+                                      "session_id": session_id})
+                try:
+                    from envil_agent.tools._pcb_sexpr import (
+                        dispatch_tool as _dispatch_gerber)
+                    # Honest DRC gate — never present the board as ready to
+                    # order if it still has rule violations. -1 = couldn't run.
+                    _drc_errors = -1
+                    try:
+                        _drc = await _dispatch_gerber("drc_check",
+                                                       {"pcb_path": pf2})
+                        if not _drc.get("is_error"):
+                            _drc_errors = int(_drc.get("error_count", -1))
+                    except Exception:
+                        _drc_errors = -1
+                    _exp = await _dispatch_gerber("export_pcb",
+                                                   {"pcb_path": pf2, "zip": True})
+                    if _exp.get("is_error") or not _exp.get("ok"):
+                        await ws.send_json({"kind": "error",
+                                              "text": "Could not make the Gerber "
+                                                      "files automatically. Open the "
+                                                      "board in KiCad and use "
+                                                      "File → Fabrication Outputs "
+                                                      "→ Gerbers.",
+                                              "session_id": session_id})
+                        continue
+                    await ws.send_json({
+                        "kind": "gerbers_ready",
+                        "zip_path": _exp.get("zip_path", ""),
+                        "output_dir": _exp.get("output_dir", ""),
+                        "files": _exp.get("files", []),
+                        "drc_errors": _drc_errors,
+                        "drc_clean": (_drc_errors == 0),
+                        "session_id": session_id,
+                    })
+                    print(f"[export_gerbers] {pf2} -> "
+                          f"{_exp.get('zip_path','')} drc_errors={_drc_errors}",
+                          flush=True)
+                except Exception as _ge:
+                    print(f"[export_gerbers] failed: {_ge}", flush=True)
+                    await ws.send_json({"kind": "error",
+                                          "text": "Could not make the Gerber files.",
+                                          "session_id": session_id})
+                continue
+
+            if kind == "open_path":
+                # "Open Folder" button: reveal the gerbers folder in the OS
+                # file manager so the user can drag the zip to the fab house.
+                # Local desktop app — the path is a folder the backend itself
+                # just wrote next to the user's project.
+                _op = (msg.get("path") or "").strip()
+                try:
+                    if _op and Path(_op).exists():
+                        try:
+                            os.startfile(_op)            # Windows: open folder
+                        except AttributeError:
+                            import subprocess as _sp
+                            _opener = ("open" if sys.platform == "darwin"
+                                       else "xdg-open")
+                            _sp.Popen([_opener, _op])
+                        await ws.send_json({"kind": "status",
+                                              "text": "Opened the folder.",
+                                              "session_id": session_id})
+                    else:
+                        await ws.send_json({"kind": "error",
+                                              "text": "That folder no longer exists.",
+                                              "session_id": session_id})
+                except Exception as _oe:
+                    print(f"[open_path] failed: {_oe}", flush=True)
                 continue
 
             if kind == "message":
@@ -909,6 +1072,7 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
     try:
         full_reply = []
         generated_path: Optional[str] = None
+        generated_pcb_path: Optional[str] = None
         child_paths: list = []
         preview_svgs: list = []
         # Pull this session's history so the agent sees prior turns and
@@ -964,6 +1128,35 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
                     p = event.tool_result.get("path") or ""
                     if p and p.lower().endswith(".kicad_sch"):
                         generated_path = p
+                    # PCB tools (generate_pcb, auto_layout_pcb, route_pcb_simple,
+                    # auto_zones_pcb, drc_autofix, …) return a .kicad_pcb path.
+                    # Capture the LAST one so the open PCB editor gets a live
+                    # reload at turn end, the same way eeschema does for .kicad_sch.
+                    elif p and p.lower().endswith(".kicad_pcb"):
+                        generated_pcb_path = p
+                    # Some PCB tools (pcb_improve / "Fix all", pcb_quality) return
+                    # the board under "pcb_path", NOT "path" — so the capture above
+                    # missed them and the open PCB editor never got a reload after
+                    # a fix. Capture "pcb_path" too so EVERY board-touching tool
+                    # triggers the turn-end pcbnew revert.
+                    pp = event.tool_result.get("pcb_path") or ""
+                    if pp and pp.lower().endswith(".kicad_pcb"):
+                        generated_pcb_path = pp
+                    # Fab bundle: when export_pcb / ship_design produce a
+                    # Gerber zip, surface the same "Open Folder" card the
+                    # one-click button uses — so the natural-language path
+                    # ("download the gerbers") gets the folder shortcut too.
+                    _zp = event.tool_result.get("zip_path") or ""
+                    if _zp and _zp.lower().endswith(".zip"):
+                        await ws.send_json({
+                            "kind": "gerbers_ready",
+                            "zip_path": _zp,
+                            "output_dir": event.tool_result.get("output_dir", ""),
+                            "files": event.tool_result.get("files", []),
+                            "drc_errors": -1,
+                            "drc_clean": False,
+                            "session_id": session_id,
+                        })
                     cps = event.tool_result.get("child_paths") or []
                     if isinstance(cps, list):
                         for cp in cps:
@@ -985,6 +1178,37 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
                                       "tool_name": event.tool_name,
                                       "result": event.tool_result,
                                       "session_id": session_id})
+                # Folder-first UX: when create_project finishes, load the EMPTY
+                # project into the shell's Project Files tree IMMEDIATELY —
+                # mid-turn, before the design questions stream. The generic
+                # open_project broadcast below only runs at turn-END, so without
+                # this the user sees the design questions appear before the empty
+                # file shows up (the exact "create the file first, THEN go to
+                # design" complaint). Gated auto_refresh.open_project_in_shell
+                # (same flag as the end-of-turn path); never breaks the turn.
+                # tool_name is the SDK's MCP-prefixed form (e.g.
+                # "mcp__envil__create_project") — match on the bare suffix.
+                _bare_tool = str(event.tool_name or "").split("__")[-1]
+                if _bare_tool == "create_project" and event.tool_result:
+                    _cp_sch = event.tool_result.get("path") or ""
+                    if _cp_sch.lower().endswith(".kicad_sch"):
+                        try:
+                            from envil_agent.intent.engine import (
+                                _load_layout_config as _lc_cp)
+                            _cp_on = bool((_lc_cp().get("auto_refresh", {}) or {})
+                                          .get("open_project_in_shell", True))
+                        except Exception:
+                            _cp_on = True
+                        _cp_pro = _cp_sch[:-len(".kicad_sch")] + ".kicad_pro"
+                        try:
+                            if _cp_on and Path(_cp_pro).exists():
+                                await _ipc_broadcast({"action": "open_project",
+                                                        "data": {"path": _cp_pro}})
+                                print(f"[create_project] open_project -> shell: "
+                                      f"{_cp_pro}", flush=True)
+                        except Exception as _cp_exc:
+                            print(f"[create_project] open_project skipped: "
+                                  f"{_cp_exc}", flush=True)
             elif event.kind == "end":
                 # 'end' is run_turn's final event. Do NOT abandon the
                 # generator early — draining it to StopAsyncIteration is
@@ -1332,6 +1556,37 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
                 await ws.send_json({"kind": "previews",
                                       "svgs": preview_svgs,
                                       "session_id": session_id})
+
+        # PCB editor live-refresh (Cursor-style): when a PCB tool rewrote the
+        # board (generate_pcb / auto_layout_pcb / route / zones / drc_autofix),
+        # tell the open pcbnew to silently reload it from disk. pcbnew's AI IPC
+        # client handles `revert` (OpenProjectFiles + KICTL_REVERT, no "discard
+        # changes?" dialog) and is GUARDED on its side to act only when the path
+        # IS the board it has open — so this is safe to broadcast even when the
+        # PCB editor isn't open (no client acts) or only eeschema is. No mtime
+        # touch: KICTL_REVERT reloads unconditionally, which also avoids racing
+        # KiCad's native "file changed on disk - reload?" watcher. Sent twice with
+        # a gap as a debounce safety net (same pattern as the schematic revert).
+        # Gate auto_refresh.refresh_pcb_editor (default true).
+        if generated_pcb_path and Path(generated_pcb_path).exists():
+            import asyncio as _asyncio_pcb
+            try:
+                from envil_agent.intent.engine import _load_layout_config as _lc_pcb
+                _pcb_ar = _lc_pcb().get("auto_refresh", {}) or {}
+            except Exception:
+                _pcb_ar = {}
+            if bool(_pcb_ar.get("refresh_pcb_editor", True)):
+                try:
+                    await _ipc_broadcast({"action": "revert",
+                                            "data": {"path": generated_pcb_path}})
+                    await _asyncio_pcb.sleep(0.15)
+                    await _ipc_broadcast({"action": "revert",
+                                            "data": {"path": generated_pcb_path}})
+                    print(f"[auto-refresh] PCB revert -> pcbnew: "
+                          f"{generated_pcb_path} ipc_clients={len(IPC_CLIENTS)}",
+                          flush=True)
+                except Exception as _exc:
+                    print(f"[auto-refresh] PCB revert skipped: {_exc}", flush=True)
 
     except Exception as e:
         try:

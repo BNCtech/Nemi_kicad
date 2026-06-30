@@ -90,24 +90,105 @@ def _parse_kicad_mod(path: Path) -> Optional[list]:
 # Footprint library resolution (fp-lib-table)
 # --------------------------------------------------------------------------- #
 
-def _subst_vars(uri: str, kiprjmod: str) -> str:
+def _subst_vars(uri: str, kiprjmod: str,
+                extra: Optional[Dict[str, str]] = None) -> str:
     out = uri.replace("${KIPRJMOD}", kiprjmod).replace("$(KIPRJMOD)", kiprjmod)
-    # Resolve any remaining ${VAR} / $(VAR) from the environment so installs
-    # that use ${KICAD9_FOOTPRINT_DIR} etc. still resolve when the env is set.
+    # Resolve any remaining ${VAR} / $(VAR) from the OS environment first (a
+    # real KICAD_FOOTPRINT_DIR set by the installer wins), then from ``extra``
+    # (synthesized KICAD<ver>_FOOTPRINT_DIR + the user's kicad_common.json
+    # custom vars) so tables that use ${KICAD10_FOOTPRINT_DIR} resolve even
+    # though KiCad defines that var internally and never exports it.
     for key, val in os.environ.items():
         out = out.replace("${" + key + "}", val).replace("$(" + key + ")", val)
+    if extra:
+        for key, val in extra.items():
+            if not val:
+                continue
+            out = out.replace("${" + key + "}", val).replace("$(" + key + ")", val)
     return out
 
 
-def _fp_lib_dirs(cfg: Dict[str, Any], kiprjmod: str) -> Dict[str, Path]:
-    """Map footprint-library nickname -> .pretty directory from fp-lib-table."""
-    from ..settings import fp_lib_table as _fp_lib_table
-    table_path = Path(cfg.get("fp_lib_table") or str(_fp_lib_table()))
+def _install_fp_roots() -> List[Path]:
+    """KiCad's installed *standard* footprint root(s) — ``share/kicad/footprints``
+    — found with no hardcoded drive: the installer-set ``$KICAD_FOOTPRINT_DIR``
+    first, then the install dir that hosts ``kicad-cli`` (``<install>/bin/`` ->
+    ``<install>/share/kicad/footprints``)."""
+    roots: List[Path] = []
+    seen: set = set()
+
+    def _add(p: Path) -> None:
+        key = os.path.normcase(os.path.normpath(str(p)))
+        if key not in seen:
+            seen.add(key)
+            roots.append(p)
+
+    for p in os.environ.get("KICAD_FOOTPRINT_DIR", "").split(os.pathsep):
+        p = p.strip()
+        if p:
+            _add(Path(p))
+    try:
+        from ..settings import kicad_cli as _kicad_cli
+        cli = Path(_kicad_cli())
+        if cli.is_file():
+            _add(cli.parent.parent / "share" / "kicad" / "footprints")
+    except Exception:                                       # noqa: BLE001
+        pass
+    return roots
+
+
+def _kicad_common_env(cfg_dirs: List[Path]) -> Dict[str, str]:
+    """The user's custom path variables, read from each KiCad config dir's
+    ``kicad_common.json`` ``environment.vars`` block — so a fp-lib-table URI
+    that references a user-defined ``${MY_PARTS}`` resolves just like it does
+    inside KiCad."""
+    import json
+    out: Dict[str, str] = {}
+    for d in cfg_dirs:
+        common = d / "kicad_common.json"
+        try:
+            if not common.is_file():
+                continue
+            data = json.loads(common.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        raw = data.get("environment") or {}
+        vars_ = raw.get("vars", raw) if isinstance(raw, dict) else {}
+        if isinstance(vars_, dict):
+            for k, v in vars_.items():
+                if isinstance(v, str):
+                    out.setdefault(k, v.replace("\\", "/"))
+    return out
+
+
+def _synth_fp_env(cfg_dirs: List[Path]) -> Dict[str, str]:
+    """Synthesize KiCad's built-in footprint vars (``KICAD_FOOTPRINT_DIR`` and
+    the per-version ``KICAD<major>_FOOTPRINT_DIR``) from the install's
+    ``share/kicad/footprints``. KiCad defines these internally but never
+    exports them, so without this the backend can't expand a stock global
+    fp-lib-table. The major version comes from the config dir name (``10.99``
+    -> ``KICAD10_FOOTPRINT_DIR``)."""
+    env: Dict[str, str] = {}
+    roots = _install_fp_roots()
+    if not roots:
+        return env
+    val = str(roots[0]).replace("\\", "/")
+    env["KICAD_FOOTPRINT_DIR"] = val
+    for d in cfg_dirs:
+        major = d.name.split(".", 1)[0]
+        if major.isdigit():
+            env.setdefault(f"KICAD{major}_FOOTPRINT_DIR", val)
+    return env
+
+
+def _read_fp_table(table_path: Path, kiprjmod: str,
+                   extra: Dict[str, str]) -> Dict[str, Path]:
+    """Parse one fp-lib-table into {nickname -> .pretty dir}."""
     dirs: Dict[str, Path] = {}
     if not table_path.is_file():
         return dirs
     try:
-        root = sexpdata.loads(table_path.read_text(encoding="utf-8"))
+        root = sexpdata.loads(table_path.read_text(encoding="utf-8",
+                                                   errors="ignore"))
     except (OSError, ValueError, AssertionError):
         return dirs
     for lib in root[1:] if isinstance(root, list) else []:
@@ -118,22 +199,84 @@ def _fp_lib_dirs(cfg: Dict[str, Any], kiprjmod: str) -> Dict[str, Path]:
         if not name_node or not uri_node or len(name_node) < 2 or len(uri_node) < 2:
             continue
         name = str(name_node[1])
-        uri = _subst_vars(str(uri_node[1]), kiprjmod)
+        uri = _subst_vars(str(uri_node[1]), kiprjmod, extra)
+        if "${" in uri or "$(" in uri:
+            continue                                # unresolved var — skip
         dirs[name] = Path(uri)
     return dirs
 
 
+def _fp_lib_dirs(cfg: Dict[str, Any], kiprjmod: str,
+                 sch_dir: Optional[str] = None) -> Dict[str, Path]:
+    """Map footprint-library nickname -> .pretty dir from *every* fp-lib-table
+    this machine would read — so the AI places parts from the same standard AND
+    user-created custom libraries KiCad shows in its chooser, on whatever PC it
+    runs on (each user has a different custom set).
+
+    Sources, in order:
+      1. the project-local ``fp-lib-table`` next to the schematic,
+      2. KiCad's per-version GLOBAL tables (``%APPDATA%/kicad/<ver>/`` etc.) —
+         these list the user's custom libraries,
+      3. the backend's own bundled table (final fallback).
+
+    When two tables define the same nickname the one whose ``.pretty`` dir
+    actually exists wins (so the bundled entry keeps working on the dev box,
+    while a real install path wins on a deployed machine). Set
+    ``pcb_gen.discover_system_fp_libs=false`` to restore bundled-only behavior.
+    """
+    from ..settings import fp_lib_table as _fp_lib_table
+    bundled = Path(cfg.get("fp_lib_table") or str(_fp_lib_table()))
+
+    if not cfg.get("discover_system_fp_libs", True):
+        return _read_fp_table(bundled, kiprjmod, dict(os.environ))
+
+    try:
+        from ..kicad.symbol_geom import _kicad_config_dirs
+        cfg_dirs = list(_kicad_config_dirs())
+    except Exception:                                       # noqa: BLE001
+        cfg_dirs = []
+    extra = _synth_fp_env(cfg_dirs)
+    extra.update(_kicad_common_env(cfg_dirs))               # user vars win
+
+    # (table_path, kiprjmod-for-this-table). Project-local uses the real
+    # project dir; global tables don't use KIPRJMOD; the bundled table uses
+    # the configured base (envil_home) as today.
+    jobs: List[Tuple[Path, str]] = []
+    if sch_dir:
+        jobs.append((Path(sch_dir) / "fp-lib-table",
+                     str(sch_dir).replace("\\", "/")))
+    for d in cfg_dirs:
+        jobs.append((d / "fp-lib-table", ""))
+    kc = os.environ.get("KICAD_CONFIG_HOME", "").strip()
+    if kc:
+        jobs.append((Path(kc) / "fp-lib-table", ""))
+    jobs.append((bundled, kiprjmod))
+
+    merged: Dict[str, Path] = {}
+    for table_path, kpm in jobs:
+        for name, d in _read_fp_table(table_path, kpm, extra).items():
+            cur = merged.get(name)
+            # First definition wins, but upgrade to a path that exists if the
+            # incumbent points at a missing dir (the deploy-vs-dev case).
+            if cur is None or (not cur.is_dir() and d.is_dir()):
+                merged[name] = d
+    return merged
+
+
 def _find_kicad_mod(fpid: str, lib_dirs: Dict[str, Path],
-                    lib_root: Path) -> Optional[Path]:
+                    lib_roots: List[Path]) -> Optional[Path]:
     """Resolve "Lib:Name" -> a .kicad_mod path. Tries the fp-lib-table dir
-    first, then a flat <lib_root>/<Lib>.pretty/<Name>.kicad_mod fallback."""
+    first, then a flat <root>/<Lib>.pretty/<Name>.kicad_mod fallback against
+    every known library root (bundled + the installed standard footprints), so
+    a standard nickname resolves even when no table entry survived."""
     if ":" not in fpid:
         return None
     lib, name = fpid.split(":", 1)
     candidates: List[Path] = []
     if lib in lib_dirs:
         candidates.append(lib_dirs[lib] / f"{name}.kicad_mod")
-    candidates.append(lib_root / f"{lib}.pretty" / f"{name}.kicad_mod")
+    for root in lib_roots:
+        candidates.append(root / f"{lib}.pretty" / f"{name}.kicad_mod")
     for c in candidates:
         if c.is_file():
             return c
@@ -361,7 +504,14 @@ def generate_pcb_from_ir(ir: Any, sch_path: str,
     lib_root = Path(cfg.get("lib_root") or str(_fp_lib_dir()))
     paper = str(cfg.get("paper", "A4"))
 
-    lib_dirs = _fp_lib_dirs(cfg, kiprjmod)
+    lib_dirs = _fp_lib_dirs(cfg, kiprjmod, sch_dir=str(sch.parent))
+    # Flat-fallback roots: the bundled lib plus the installed standard
+    # footprints (share/kicad/footprints) so a stock nickname resolves even
+    # when its table entry is absent on this machine.
+    lib_roots: List[Path] = [lib_root]
+    for r in _install_fp_roots():
+        if r not in lib_roots:
+            lib_roots.append(r)
     net_table, pad_net_map, warnings = _build_net_map(ir)
 
     placements = _grid_place([c.ref for c in ir.components], cfg)
@@ -391,7 +541,7 @@ def generate_pcb_from_ir(ir: Any, sch_path: str,
             missing.append(f"{c.ref} ({c.lib_id}): no footprint")
             continue
 
-        mod_path = _find_kicad_mod(fpid, lib_dirs, lib_root)
+        mod_path = _find_kicad_mod(fpid, lib_dirs, lib_roots)
         if mod_path is None:
             missing.append(f"{c.ref}: footprint '{fpid}' not found on disk")
             continue

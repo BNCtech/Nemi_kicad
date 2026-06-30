@@ -993,3 +993,222 @@ def find_wires_over_component_text(
                 # by (ref, field) so duplicate wires over one field still move
                 # it once.
     return out
+
+
+# ----- Shared net-connectivity graph (used by the SHORTED_COMPONENT rule) --
+
+def _build_net_graph(
+    wires: List[Wire],
+    junctions: Optional[List[Point]] = None,
+    labels: Optional[List[Label]] = None,
+    tol_mm: float = 0.05,
+):
+    """Union-find net graph over RENDERED geometry, mirroring KiCad's bonding
+    (and the inline graph in `find_power_rail_shorts`): a wire bonds its own two
+    endpoints; collinear overlapping wires bond; an explicit junction bonds the
+    wire endpoints + its mid-span tap; same-named labels bond.
+
+    Returns a ``root(x, y)`` callable giving the net-root for a coordinate, or
+    ``None`` when no geometry sits at that point (the coordinate is electrically
+    floating). Self-contained and never mutates its inputs. Replicated rather
+    than extracted from find_power_rail_shorts on purpose --- per this module's
+    non-breaking policy, the proven selector is left byte-for-byte untouched."""
+    junctions = junctions or []
+    labels = labels or []
+
+    parent: Dict[Point, Point] = {}
+
+    def _key(x: float, y: float) -> Point:
+        return (round(x, 2), round(y, 2))
+
+    def _find(k: Point) -> Point:
+        parent.setdefault(k, k)
+        root = k
+        while parent[root] != root:
+            root = parent[root]
+        while parent[k] != root:
+            parent[k], k = root, parent[k]
+        return root
+
+    def _union(a: Point, b: Point) -> None:
+        parent[_find(a)] = _find(b)
+
+    for (ax, ay), (bx, by) in wires:
+        _union(_key(ax, ay), _key(bx, by))
+    n = len(wires)
+    for i in range(n):
+        (ax, ay), (bx, by) = wires[i]
+        for j in range(i + 1, n):
+            (cx, cy), (dx, dy) = wires[j]
+            horiz = (abs(ay - by) <= tol_mm and abs(cy - dy) <= tol_mm
+                     and abs(ay - cy) <= tol_mm)
+            vert = (abs(ax - bx) <= tol_mm and abs(cx - dx) <= tol_mm
+                    and abs(ax - cx) <= tol_mm)
+            if horiz:
+                lo = max(min(ax, bx), min(cx, dx))
+                hi = min(max(ax, bx), max(cx, dx))
+            elif vert:
+                lo = max(min(ay, by), min(cy, dy))
+                hi = min(max(ay, by), max(cy, dy))
+            else:
+                continue
+            if hi - lo > tol_mm:
+                _union(_key(ax, ay), _key(cx, cy))
+    for (jx, jy) in junctions:
+        for (ax, ay), (bx, by) in wires:
+            if (_pt_eq(jx, jy, ax, ay, tol_mm) or _pt_eq(jx, jy, bx, by, tol_mm)
+                    or _on_seg_interior(jx, jy, ax, ay, bx, by, tol_mm)):
+                _union(_key(jx, jy), _key(ax, ay))
+                _union(_key(jx, jy), _key(bx, by))
+    by_name: Dict[str, List[Point]] = defaultdict(list)
+    for (name, lx, ly) in labels:
+        by_name[name].append(_key(lx, ly))
+    for pts in by_name.values():
+        for p in pts[1:]:
+            _union(pts[0], p)
+
+    def root(x: float, y: float) -> Optional[Point]:
+        k = _key(x, y)
+        return _find(k) if k in parent else None      # absent -> floating
+
+    return root
+
+
+def _ref_prefix(ref: str) -> str:
+    """Letter prefix of a refdes ('R12' -> 'R', '#PWR03' -> '#PWR')."""
+    i = len(ref) - 1
+    while i >= 0 and ref[i].isdigit():
+        i -= 1
+    return ref[: i + 1].upper() if i >= 0 else ref.upper()
+
+
+def _norm_value(v: Any) -> str:
+    return str(v or "").upper().replace(" ", "").replace("Ω", "")
+
+
+_DEFAULT_SHORT_EXEMPT_VALUES = ["0", "0R", "0OHM", "DNP", "NP", "NC", "DNF"]
+
+
+def _two_pin_parts(pins: List[Dict[str, Any]]):
+    """Yield (ref, [pin0, pin1]) for every real 2-pin part. Power-port / PWR_FLAG
+    pseudo-symbols (# refs) are skipped --- they are single-pin net drivers, not
+    components, and are allowed to share any net."""
+    by_ref: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for p in pins:
+        ref = str(p.get("ref", ""))
+        if ref.startswith("#"):
+            continue
+        by_ref[ref].append(p)
+    for ref, plist in by_ref.items():
+        if len(plist) == 2:
+            yield ref, plist
+
+
+# ----- SHORTED_COMPONENT: a 2-terminal part with both pins on one net ------
+
+def find_shorted_components(
+    pins: Optional[List[Dict[str, Any]]] = None,
+    wires: Optional[List[Wire]] = None,
+    junctions: Optional[List[Point]] = None,
+    labels: Optional[List[Label]] = None,
+    values: Optional[Dict[str, str]] = None,
+    tol_mm: float = 0.05,
+    exempt_values: Optional[List[str]] = None,
+    exempt_ref_prefixes: Optional[List[str]] = None,
+) -> List[Issue]:
+    """Report a 2-terminal part whose BOTH pins resolve to the SAME net --- the
+    part is shorted out and does nothing. KiCad ERC PERMITS this (it is legal,
+    just non-functional), so the board passes green while the part is dead; this
+    is the R2/R3 'silent short' false-green class. Runs POST-RENDER on the
+    .kicad_sch geometry (NOT the IR --- the bug is usually introduced by the
+    renderer laying a stub colinear with a rotated body, which the IR never sees).
+
+    Scale-free: groups context pins by ref, builds the post-render net graph,
+    compares the two pins' roots. Zero part names / net names / counts in code.
+    0-ohm jumpers and DNP parts are exempt by VALUE (data-driven, not a
+    special-case): a 0R link legitimately bridges one net. A pin sitting on a
+    wire with no junction does NOT bond (root() returns None) --- that open pin
+    is left to PIN_UNCONNECTED, and the geometric COLINEAR_WIRE_BRIDGE rule
+    catches the wire-spans-both-pads variant the connectivity graph misses."""
+    pins = pins or []
+    wires = wires or []
+    values = values or {}
+    exempt_vals = {_norm_value(v) for v in
+                   (exempt_values or _DEFAULT_SHORT_EXEMPT_VALUES)}
+    exempt_pref = {p.upper() for p in (exempt_ref_prefixes or [])}
+
+    root = _build_net_graph(wires, junctions, labels, tol_mm)
+    out: List[Issue] = []
+    for ref, plist in _two_pin_parts(pins):
+        if _ref_prefix(ref) in exempt_pref:
+            continue
+        val = _norm_value(values.get(ref, ""))
+        if val in exempt_vals or "DNP" in val:
+            continue
+        r0 = root(plist[0]["x"], plist[0]["y"])
+        r1 = root(plist[1]["x"], plist[1]["y"])
+        if r0 is not None and r1 is not None and r0 == r1:
+            out.append(_issue(
+                "SHORTED_COMPONENT", "error",
+                f"both pins of {ref} ({values.get(ref, '?') or '?'}) are on the "
+                f"SAME net -- the part is shorted out and non-functional. "
+                f"Re-route so each pin lands on its own net (or set the part DNP "
+                f"/ value 0R if the bridge is intentional).",
+                ref=ref, value=values.get(ref, ""),
+                pins=[plist[0].get("number"), plist[1].get("number")],
+            ))
+    return out
+
+
+# ----- COLINEAR_WIRE_BRIDGE: one wire spans both pads of a 2-pin part ------
+
+def find_colinear_wire_bridges(
+    pins: Optional[List[Dict[str, Any]]] = None,
+    wires: Optional[List[Wire]] = None,
+    values: Optional[Dict[str, str]] = None,
+    tol_mm: float = 0.05,
+    exempt_values: Optional[List[str]] = None,
+    exempt_ref_prefixes: Optional[List[str]] = None,
+) -> List[Issue]:
+    """Report a SINGLE wire segment that lies over BOTH pads of a 2-terminal
+    part --- the literal inverse of `find_wires_piercing_bodies` (which SKIPS a
+    wire that touches the part's own pin, line 79, leaving exactly this colinear
+    stub uncaught). This is the geometric CAUSE of the silent short, so it names
+    the fix mechanically: split the spanning segment into an L that lands on only
+    one pad, then PIN_UNCONNECTED/NET_FLOATING correctly re-flag the freed pad.
+
+    More aggressive than the connectivity check because in KiCad a pin tip lying
+    on a wire mid-span bonds WITHOUT a junction dot, so a stub drawn straight
+    through both pin tips really does short them even though the union-find
+    graph (which needs a dot for a mid-span tap) would not catch it. 0R/DNP
+    exempt by value, same as SHORTED_COMPONENT."""
+    pins = pins or []
+    wires = wires or []
+    values = values or {}
+    exempt_vals = {_norm_value(v) for v in
+                   (exempt_values or _DEFAULT_SHORT_EXEMPT_VALUES)}
+    exempt_pref = {p.upper() for p in (exempt_ref_prefixes or [])}
+
+    out: List[Issue] = []
+    for ref, plist in _two_pin_parts(pins):
+        if _ref_prefix(ref) in exempt_pref:
+            continue
+        val = _norm_value(values.get(ref, ""))
+        if val in exempt_vals or "DNP" in val:
+            continue
+        p0, p1 = plist
+        for (ax, ay), (bx, by) in wires:
+            if (_on_seg(p0["x"], p0["y"], ax, ay, bx, by, tol_mm)
+                    and _on_seg(p1["x"], p1["y"], ax, ay, bx, by, tol_mm)):
+                out.append(_issue(
+                    "COLINEAR_WIRE_BRIDGE", "error",
+                    f"one wire ({ax:.2f},{ay:.2f})->({bx:.2f},{by:.2f}) spans "
+                    f"BOTH pins of {ref} ({values.get(ref, '?') or '?'}) -- it "
+                    f"bridges the part into a short. Split it into an L so it "
+                    f"lands on only one pin.",
+                    ref=ref, value=values.get(ref, ""),
+                    wire_start=[round(ax, 2), round(ay, 2)],
+                    wire_end=[round(bx, 2), round(by, 2)],
+                ))
+                break
+    return out

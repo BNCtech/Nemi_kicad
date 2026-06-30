@@ -835,6 +835,30 @@ async def build_circuit(args: Dict[str, Any]) -> Dict[str, Any]:
             "is_error": True,
         }
 
+    # Pre-flight: is a real symbol library reachable on THIS machine? Without
+    # this gate the architect runs the full loop, every load_symbol() fails,
+    # and the agent mis-reports it as "your KiCad libraries aren't enabled"
+    # (the 2026-06-24 dead-Z: failure). Catch it up front with the true cause.
+    try:
+        from ..kicad.symbol_geom import library_status as _lib_status
+        _st = _lib_status()
+    except Exception as _e:  # never let the check itself break a build
+        _st = {"ok": True, "roots": [], "searched": [], "probe": {}}
+    if not _st.get("ok"):
+        _searched = "\n  ".join(_st.get("searched") or []) or "(none)"
+        msg = (
+            "BUILD BLOCKED: no symbol library found on this system, so no part "
+            "(not even a resistor) can be resolved. This is NOT a KiCad app "
+            "setting and the user should NOT be told to enable libraries.\n\n"
+            "Cause: the backend's symbol search path resolved to nothing usable.\n"
+            "Paths checked (in order):\n  " + _searched + "\n\n"
+            "Fix: point KICAD_SYMBOL_DIR in ai_backend/.env at a folder that "
+            "contains the KiCad symbol libraries (*.kicad_symdir / *.kicad_sym), "
+            "or set ENVIL_LIB_ROOT in kicad_common.json, then restart the "
+            "backend. Tell the user this in one short plain sentence."
+        )
+        return {"content": [{"type": "text", "text": msg}], "is_error": True}
+
     from ..settings import out_dir as _out_dir
     initial: Dict[str, Any] = {
         "prompt": prompt,
@@ -893,6 +917,11 @@ async def build_circuit(args: Dict[str, Any]) -> Dict[str, Any]:
                 final = await _graph().ainvoke(
                     initial, config={"recursion_limit": _recursion_limit})
     except Exception as exc:
+        # Log the FULL traceback so an "internal error in the tool" is diagnosable
+        # (the one-line summary below hid the actual failing line for debugging).
+        import traceback as _tb
+        _tb_str = _tb.format_exc()
+        print(f"[build_circuit] graph invocation failed:\n{_tb_str}", flush=True)
         _mark_run_failed(f"graph invocation failed: {type(exc).__name__}: {exc}")
         return {
             "content": [{"type": "text",
@@ -995,6 +1024,16 @@ async def build_circuit(args: Dict[str, Any]) -> Dict[str, Any]:
         print(f"[build_circuit] sidecar write skipped: "
               f"{type(_exc).__name__}: {_exc}", flush=True)
 
+    # Persist the FULL IR next to the .kicad_sch so the board can be (re)built
+    # from the current schematic without re-running the architect — this is what
+    # lets the standalone `generate_pcb` tool recover when the in-build PCB step
+    # was skipped by the ERC gate and ERC was cleaned afterwards. Advisory write.
+    try:
+        _write_ir_sidecar(stats.get("path", ""), ir)
+    except Exception as _exc:
+        print(f"[build_circuit] IR sidecar write skipped: "
+              f"{type(_exc).__name__}: {_exc}", flush=True)
+
     # Direct PCB generation (Cursor-style, file-based): write a populated
     # .kicad_pcb next to the .kicad_sch with footprints placed + nets assigned,
     # so the board exists the instant the schematic does — no "Update PCB from
@@ -1005,10 +1044,25 @@ async def build_circuit(args: Dict[str, Any]) -> Dict[str, Any]:
     # so flat and hierarchical schematics both yield one flat board.
     try:
         from ..intent.engine import _load_layout_config as _llc
-        _pcbgen_cfg = (_llc() or {}).get("pcb_gen", {}) or {}
+        _cfg_all = _llc() or {}
+        _pcbgen_cfg = _cfg_all.get("pcb_gen", {}) or {}
+        _confirm_steps = bool(_cfg_all.get("build_flow", {}).get(
+            "confirm_each_step", False))
     except Exception:
         _pcbgen_cfg = {}
-    if (_pcbgen_cfg.get("enabled", True)
+        _confirm_steps = False
+    # Step-confirmation (Cursor-style): when on, DON'T auto-generate the PCB —
+    # the schematic build stops here and the agent asks the user "ERC clean,
+    # update the PCB now?" before calling generate_pcb. So the user sees and
+    # approves each step. The schematic (with ERC heal) is already done above.
+    if _confirm_steps and str(stats.get("path", "")).endswith(".kicad_sch"):
+        summary["pcb"] = {
+            "deferred": "confirm_to_generate",
+            "note": ("Schematic ready and ERC checked. Ask the user to confirm, "
+                     "then call generate_pcb to populate the board — do not "
+                     "auto-generate it."),
+        }
+    elif (_pcbgen_cfg.get("enabled", True)
             and str(stats.get("path", "")).endswith(".kicad_sch")):
         # ERC-CLEAN GATE (the schematic->PCB rule): never push a schematic with
         # unresolved ERC errors onto copper — the mistakes become real traces.
@@ -1043,9 +1097,11 @@ async def build_circuit(args: Dict[str, Any]) -> Dict[str, Any]:
                 "blocked": "erc_not_clean",
                 "erc_errors": _erc_errors,
                 "note": (f"PCB not generated: {_erc_errors} ERC error(s) still "
-                         "open on the schematic. Fix the ERC errors first, then "
-                         "rebuild — going to PCB with ERC errors copies the "
-                         "mistakes onto the board."),
+                         "open on the schematic. Clear them (erc_autofix), then "
+                         "call the generate_pcb tool to populate the board — do "
+                         "NOT tell the user to press F8. Going to PCB with ERC "
+                         "errors would copy the mistakes onto copper."),
+                "recover_with": "generate_pcb",
             }
             print(f"[build_circuit] pcb_gen BLOCKED by ERC gate: "
                   f"{_erc_errors} error(s)", flush=True)
@@ -1079,26 +1135,63 @@ async def build_circuit(args: Dict[str, Any]) -> Dict[str, Any]:
     _pcb_path = _pcb_info.get("path", "")
     if (_pcb_path and not _pcb_info.get("error") and not _pcb_info.get("blocked")
             and bool(_pcbgen_cfg.get("finish_board", True))):
-        _finished: list = []
-        for _step in ("outline", "design_rules", "ground_pour"):
+        if bool(_pcbgen_cfg.get("finish_via_auto_layout", True)):
+            # Run the FULL rule-driven finishing pipeline via the config-driven
+            # auto_layout_pcb orchestrator (one implementation per stage, no
+            # duplicated step list): set design rules / net classes, re-place +
+            # de-collide (block/IC-anchor, NOT the dumb refdes grid), board
+            # outline, GND pour, thermal vias, mounting holes, fiducials,
+            # silkscreen cleanup, DRC auto-fix, then verify. The automatic
+            # post-build path SKIPS pcb_gen.finish_skip_tools (default
+            # route_pcb_simple — the simple router can degrade a dense board and
+            # GND is already on the pour; an explicit `auto_layout_pcb` call
+            # still routes). Set finish_via_auto_layout=false for the legacy
+            # outline+design_rules+ground_pour finish below.
             try:
-                if _step == "outline":
-                    from .auto_outline_pcb import auto_outline_pcb as _ft
-                    _fa = {"pcb_path": _pcb_path}
-                elif _step == "design_rules":
-                    from .set_design_rules import set_design_rules as _ft
-                    _fa = {"pcb_path": _pcb_path}
-                else:
-                    from .auto_zones_pcb import auto_zones_pcb as _ft
-                    _fa = {"pcb_path": _pcb_path, "net": "GND"}
-                _fr = await _ft.handler(_fa)
-                if not (_fr or {}).get("is_error"):
-                    _finished.append(_step)
+                from .auto_layout_pcb import auto_layout_pcb as _alp
+                _skip = list(_pcbgen_cfg.get("finish_skip_tools",
+                                              ["route_pcb_simple"]) or [])
+                _alr = await _alp.handler({"pcb_path": _pcb_path, "skip": _skip})
+                _alr_text = (_alr.get("content", [{}])[0].get("text", "")
+                             if _alr.get("content") else "")
+                summary["pcb"]["finish"] = {
+                    "via": "auto_layout_pcb",
+                    "steps_ok": _alr.get("steps_ok"),
+                    "steps_total": _alr.get("steps_total"),
+                    "skipped": _skip,
+                    "report": _alr_text,
+                }
+                print(f"[build_circuit] finish_board (auto_layout_pcb): "
+                      f"{_alr.get('steps_ok')}/{_alr.get('steps_total')} OK, "
+                      f"skipped={_skip}", flush=True)
             except Exception as _exc:
-                print(f"[build_circuit] finish_board {_step} skipped: "
+                print(f"[build_circuit] finish_board auto_layout_pcb skipped: "
                       f"{type(_exc).__name__}: {_exc}", flush=True)
-        summary["pcb"]["finished"] = _finished
-        print(f"[build_circuit] finish_board: {_finished}", flush=True)
+                summary["pcb"]["finish"] = {
+                    "via": "auto_layout_pcb",
+                    "error": f"{type(_exc).__name__}: {_exc}",
+                }
+        else:
+            _finished: list = []
+            for _step in ("outline", "design_rules", "ground_pour"):
+                try:
+                    if _step == "outline":
+                        from .auto_outline_pcb import auto_outline_pcb as _ft
+                        _fa = {"pcb_path": _pcb_path}
+                    elif _step == "design_rules":
+                        from .set_design_rules import set_design_rules as _ft
+                        _fa = {"pcb_path": _pcb_path}
+                    else:
+                        from .auto_zones_pcb import auto_zones_pcb as _ft
+                        _fa = {"pcb_path": _pcb_path, "net": "GND"}
+                    _fr = await _ft.handler(_fa)
+                    if not (_fr or {}).get("is_error"):
+                        _finished.append(_step)
+                except Exception as _exc:
+                    print(f"[build_circuit] finish_board {_step} skipped: "
+                          f"{type(_exc).__name__}: {_exc}", flush=True)
+            summary["pcb"]["finished"] = _finished
+            print(f"[build_circuit] finish_board: {_finished}", flush=True)
 
     return {
         "content": [{"type": "text",
@@ -1156,4 +1249,29 @@ def _write_blocks_sidecar(sch_path: str, ir: Any, stats: Dict[str, Any]) -> None
             for b in blocks
         ],
     }
+    sidecar.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_ir_sidecar(sch_path: str, ir: Any) -> None:
+    """Persist `<basename>.envil-ir.json` (the full TopologyIR) next to the
+    .kicad_sch so `generate_pcb` can rebuild the board from the current
+    schematic without re-running the architect. Skipped silently on failure.
+    """
+    if not sch_path:
+        return
+    from pathlib import Path as _Path
+    sch = _Path(sch_path)
+    if sch.suffix.lower() != ".kicad_sch":
+        return
+    to_dict = getattr(ir, "to_dict", None)
+    if not callable(to_dict):
+        return
+    payload = {
+        "_about": ("Full TopologyIR emitted by envil build_circuit. Read by the "
+                    "generate_pcb tool to (re)populate the .kicad_pcb from the "
+                    "current schematic. Safe to delete."),
+        "version": 1,
+        "ir": to_dict(),
+    }
+    sidecar = sch.with_suffix(".envil-ir.json")
     sidecar.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

@@ -179,6 +179,13 @@ async def drc_check(args: dict[str, Any]) -> dict[str, Any]:
         cmd.append("--all-track-errors")
     if bool(args.get("schematic_parity", cfg.get("schematic_parity", False))):
         cmd.append("--schematic-parity")
+    # Refill zones before DRC so the count MATCHES KiCad's GUI (whose "Refill all
+    # zones before performing DRC" box is on by default). Without this, copper
+    # pours are evaluated unfilled and bridges/clearance hits near filled GND are
+    # under-reported — the AI then says "3 errors" while the user's panel shows
+    # more. No --save-board, so the fill is in-memory only (the file is untouched).
+    if bool(args.get("refill_zones", cfg.get("refill_zones", True))):
+        cmd.append("--refill-zones")
     cmd.append(str(pcb_path))
 
     try:

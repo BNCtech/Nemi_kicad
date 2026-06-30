@@ -19,7 +19,7 @@ from __future__ import annotations
 import importlib
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from claude_agent_sdk import tool
 
@@ -84,6 +84,11 @@ async def ship_design(args: dict[str, Any]) -> dict[str, Any]:
     cfg = _load_cfg()
     steps_cfg = cfg.get("steps", {}) or {}
     skip_list = set(args.get("skip") or [])
+    # Hard export gate: when on, real DRC errors BLOCK the Gerber/fab export
+    # instead of merely flagging it after the files are already written. Default
+    # off keeps the legacy "export anyway, mark NOT READY" behaviour.
+    block_export_on_drc = bool(cfg.get("block_export_on_drc", False))
+    drc_error_count: Optional[int] = None
 
     # Lazy-import each tool so a single broken tool doesn't break the
     # whole ship_design call.
@@ -141,6 +146,8 @@ async def ship_design(args: dict[str, Any]) -> dict[str, Any]:
             r = await DRC.drc_check.handler({"pcb_path": str(pcb)})
             err = r.get("error_count", -1)
             warn = r.get("warning_count", -1)
+            if isinstance(err, int) and err >= 0:
+                drc_error_count = err
             # DRC errors on empty/un-routed board are expected (no Edge.Cuts,
             # un-routed nets); treat as warning unless `strict_drc=true`.
             strict = bool(steps_cfg.get("drc", {}).get("strict", False)
@@ -153,7 +160,15 @@ async def ship_design(args: dict[str, Any]) -> dict[str, Any]:
 
     # ---- 4. Gerbers ----
     if _stage_enabled("gerbers"):
-        if not pcb.exists():
+        if block_export_on_drc and (drc_error_count or 0) > 0:
+            # Don't ship copper with open DRC errors — block the fab export so a
+            # bad board never reaches a manufacturer. The fix-it card (DRC stage)
+            # already lists what to clear.
+            stages.append(("Gerbers + drill + ZIP", False,
+                            f"BLOCKED: {drc_error_count} DRC error(s) — "
+                            "fix DRC, then re-ship"))
+            overall_ok = False
+        elif not pcb.exists():
             stages.append(("Gerbers + drill + ZIP", False,
                             f"no .kicad_pcb at {pcb}"))
             overall_ok = False

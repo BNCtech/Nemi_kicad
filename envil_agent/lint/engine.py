@@ -71,6 +71,12 @@ def run_lint(context: Dict[str, Any]) -> List[Dict[str, Any]]:
     issues: List[Dict[str, Any]] = []
     for rule in rules:
         rid = rule.get("id") or "UNKNOWN"
+        # Per-rule kill switch. Absent -> True, so every existing rule keeps
+        # running byte-for-byte; a rule shipped `enabled: false` is skipped
+        # until a project flips it on (used to land new rules default-off
+        # until run_golden.py confirms byte-stability).
+        if rule.get("enabled", True) is False:
+            continue
         sel_name = rule.get("selector") or ""
         fn = _resolve_selector(sel_name)
         if fn is None:

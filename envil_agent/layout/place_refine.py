@@ -99,13 +99,20 @@ def _at_xyr(node: list) -> Tuple[float, float, float]:
         return (0.0, 0.0, 0.0)
 
 
-def _set_outer_at(fp: list, x: float, y: float) -> bool:
+def _set_outer_at(fp: list, x: float, y: float,
+                  rot: Optional[float] = None) -> bool:
     at = _outer_at(fp)
     if at is None:
         return False
     at[1] = round(x / 0.001) * 0.001
     at[2] = round(y / 0.001) * 0.001
-    if len(at) == 3:
+    if rot is not None:
+        rv = round(rot % 360.0, 3)
+        if len(at) >= 4:
+            at[3] = rv
+        else:
+            at.append(rv)
+    elif len(at) == 3:
         at.append(0.0)            # keep rotation slot present
     return True
 
@@ -222,12 +229,18 @@ def _local_bbox(fp: list, use_courtyard: bool,
 
 def _board_bbox(local: Tuple[float, float, float, float],
                 x: float, y: float, rot: float) -> BBox:
-    """Axis-aligned board-coordinate bbox of a local bbox placed at (x,y,rot)."""
+    """Axis-aligned board-coordinate bbox of a local bbox placed at (x,y,rot).
+
+    KiCad places a footprint by rotating its geometry CLOCKWISE by the orientation
+    (board Y points down), i.e. by ``-rot``. Using ``+rot`` put a rotated part's
+    courtyard on the WRONG side, so de-collision missed real overlaps that KiCad's
+    courtyard DRC flags (e.g. a 90 deg-rotated LED vs a round cap). rot==0 is
+    unchanged (byte-stable). Matches the same fix already applied to the router."""
     x0, y0, x1, y1 = local
     corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
     rx = []; ry = []
     for cx, cy in corners:
-        dx, dy = _rotate(cx, cy, rot)
+        dx, dy = _rotate(cx, cy, -rot)
         rx.append(x + dx); ry.append(y + dy)
     return (min(rx), min(ry), max(rx), max(ry))
 
@@ -268,8 +281,10 @@ def _pad_net_id(pad: list) -> int:
 
 def _pad_board_xy(fp_x: float, fp_y: float, fp_rot: float,
                   pad: list) -> Tuple[float, float]:
+    # KiCad rotates pad offsets CLOCKWISE by the footprint orientation (-fp_rot),
+    # board Y down — same convention as the router fix. fp_rot==0 is unchanged.
     lx, ly, _r = _pad_local_at(pad)
-    dx, dy = _rotate(lx, ly, fp_rot)
+    dx, dy = _rotate(lx, ly, -fp_rot)
     return (fp_x + dx, fp_y + dy)
 
 
@@ -277,11 +292,16 @@ def _pad_board_xy(fp_x: float, fp_y: float, fp_rot: float,
 # Public entry
 # --------------------------------------------------------------------------- #
 
-def refine_placement(root: list, cfg: Dict[str, Any]) -> Dict[str, Any]:
+def refine_placement(root: list, cfg: Dict[str, Any],
+                     constraints: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Mutate the parsed ``(kicad_pcb ...)`` root to remove footprint overlaps
     and (optionally) shorten connections. Returns a report dict.
 
-    ``cfg`` is the ``auto_place_pcb.refine`` sub-config. Never raises.
+    ``cfg`` is the ``auto_place_pcb.refine`` sub-config. ``constraints`` is the
+    optional per-ref electrical-reasoning map from ``tools/pcb_reasoning``
+    (``{ref: {role, characters, score, constraints{...}}}``); when present and
+    ``constraint_placement.enabled`` it drives Phase 3 (keep-close / keep-away).
+    Never raises.
     """
     clearance     = float(cfg.get("clearance_mm", 0.5))
     use_courtyard = bool(cfg.get("use_courtyard", True))
@@ -298,6 +318,41 @@ def refine_placement(root: list, cfg: Dict[str, Any]) -> Dict[str, Any]:
     # toward the parts they feed, so they are de-collided but never wl-moved.
     wl_skip_prefixes = set(str(p).upper() for p in cfg.get(
         "wl_skip_ref_prefixes", ["J", "P"]))
+    # Rotation optimizer (Gap 1): try orthogonal re-orientations of each movable
+    # part and keep the one that shortens its connections — purely cost-driven,
+    # so it generalises to any board with no per-part knowledge. Conservative
+    # hill-climb (accept only a strict HPWL win with no new overlap), exactly
+    # like the wirelength translate below. Default off keeps output byte-stable;
+    # the live config turns it on.
+    do_rot        = bool(cfg.get("rotation_optimize", False))
+    rot_angles    = [float(a) for a in cfg.get(
+        "rotation_angles", [0.0, 90.0, 180.0, 270.0])]
+    # Connectors / mechanical parts keep their orientation (edge-snapped, keyed).
+    rot_skip_prefixes = set(str(p).upper() for p in cfg.get(
+        "rot_skip_ref_prefixes", ["J", "P", "H", "MH", "FID", "MK", "NT", "REF"]))
+    # High-fanout nets (GND/VCC rails) connect to many pads, so their centroid
+    # sits near the board centre and the attraction toward it cancels the
+    # signal-driven pull — leaving parts scattered. The fix is purely topological
+    # (net DEGREE, not net names): every attraction/cost pass ignores nets whose
+    # pad count exceeds wl_ignore_net_degree, so parts cluster by their SIGNAL
+    # connections. 0 = consider every net (byte-stable legacy behaviour).
+    ignore_degree    = int(cfg.get("wl_ignore_net_degree", 0))
+    # A fixed degree threshold is board-specific (degree-4 is a rail on a 15-part
+    # board but a normal signal net on a 100-part board). The dynamic rule scales
+    # the cutoff with the part count: a net is a rail when its fanout exceeds
+    # max(wl_rail_min_degree, ceil(wl_rail_fraction * num_parts)). Set
+    # wl_rail_fraction=0 to fall back to the absolute wl_ignore_net_degree.
+    rail_fraction    = float(cfg.get("wl_rail_fraction", 0.0))
+    rail_min_degree  = int(cfg.get("wl_rail_min_degree", 4))
+    # Phase-0 clustering: a bold force-directed pre-pass that pulls each movable
+    # part most of the way to the centroid of its signal-net neighbours BEFORE
+    # de-collision. Unlike the strict Phase-2 hill-climb it accepts every move
+    # (de-collision cleans up overlaps after), so it can form tight functional
+    # clusters that a timid per-part climb starting from a scattered grid cannot.
+    do_cluster       = bool(cfg.get("cluster_placement", False))
+    cluster_iters    = int(cfg.get("cluster_iters", 8))
+    cluster_strength = float(cfg.get("cluster_strength", 0.6))
+    cluster_max_step = float(cfg.get("cluster_max_step_mm", 20.0))
 
     # ---- Collect movable footprints + their local bboxes ----
     fps: List[list] = [c for c in root[1:]
@@ -334,9 +389,75 @@ def refine_placement(root: list, cfg: Dict[str, Any]) -> Dict[str, Any]:
         return n
 
     overlaps_before = count_overlaps()
+    moved_refs: set = set()
+
+    # ---- Shared net model: pad membership + per-net degree ----
+    net_pads_all: Dict[int, List[Tuple[int, list]]] = {}
+    for idx, it in enumerate(items):
+        for pad in _children(it["fp"], "pad"):
+            nid = _pad_net_id(pad)
+            if nid > 0:
+                net_pads_all.setdefault(nid, []).append((idx, pad))
+    net_degree = {nid: len(v) for nid, v in net_pads_all.items()}
+    # Effective rail cutoff: dynamic (scales with part count) when wl_rail_fraction
+    # is set, else the absolute wl_ignore_net_degree, else disabled.
+    if rail_fraction > 0.0:
+        ignore_eff = max(rail_min_degree, math.ceil(rail_fraction * len(items)))
+    else:
+        ignore_eff = ignore_degree
+
+    def _net_ok(nid: int) -> bool:
+        """A net counts toward the attraction unless it is a high-fanout rail."""
+        if ignore_eff <= 0:
+            return True
+        return net_degree.get(nid, 0) <= ignore_eff
+
+    # ---- Phase 0: bold connectivity clustering (signal nets only) ----
+    clustered = 0
+    if do_cluster:
+        def _signal_centroid(idx: int) -> Optional[Tuple[float, float]]:
+            it = items[idx]
+            xs: List[float] = []; ys: List[float] = []
+            for pad in _children(it["fp"], "pad"):
+                nid = _pad_net_id(pad)
+                if nid <= 0 or not _net_ok(nid):
+                    continue
+                for (oidx, opad) in net_pads_all.get(nid, []):
+                    if oidx == idx:
+                        continue
+                    px, py = _pad_board_xy(items[oidx]["x"], items[oidx]["y"],
+                                           items[oidx]["rot"], opad)
+                    xs.append(px); ys.append(py)
+            if not xs:
+                return None
+            return (sum(xs) / len(xs), sum(ys) / len(ys))
+
+        cluster_moved: set = set()
+        for _ in range(cluster_iters):
+            any_move = False
+            for idx, it in enumerate(items):
+                if it["fixed"]:
+                    continue
+                if _prefix_of_ref(it["ref"]).upper() in wl_skip_prefixes:
+                    continue                       # connectors stay edge-snapped
+                c = _signal_centroid(idx)
+                if c is None:
+                    continue
+                vx, vy = c[0] - it["x"], c[1] - it["y"]
+                dist = math.hypot(vx, vy)
+                if dist < 1e-3:
+                    continue
+                step = min(cluster_max_step, dist * cluster_strength)
+                it["x"] += vx / dist * step
+                it["y"] += vy / dist * step
+                any_move = True
+                cluster_moved.add(it["ref"])
+            if not any_move:
+                break
+        clustered = len(cluster_moved)
+        moved_refs |= cluster_moved
 
     # ---- Phase 1: iterative pairwise de-collision ----
-    moved_refs: set = set()
     for _ in range(max_iters):
         boxes = [bbox_of(it) for it in items]
         any_fix = False
@@ -376,6 +497,126 @@ def refine_placement(root: list, cfg: Dict[str, Any]) -> Dict[str, Any]:
         if not any_fix:
             break
 
+    # ---- Phase 1.5: orthogonal rotation optimizer (cost-driven) ----
+    # For each movable part, try the configured re-orientations and keep the one
+    # that strictly reduces the half-perimeter wirelength of the nets it touches
+    # without creating a new courtyard overlap. The cost is measured from the
+    # part's own pads, so a 90 deg turn that lines a passive up with its net wins
+    # automatically — no NE555/timing-cluster special-casing.
+    rotated = 0
+    if do_rot:
+        net_pads_r: Dict[int, List[Tuple[int, list]]] = {}
+        for idx, it in enumerate(items):
+            for pad in _children(it["fp"], "pad"):
+                nid = _pad_net_id(pad)
+                if nid > 0:
+                    net_pads_r.setdefault(nid, []).append((idx, pad))
+
+        def _rot_hpwl(idx: int) -> float:
+            it = items[idx]
+            seen: set = set()
+            total = 0.0
+            for pad in _children(it["fp"], "pad"):
+                nid = _pad_net_id(pad)
+                if nid <= 0 or nid in seen or not _net_ok(nid):
+                    continue
+                seen.add(nid)
+                pts = []
+                for (oidx, opad) in net_pads_r.get(nid, []):
+                    oit = items[oidx]
+                    pts.append(_pad_board_xy(oit["x"], oit["y"], oit["rot"], opad))
+                if len(pts) >= 2:
+                    xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+                    total += (max(xs) - min(xs)) + (max(ys) - min(ys))
+            return total
+
+        def _rot_overlaps(idx: int) -> bool:
+            a = bbox_of(items[idx])
+            for j in range(len(items)):
+                if j == idx:
+                    continue
+                ox, oy = _overlap_amounts(a, bbox_of(items[j]), clearance)
+                if ox > 1e-6 and oy > 1e-6:
+                    return True
+            return False
+
+        for idx, it in enumerate(items):
+            if it["fixed"]:
+                continue
+            if _prefix_of_ref(it["ref"]).upper() in rot_skip_prefixes:
+                continue
+            base = it["rot"]
+            best = base
+            best_cost = _rot_hpwl(idx)
+            for d in rot_angles:
+                if d == 0.0:
+                    continue
+                cand = (base + d) % 360.0
+                it["rot"] = cand
+                if _rot_overlaps(idx):
+                    it["rot"] = base
+                    continue
+                cost = _rot_hpwl(idx)
+                if cost < best_cost - 1e-6:
+                    best_cost = cost
+                    best = cand
+                it["rot"] = base
+            if best != base:
+                it["rot"] = best
+                rotated += 1
+                moved_refs.add(it["ref"])
+
+    # ---- Phase 1.6: orientation uniformity (P5, gated) ----
+    # Same-class passives should face the same way (assembly / inspection DFM).
+    # The wirelength rotation optimizer above can leave a group mixed; snap each
+    # minority part of a refdes-prefix group to the group's MAJORITY orthogonal
+    # orientation, but only when it creates no new overlap (so it never trades a
+    # collision for tidiness). Gated by `orientation_uniformity.enabled` (off ->
+    # byte-stable). Connectors / mechanical keep their keyed angle.
+    ou_cfg = cfg.get("orientation_uniformity", {})
+    if not isinstance(ou_cfg, dict):
+        ou_cfg = {}
+    oriented = 0
+    do_ou = bool(ou_cfg.get("enabled", False))
+    if do_ou:
+        from collections import Counter
+        min_group = int(ou_cfg.get("min_group", 3))
+
+        def _ou_overlaps(idx: int) -> bool:
+            a = bbox_of(items[idx])
+            for j in range(len(items)):
+                if j == idx:
+                    continue
+                ox, oy = _overlap_amounts(a, bbox_of(items[j]), clearance)
+                if ox > 1e-6 and oy > 1e-6:
+                    return True
+            return False
+
+        groups: Dict[str, List[int]] = {}
+        for idx, it in enumerate(items):
+            if it["fixed"]:
+                continue
+            pfx = _prefix_of_ref(it["ref"]).upper()
+            if pfx in rot_skip_prefixes:
+                continue
+            groups.setdefault(pfx, []).append(idx)
+
+        for pfx, idxs in groups.items():
+            if len(idxs) < min_group:
+                continue
+            rots = [round(items[i]["rot"] % 360.0) for i in idxs]
+            common = float(Counter(rots).most_common(1)[0][0])
+            for i in idxs:
+                if abs((items[i]["rot"] % 360.0) - common) < 1e-6:
+                    continue
+                base = items[i]["rot"]
+                items[i]["rot"] = common
+                if _ou_overlaps(i):
+                    items[i]["rot"] = base          # never trade a collision for tidiness
+                else:
+                    oriented += 1
+                    moved_refs.add(items[i]["ref"])
+
     # ---- Phase 2: conservative wirelength hill-climb ----
     if do_wl:
         # Build net -> list of (item_index, pad_board_xy) using CURRENT positions
@@ -397,7 +638,7 @@ def refine_placement(root: list, cfg: Dict[str, Any]) -> Dict[str, Any]:
             total = 0.0
             for pad in _children(it["fp"], "pad"):
                 nid = _pad_net_id(pad)
-                if nid <= 0 or nid in seen:
+                if nid <= 0 or nid in seen or not _net_ok(nid):
                     continue
                 seen.add(nid)
                 pts = []
@@ -415,7 +656,7 @@ def refine_placement(root: list, cfg: Dict[str, Any]) -> Dict[str, Any]:
             xs: List[float] = []; ys: List[float] = []
             for pad in _children(it["fp"], "pad"):
                 nid = _pad_net_id(pad)
-                if nid <= 0:
+                if nid <= 0 or not _net_ok(nid):
                     continue
                 for (oidx, opad) in net_pads.get(nid, []):
                     if oidx == idx:
@@ -466,10 +707,175 @@ def refine_placement(root: list, cfg: Dict[str, Any]) -> Dict[str, Any]:
             if not improved:
                 break
 
+    # ---- Phase 3: constraint-aware placement (reasoning-driven, gated) ----
+    # Consume the Phase-1 electrical-reasoning constraints
+    # (tools/pcb_reasoning -> <board>.envil-constraints.json): pull each support
+    # part toward the higher-criticality part it shares a net with (decoupling
+    # <= max_dist_mm, clock, filter caps), and push domain-conflicting parts apart
+    # (analog away from switching, RF keepout) by min_gap_mm. Conservative: every
+    # move is reverted if it creates a real courtyard overlap. Gated by
+    # `constraint_placement.enabled` (off / constraints=None -> byte-stable).
+    cp_cfg = cfg.get("constraint_placement", {})
+    if not isinstance(cp_cfg, dict):
+        cp_cfg = {}
+    kept_close = 0
+    kept_apart = 0
+    if constraints and cp_cfg.get("enabled", False):
+        kc_iters    = int(cp_cfg.get("keep_close_iters", 4))
+        ka_iters    = int(cp_cfg.get("keep_away_iters", 4))
+        cp_max_step = float(cp_cfg.get("max_step_mm", 5.0))
+
+        def _info(ref: str) -> Dict[str, Any]:
+            return constraints.get(ref, {}) or {}
+
+        def _place_cons(ref: str) -> Dict[str, Any]:
+            return _info(ref).get("constraints", {}) or {}
+
+        def _labels(idx: int) -> set:
+            info = _info(items[idx]["ref"])
+            s = set(info.get("characters", []) or [])
+            if info.get("role"):
+                s.add(info["role"])
+            return s
+
+        def _crit_key(idx: int) -> Tuple[int, float, int]:
+            ref = items[idx]["ref"]
+            return (1 if _place_cons(ref).get("is_anchor") else 0,
+                    float(_info(ref).get("score", 0.0) or 0.0),
+                    len(_children(items[idx]["fp"], "pad")))
+
+        def _overlaps_idx(idx: int) -> bool:
+            a = bbox_of(items[idx])
+            for j in range(len(items)):
+                if j == idx:
+                    continue
+                ox, oy = _overlap_amounts(a, bbox_of(items[j]), clearance)
+                if ox > 1e-6 and oy > 1e-6:
+                    return True
+            return False
+
+        def _shared_target(idx: int):
+            """The highest-criticality OTHER part sharing a net with items[idx],
+            and that part's pad on a shared net NEAREST to items[idx]. Targeting
+            the nearest shared pad (not the first) keeps a decoupling cap on the
+            IC edge next to its power pin instead of being dragged through the
+            body toward a pad on the far side. Returns (target_idx, pad xy) or
+            None."""
+            it = items[idx]
+            my_nets: set = set()
+            for pad in _children(it["fp"], "pad"):
+                nid = _pad_net_id(pad)
+                if nid > 0:
+                    my_nets.add(nid)
+            cand: Dict[int, Tuple[int, float, int]] = {}
+            for nid in my_nets:
+                for (oidx, _opad) in net_pads_all.get(nid, []):
+                    if oidx != idx:
+                        cand[oidx] = _crit_key(oidx)
+            if not cand:
+                return None
+            toidx = max(cand, key=lambda k: cand[k])
+            best_pad: Optional[Tuple[float, float]] = None
+            best_d: Optional[float] = None
+            for pad in _children(items[toidx]["fp"], "pad"):
+                nid = _pad_net_id(pad)
+                if nid <= 0 or nid not in my_nets:
+                    continue
+                px, py = _pad_board_xy(items[toidx]["x"], items[toidx]["y"],
+                                       items[toidx]["rot"], pad)
+                dd = math.hypot(px - it["x"], py - it["y"])
+                if best_d is None or dd < best_d:
+                    best_d = dd
+                    best_pad = (px, py)
+            if best_pad is None:
+                return None
+            return toidx, best_pad
+
+        # -- keep-close: a support part hugs the pin it serves --
+        for _ in range(kc_iters):
+            moved_any = False
+            for idx, it in enumerate(items):
+                if it["fixed"]:
+                    continue
+                pc = _place_cons(it["ref"])
+                if not pc.get("keep_close_to_shared_pin"):
+                    continue
+                tgt = _shared_target(idx)
+                if tgt is None:
+                    continue
+                tx, ty = tgt[1]
+                d = float(pc.get("max_dist_mm", cp_max_step))
+                dist = math.hypot(tx - it["x"], ty - it["y"])
+                if dist <= d or dist < 1e-6:
+                    continue
+                step = min(cp_max_step, dist - d)
+                ox, oy = it["x"], it["y"]
+                # Move as close as possible: try the full step, then progressively
+                # shorter ones, and keep the largest that creates no overlap — so
+                # the cap ends up hugging the IC edge (de-collision sets the floor).
+                placed = False
+                for frac in (1.0, 0.6, 0.3, 0.15):
+                    ns = step * frac
+                    it["x"] = ox + (tx - ox) / dist * ns
+                    it["y"] = oy + (ty - oy) / dist * ns
+                    if not _overlaps_idx(idx):
+                        moved_refs.add(it["ref"])
+                        kept_close += 1
+                        moved_any = True
+                        placed = True
+                        break
+                if not placed:
+                    it["x"], it["y"] = ox, oy
+            if not moved_any:
+                break
+
+        # -- keep-away: separate conflicting domains (analog/switching, RF) --
+        for _ in range(ka_iters):
+            moved_any = False
+            for idx, it in enumerate(items):
+                if it["fixed"]:
+                    continue
+                pc = _place_cons(it["ref"])
+                ka = set(pc.get("keep_away_from", []) or [])
+                if not ka:
+                    continue
+                g = float(pc.get("min_gap_mm", cp_max_step))
+                a = bbox_of(it)
+                for j in range(len(items)):
+                    if j == idx or not (_labels(j) & ka):
+                        continue
+                    ox, oy = _overlap_amounts(a, bbox_of(items[j]), g)
+                    if ox <= 1e-6 or oy <= 1e-6:
+                        continue                       # already clear of gap g
+                    acx, acy = _centre(a)
+                    bcx, bcy = _centre(bbox_of(items[j]))
+                    if ox <= oy:
+                        dirn = -1.0 if acx <= bcx else 1.0
+                        dx, dy = dirn * min(ox, cp_max_step), 0.0
+                    else:
+                        dirn = -1.0 if acy <= bcy else 1.0
+                        dx, dy = 0.0, dirn * min(oy, cp_max_step)
+                    px, py = it["x"], it["y"]
+                    it["x"] += dx
+                    it["y"] += dy
+                    if _overlaps_idx(idx):
+                        it["x"], it["y"] = px, py
+                    else:
+                        a = bbox_of(it)
+                        moved_refs.add(it["ref"])
+                        kept_apart += 1
+                        moved_any = True
+            if not moved_any:
+                break
+
     # ---- Write positions back into the footprint nodes ----
+    # Rotation is only written when the optimizer ran, so with rotation_optimize
+    # off the footprint's `at` clause is untouched on the angle slot (byte-stable).
     applied = 0
+    write_rot = do_rot or do_ou
     for it in items:
-        if _set_outer_at(it["fp"], it["x"], it["y"]):
+        if _set_outer_at(it["fp"], it["x"], it["y"],
+                         it["rot"] if write_rot else None):
             applied += 1
 
     overlaps_after = count_overlaps()
@@ -479,8 +885,15 @@ def refine_placement(root: list, cfg: Dict[str, Any]) -> Dict[str, Any]:
         "overlaps_before": overlaps_before,
         "overlaps_after": overlaps_after,
         "moved": len(moved_refs),
+        "rotated": rotated,
+        "oriented": oriented,
+        "clustered": clustered,
+        "kept_close": kept_close,
+        "kept_apart": kept_apart,
+        "constraint_placement": bool(constraints and cp_cfg.get("enabled", False)),
         "footprints": len(items),
         "skipped_no_geometry": skipped_no_bbox,
         "clearance_mm": clearance,
         "wirelength_refine": do_wl,
+        "rotation_optimize": do_rot,
     }

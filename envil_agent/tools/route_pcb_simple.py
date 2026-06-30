@@ -235,6 +235,32 @@ def _load_netclass_widths(pcb_path: Path) -> Dict[str, float]:
     return out
 
 
+def _load_netclass_clearance(pcb_path: Path) -> float:
+    """Default-class copper clearance (mm) from the sibling .kicad_pro
+    net_settings.classes. Returns 0.0 when unavailable so the caller falls
+    back to default_clearance_mm. Prefers the 'Default' class, else the
+    first class that declares a clearance."""
+    pro = pcb_path.with_suffix(".kicad_pro")
+    if not pro.exists():
+        return 0.0
+    try:
+        import json as _json
+        data = _json.loads(pro.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0.0
+    best = 0.0
+    for cls in (data.get("net_settings", {}) or {}).get("classes", []) or []:
+        try:
+            c = float(cls.get("clearance", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if str(cls.get("name", "")) == "Default" and c > 0.0:
+            return c
+        if c > 0.0 and best == 0.0:
+            best = c
+    return best
+
+
 def _load_netclass_patterns(pcb_path: Path) -> List[Tuple[str, str]]:
     """Pull the [(pattern, classname), ...] assignment rules from
     `.kicad_pro -> net_settings.netclass_patterns`. Pattern syntax is
@@ -493,6 +519,128 @@ def _pad_bbox(pad_abs_x: float, pad_abs_y: float,
             pad_abs_y + ph / 2 + inflate)
 
 
+def _seg_rect(p1: Tuple[float, float], p2: Tuple[float, float],
+               half: float) -> Tuple[float, float, float, float]:
+    """Axis-aligned bbox of a segment, inflated by `half` on every side."""
+    x1, y1 = p1
+    x2, y2 = p2
+    return (min(x1, x2) - half, min(y1, y2) - half,
+            max(x1, x2) + half, max(y1, y2) + half)
+
+
+def _net_voltage(name: str) -> float:
+    """Parse a working voltage from a net name. '+3V3'->3.3, '+12V'/'12V'->12,
+    '230V'->230, '+5V'->5. Returns 0.0 when no voltage is encoded."""
+    s = (name or "").upper().replace("+", "")
+    m = re.match(r"(\d+)V(\d+)\b", s)            # 3V3 -> 3.3
+    if m:
+        return float(m.group(1)) + float(m.group(2)) / 10.0
+    m = re.search(r"(\d+(?:\.\d+)?)\s*V", s)     # 12V, 5V, 230V
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _ipc_clearance_for(voltage: float, table: List[list], base: float) -> float:
+    """IPC-2221B-style lookup: ``table`` is ascending [[max_voltage, clearance_mm]]
+    rows; return the clearance of the first row whose max_voltage >= voltage (else
+    the largest row). Never returns less than ``base``."""
+    if voltage <= 0 or not table:
+        return base
+    best = base
+    for row in sorted(table, key=lambda r: float(r[0])):
+        try:
+            vmax, cl = float(row[0]), float(row[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if voltage <= vmax:
+            return max(base, cl)
+        best = max(base, cl)
+    return best
+
+
+def _rects_overlap(r1: Tuple[float, float, float, float],
+                    r2: Tuple[float, float, float, float]) -> bool:
+    return not (r1[2] < r2[0] or r2[2] < r1[0]
+                or r1[3] < r2[1] or r2[3] < r1[1])
+
+
+def _inflate_rect(r: Tuple[float, float, float, float],
+                   m: float) -> Tuple[float, float, float, float]:
+    return (r[0] - m, r[1] - m, r[2] + m, r[3] + m)
+
+
+def _edge_bbox(root: list) -> Optional[Tuple[float, float, float, float]]:
+    """Bounding box of the Edge.Cuts board outline, in board coords."""
+    xs: List[float] = []
+    ys: List[float] = []
+    for ch in root[1:]:
+        if not isinstance(ch, list):
+            continue
+        if _head(ch) not in ("gr_line", "gr_rect", "gr_poly", "gr_arc", "gr_circle"):
+            continue
+        lyr = _layer_of(ch)
+        if lyr != "Edge.Cuts":
+            continue
+        for key in ("start", "end", "center", "mid"):
+            for c in ch[1:]:
+                if isinstance(c, list) and _head(c) == key and len(c) >= 3:
+                    try:
+                        xs.append(float(c[1])); ys.append(float(c[2]))
+                    except (TypeError, ValueError):
+                        pass
+        pts = _child(ch, "pts") if "_child" in globals() else None
+    if not xs:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _edge_walls(eb: Tuple[float, float, float, float], clr: float
+                ) -> List[Tuple[float, float, float, float]]:
+    """Four obstacle rects covering the forbidden strip within ``clr`` of each
+    board edge, so any route entering it is rejected by the normal obstacle test
+    (keeps tracks off the board edge — the copper-to-edge clearance rule)."""
+    x0, y0, x1, y1 = eb
+    BIG = 1.0e6
+    return [
+        (-BIG, -BIG, x0 + clr, BIG),    # left strip
+        (x1 - clr, -BIG, BIG, BIG),     # right strip
+        (-BIG, -BIG, BIG, y0 + clr),    # top strip
+        (-BIG, y1 - clr, BIG, BIG),     # bottom strip
+    ]
+
+
+def _route_violates(route: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+                     seg_layer: str, half_w: float, clearance: float, nid: int,
+                     raw_pad_bboxes: List[Tuple[int, Tuple[float, float, float, float]]],
+                     routed_tracks: List[Tuple[str, Tuple[float, float, float, float],
+                                               float, int]]) -> bool:
+    """ORIENTATION-INDEPENDENT clearance gate. True if ANY segment of `route`
+    comes within `clearance` (copper-to-copper) of another net's pad or already-
+    routed track on `seg_layer`. Uses bounding-box overlap so it is correct for
+    axis-aligned, chamfered-diagonal, and grid-rounded near-diagonal segments
+    alike (the per-tier _seg_intersects_rect only handles exact H/V and silently
+    passes near-diagonals). Conservative — never under-reports a short."""
+    for (s, e) in route:
+        if s == e:
+            continue
+        cand = _seg_rect(s, e, half_w + clearance)
+        for (onid, bb) in raw_pad_bboxes:
+            if onid == nid:
+                continue
+            if _rects_overlap(cand, bb):
+                return True
+        for (rl, rb, rhw, rnid) in routed_tracks:
+            if rnid == nid or rl != seg_layer:
+                continue
+            if _rects_overlap(cand, _inflate_rect(rb, rhw)):
+                return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # R1.1: A* fallback on a Manhattan grid. Used when L/Z/via all fail.
 # Pure Python — small grid, only invoked for the residual ~5–10% of nets
@@ -747,8 +895,24 @@ async def route_pcb_simple(args: dict[str, Any]) -> dict[str, Any]:
     skip_nets    = set(s.upper() for s in (
         args.get("skip_nets") or cfg.get("skip_nets",
             ["GND", "AGND", "DGND", "PGND", "EGND", "SGND", "VSS", "0", ""])))
+    # Phase 3 (Fix 1): nets here are routed even if they are in skip_nets — used
+    # by the GND pour-or-route fallback to route a ground net the copper pour
+    # failed to connect. Empty by default (skip_nets behaves as before).
+    force_route_nets = set(s.upper() for s in (args.get("force_route_nets") or []))
     use_class_w  = bool(cfg.get("use_net_class_width", True))
     inflate      = float(cfg.get("obstacle_inflate_mm", 0.5))
+    # Clearance-aware routing (root-cause fix for router-made shorts): treat
+    # OTHER nets' already-routed tracks as obstacles AND keep a copper-to-copper
+    # gap, so a candidate is rejected unless it stays
+    # (own_half_width + clearance + obstacle_half_width) from every other net.
+    # The clearance is the board's real Default-netclass clearance (dynamic, not
+    # hardcoded); falls back to default_clearance_mm. When a net can't be routed
+    # within clearance it is left as ratsnest — NEVER shorted. Disable with
+    # clearance_aware=false for the legacy (short-prone) behaviour.
+    clearance_aware = bool(cfg.get("clearance_aware", True))
+    clearance_mm = _load_netclass_clearance(pcb_path) if clearance_aware else 0.0
+    if clearance_mm <= 0.0:
+        clearance_mm = float(cfg.get("default_clearance_mm", 0.2))
     preview_only = bool(args.get("preview_only",
                                    cfg.get("preview_only", False)))
     replace      = bool(args.get("replace",
@@ -783,6 +947,14 @@ async def route_pcb_simple(args: dict[str, Any]) -> dict[str, Any]:
     astar_step_mm     = float(cfg.get("astar_step_mm", 1.27))
     astar_margin_mm   = float(cfg.get("astar_bounds_margin_mm", 8.0))
     astar_max_nodes   = int(cfg.get("astar_max_nodes", 50_000))
+    # Phase 3 (Universal engine, R11): route critical -> power -> signal instead
+    # of net-id order, so high-speed/clock nets claim clean channels before the
+    # board congests. Priority comes from the SAME pcb_reasoning signatures (one
+    # source of truth, no duplicate net-name lists). Default off -> net-id order
+    # (byte-stable). Per-net order changes which nets win a corridor, never makes
+    # a short (the router stays clearance-aware).
+    route_priority_order = bool(args.get("route_priority_order",
+                                          cfg.get("route_priority_order", False)))
 
     try:
         text = pcb_path.read_text(encoding="utf-8")
@@ -808,10 +980,19 @@ async def route_pcb_simple(args: dict[str, Any]) -> dict[str, Any]:
             if not (isinstance(child, list) and _head(child) == "pad"):
                 continue
             num = _pad_number(child)
-            pad_x, pad_y, _ = _at(child)
+            pad_x, pad_y, pad_rot = _at(child)
             pw, ph = _pad_size(child)
             net_id, net_name = _pad_net(child)
-            dx, dy = _rotate(pad_x, pad_y, fp_rot)
+            # KiCad places a pad by rotating its local position CW by the
+            # footprint orientation (the board Y-axis points down). Using
+            # +fp_rot (CCW) put pads on the WRONG side for rotated parts — e.g.
+            # a 270°-rotated 2-pin part had its two pads swapped, so the router
+            # drove a net's track straight onto the OTHER net's pad (a short).
+            # Verified against kicad-cli DRC. fp_rot==0 is unchanged (byte-stable).
+            dx, dy = _rotate(pad_x, pad_y, -fp_rot)
+            # A 90°/270° total rotation swaps the pad's board-frame W/H.
+            if int(round(fp_rot + pad_rot)) % 180 == 90:
+                pw, ph = ph, pw
             pads.append((net_id, net_name, ref, num,
                           fp_x + dx, fp_y + dy, pw, ph))
 
@@ -849,6 +1030,46 @@ async def route_pcb_simple(args: dict[str, Any]) -> dict[str, Any]:
         if not b["name"]:
             b["name"] = nt.get(nid, "")
 
+    # ---- R1 + R12: per-net clearance (voltage + domain) ----
+    # Each net gets its OWN required clearance = max of: the base clearance, the
+    # IPC-2221B requirement for its voltage (R1, parsed from net name), and a
+    # domain bump if it is SENSITIVE (analog) or NOISY (switching/motor) so those
+    # nets keep extra copper gap from everything (R12). Reuses the pcb_reasoning
+    # signatures (one source of truth, no duplicate net lists). Both gated; when
+    # neither is enabled net_clearance stays empty and the routing net falls back
+    # to the global clearance_mm (byte-stable).
+    vc = cfg.get("voltage_clearance", {}) if isinstance(cfg.get("voltage_clearance"), dict) else {}
+    dc = cfg.get("domain_clearance", {}) if isinstance(cfg.get("domain_clearance"), dict) else {}
+    net_clearance: Dict[int, float] = {}
+    if vc.get("enabled", False) or dc.get("enabled", False):
+        _an: List[str] = []
+        _noisy: List[str] = []
+        _rcfg: Dict[str, Any] = {}
+        try:
+            from .pcb_reasoning import _matches_any as _sig_m, _load_cfg as _sig_c
+            _rcfg = _sig_c()
+            _ps = _rcfg.get("pin_signatures", {})
+            _ns = _rcfg.get("net_signatures", {})
+            _an = list(_ps.get("analog", []))
+            _noisy = list(_ps.get("power_switch", [])) + list(_ns.get("motor_power", []))
+        except Exception:                                   # noqa: BLE001
+            _sig_m = None  # type: ignore
+        vtable = vc.get("ipc_table", [])
+        s_extra = float(dc.get("sensitive_extra_mm", 0.3))
+        n_extra = float(dc.get("noisy_extra_mm", 0.3))
+        for _nid, _info in by_net.items():
+            _nm = _info.get("name", "")
+            req = clearance_mm
+            if vc.get("enabled", False):
+                req = max(req, _ipc_clearance_for(_net_voltage(_nm), vtable, clearance_mm))
+            if dc.get("enabled", False) and _sig_m is not None:
+                if _sig_m(_an, [_nm], _rcfg):
+                    req = max(req, clearance_mm + s_extra)
+                if _sig_m(_noisy, [_nm], _rcfg):
+                    req = max(req, clearance_mm + n_extra)
+            if req > clearance_mm:
+                net_clearance[_nid] = req
+
     # Net-class lookup tables (read once)
     netclass_widths = _load_netclass_widths(pcb_path) if use_class_w else {}
     netclass_patterns = _load_netclass_patterns(pcb_path) if use_class_w else []
@@ -871,22 +1092,123 @@ async def route_pcb_simple(args: dict[str, Any]) -> dict[str, Any]:
     new_segments: List[list] = []
     total_segments = 0
     total_length_mm = 0.0
+    # Tracks already laid this run, as (layer, centerline-bbox, half_width, net_id).
+    # Subsequent nets treat OTHER nets' entries as obstacles → no shorts.
+    routed_tracks: List[Tuple[str, Tuple[float, float, float, float],
+                              float, int]] = []
 
     # All pad bboxes for obstacle checking (we exclude same-net pads
     # from the obstacle set when routing each net).
     all_pad_bboxes: List[Tuple[int, Tuple[float, float, float, float]]] = []
+    raw_pad_bboxes: List[Tuple[int, Tuple[float, float, float, float]]] = []
     for (nid, _nname, _ref, _num, x, y, pw, ph) in pads:
         if pw > 0 and ph > 0:
             all_pad_bboxes.append((nid, _pad_bbox(x, y, pw, ph, inflate)))
+            raw_pad_bboxes.append((nid, _pad_bbox(x, y, pw, ph, 0.0)))
 
-    for nid, info in sorted(by_net.items()):
+    # ---- Seed obstacles from EXISTING copper (root-cause fix for compose-shorts) ----
+    # route_pcb_simple is called repeatedly in the pipeline (route + GND fallback +
+    # repair + rip-up). routed_tracks started EMPTY each call, so a later call was
+    # blind to the copper earlier calls laid and routed on top of it -> shorts /
+    # tracks_crossing. Scan every existing segment + via and seed them as obstacles
+    # so this run stays clear of ALL prior copper (other nets) while still free to
+    # extend its OWN nets (same-net entries are skipped by the clearance gate).
+    # Gated by respect_existing_copper (default on = correctness). A fresh F8 board
+    # has no tracks, so first-pass routing is unchanged / byte-stable.
+    seeded_tracks = 0
+    seeded_vias = 0
+    if cfg.get("respect_existing_copper", True):
+        def _ch_pt(node: list, key: str):
+            for c in node[1:]:
+                if isinstance(c, list) and _head(c) == key and len(c) >= 3:
+                    try:
+                        return (float(c[1]), float(c[2]))
+                    except (TypeError, ValueError):
+                        return None
+            return None
+
+        def _ch_val(node: list, key: str):
+            for c in node[1:]:
+                if isinstance(c, list) and _head(c) == key and len(c) >= 2:
+                    try:
+                        return float(c[1])
+                    except (TypeError, ValueError):
+                        return None
+            return None
+
+        def _net_of(node: list) -> int:
+            for c in node[1:]:
+                if isinstance(c, list) and _head(c) == "net" and len(c) >= 2:
+                    try:
+                        return int(c[1])
+                    except (TypeError, ValueError):
+                        return 0
+            return 0
+
+        for ch in root[1:]:
+            if not isinstance(ch, list):
+                continue
+            h = _head(ch)
+            if h == "segment":
+                s = _ch_pt(ch, "start"); e = _ch_pt(ch, "end")
+                w = _ch_val(ch, "width"); lyr = _layer_of(ch)
+                if s and e and w:
+                    routed_tracks.append((lyr, _seg_rect(s, e, 0.0),
+                                          w / 2.0, _net_of(ch)))
+                    seeded_tracks += 1
+            elif h == "via":
+                at = _ch_pt(ch, "at"); sz = _ch_val(ch, "size")
+                if at and sz:
+                    nid = _net_of(ch)            # a via spans all layers -> pad-like
+                    all_pad_bboxes.append((nid, _pad_bbox(at[0], at[1], sz, sz, inflate)))
+                    raw_pad_bboxes.append((nid, _pad_bbox(at[0], at[1], sz, sz, 0.0)))
+                    seeded_vias += 1
+
+    # ---- R2.2: keep tracks clear of the board edge (copper-to-edge clearance) ----
+    # The router was blind to Edge.Cuts, so a track could route right up to the
+    # board edge -> copper_edge_clearance DRC. Add the strip within edge_clearance
+    # of each edge as an obstacle so every routing tier avoids it. Any board, no
+    # hardcoded geometry (read from the actual outline). Gated.
+    edge_walls: List[Tuple[float, float, float, float]] = []
+    if cfg.get("edge_clearance_enabled", True):
+        _eb = _edge_bbox(root)
+        if _eb is not None:
+            edge_walls = _edge_walls(_eb, float(cfg.get("edge_clearance_mm", 0.5)))
+
+    # ---- Net iteration order: priority (R11) or net-id (byte-stable default) ----
+    def _net_prio(_nm: str) -> int:
+        return 3
+    if route_priority_order:
+        try:
+            from .pcb_reasoning import _matches_any as _sig_match, _load_cfg as _sig_cfg
+            _rcfg = _sig_cfg()
+            _sigs = _rcfg.get("pin_signatures", {})
+            _crit = list(_sigs.get("highspeed", [])) + list(_sigs.get("clock", []))
+            _powr = list(_sigs.get("power", []))
+
+            def _net_prio(_nm: str) -> int:            # noqa: F811
+                if _nm and _sig_match(_crit, [_nm], _rcfg):
+                    return 1                            # critical: high-speed/clock
+                if _nm and _sig_match(_powr, [_nm], _rcfg):
+                    return 2                            # power rail
+                return 3                                # general signal
+        except Exception:                               # noqa: BLE001
+            pass
+        net_order = sorted(by_net.items(),
+                           key=lambda kv: (_net_prio(kv[1].get("name", "")), kv[0]))
+    else:
+        net_order = sorted(by_net.items())
+
+    for nid, info in net_order:
         name = info["name"]
         net_pads = info["pads"]
+        # R1/R12: this net's own clearance (voltage / domain bumped), else global.
+        net_clear = net_clearance.get(nid, clearance_mm)
         if nid == 0 or not name:
             skipped_nets.append({"net": name or f"(net {nid})",
                                   "reason": "no net (unconnected)"})
             continue
-        if name.upper() in skip_nets:
+        if name.upper() in skip_nets and name.upper() not in force_route_nets:
             skipped_nets.append({"net": name, "reason": "in skip_nets"})
             continue
         if len(net_pads) < 2:
@@ -922,9 +1244,38 @@ async def route_pcb_simple(args: dict[str, Any]) -> dict[str, Any]:
         ]
         edges_with_len.sort(key=lambda e: -e[2])
         edges = [(i, j) for (i, j, _l) in edges_with_len]
-        # Pre-compute the obstacle set: every pad NOT on this net
-        obstacles = [bb for (other_nid, bb) in all_pad_bboxes
-                     if other_nid != nid]
+        # Pre-compute the obstacle set: every pad NOT on this net. When
+        # clearance-aware, also (a) widen every obstacle by this net's
+        # half-width + clearance so a candidate keeps a real copper gap, and
+        # (b) add OTHER nets' already-routed tracks (per layer) so two nets
+        # never end up touching. back_obstacles is the B.Cu equivalent used by
+        # the via-swap half.
+        if clearance_aware:
+            margin = net_clear + width / 2.0
+            obstacles = []
+            back_obstacles = []
+            for (other_nid, bb) in all_pad_bboxes:
+                if other_nid == nid:
+                    continue
+                r = _inflate_rect(bb, margin)   # pads block both copper layers
+                obstacles.append(r)
+                back_obstacles.append(r)
+            for (rl, rb, rhw, rnid) in routed_tracks:
+                if rnid == nid:
+                    continue
+                r = _inflate_rect(rb, rhw + margin)
+                if rl == layer:
+                    obstacles.append(r)
+                if rl == back_layer:
+                    back_obstacles.append(r)
+        else:
+            obstacles = [bb for (other_nid, bb) in all_pad_bboxes
+                         if other_nid != nid]
+            back_obstacles = obstacles
+        # Board-edge keepout applies to every net, both layers.
+        if edge_walls:
+            obstacles = list(obstacles) + edge_walls
+            back_obstacles = list(back_obstacles) + edge_walls
 
         edges_routed = 0
         edges_skipped = 0
@@ -973,8 +1324,8 @@ async def route_pcb_simple(args: dict[str, Any]) -> dict[str, Any]:
             # is completely blocked. We pick the via location as the
             # midpoint of the L's corner — gives the best chance of
             # both halves routing cleanly.
-            via_layer_obstacles = obstacles  # for now, share — most
-                                              # pads exist on both layers
+            via_layer_obstacles = back_obstacles  # B.Cu obstacle set (pads +
+                                                  # other nets' B.Cu tracks)
             if (picked is None and enable_vias
                     and vias_used < net_via_cap):
                 # Try BOTH L-corner positions as the via drop point.
@@ -982,9 +1333,14 @@ async def route_pcb_simple(args: dict[str, Any]) -> dict[str, Any]:
                 # the first via-swap candidate respects the layer policy.
                 for cand_L in _segments_for_L(a, b, prefer_axis=front_axis):
                     via_pt = cand_L[0][1]   # the corner of the L
-                    # Round to grid
-                    via_pt = (round(via_pt[0] / 0.05) * 0.05,
-                              round(via_pt[1] / 0.05) * 0.05)
+                    # Round to a FINE grid only. The corner is (b.x, a.y) — i.e.
+                    # already on the pad-coordinate grid — so a 1 µm round keeps
+                    # front_seg (a->via_pt) and back_seg (via_pt->b) exactly
+                    # axis-aligned. (The old 0.05 mm round nudged the corner off
+                    # both axes, making the segments epsilon-diagonal so the
+                    # axis-only obstacle test silently passed → shorts.)
+                    via_pt = (round(via_pt[0] / 0.001) * 0.001,
+                              round(via_pt[1] / 0.001) * 0.001)
                     # Front-layer half (a -> via_pt). Then back-layer
                     # half (via_pt -> b). Each half is a single
                     # straight segment so guaranteed-Manhattan.
@@ -1024,42 +1380,76 @@ async def route_pcb_simple(args: dict[str, Any]) -> dict[str, Any]:
             if picked is None:
                 edges_skipped += 1
                 continue
+
+            # R2.3: chamfer right-angle corners BEFORE the clearance gate, so the
+            # gate validates the FINAL emitted geometry (chamfers are diagonal).
+            if corner_chamfer_mm > 0.0 and len(picked) >= 2:
+                picked = _chamfer_corners(picked, corner_chamfer_mm, obstacles)
+            has_via = picked_via is not None and back_path
+            if has_via and corner_chamfer_mm > 0.0 and len(back_path) >= 2:
+                back_path = _chamfer_corners(back_path, corner_chamfer_mm,
+                                             back_obstacles)
+
+            # ---- Clearance GATE (the guarantee): re-validate the final route
+            # against other nets, orientation-independently. The per-tier checks
+            # use an axis-only test that misses near-diagonal (grid-rounded) and
+            # chamfered segments, so this is what actually prevents shorts. If it
+            # would violate clearance, drop the edge (leave it as ratsnest) —
+            # never emit a short.
+            if clearance_aware:
+                hw = width / 2.0
+                bad = _route_violates(picked, layer, hw, net_clear, nid,
+                                      raw_pad_bboxes, routed_tracks)
+                if (not bad) and has_via:
+                    bad = _route_violates(back_path, back_layer, hw,
+                                          net_clear, nid, raw_pad_bboxes,
+                                          routed_tracks)
+                    # The via spans both layers — keep it clear of every other
+                    # net's pad (hole-clearance) and routed track.
+                    if not bad:
+                        cand_via = _seg_rect(picked_via, picked_via,
+                                             via_size_mm / 2.0 + net_clear)
+                        bad = (any(onid != nid and _rects_overlap(cand_via, bb)
+                                   for (onid, bb) in raw_pad_bboxes)
+                               or any(rnid != nid
+                                      and _rects_overlap(cand_via,
+                                                         _inflate_rect(rb, rhw))
+                                      for (rl, rb, rhw, rnid) in routed_tracks))
+                if bad:
+                    edges_skipped += 1
+                    continue
+
             # ONE successful MST edge — increment once regardless of
             # how many segments the route took (L=2, Z=3, via path=2+).
             edges_routed += 1
-
-            # R2.3: chamfer right-angle corners on the front-layer path
-            # before emission. Pure post-pass — leaves length unchanged
-            # to ±diag, never adds new obstacle crossings (rejects the
-            # chamfer when the diagonal would clip a pad). Same for the
-            # back-half path below.
-            if corner_chamfer_mm > 0.0 and len(picked) >= 2:
-                picked = _chamfer_corners(picked, corner_chamfer_mm, obstacles)
 
             # Emit front-layer segments
             for (s, e) in picked:
                 if s == e:
                     continue
                 new_segments.append(_make_segment(s, e, width, layer, nid))
+                if clearance_aware:
+                    routed_tracks.append((layer, _seg_rect(s, e, 0.0),
+                                          width / 2.0, nid))
                 total_segments += 1
                 total_length_mm += math.hypot(e[0] - s[0], e[1] - s[1])
 
             # Emit via + back-layer half if Tier 3 fired
-            if picked_via is not None and back_path:
+            if has_via:
                 new_segments.append(_make_via(picked_via[0], picked_via[1],
                                                 via_drill_mm, via_size_mm,
                                                 nid,
                                                 top_layer=layer,
                                                 bottom_layer=back_layer))
                 vias_used += 1
-                if corner_chamfer_mm > 0.0 and len(back_path) >= 2:
-                    back_path = _chamfer_corners(back_path, corner_chamfer_mm,
-                                                   obstacles)
                 for (s, e) in back_path:
                     if s == e:
                         continue
                     new_segments.append(_make_segment(s, e, width,
                                                        back_layer, nid))
+                    if clearance_aware:
+                        routed_tracks.append((back_layer, _seg_rect(s, e, 0.0),
+                                              width / 2.0, nid))
                     total_segments += 1
                     total_length_mm += abs(e[0] - s[0]) + abs(e[1] - s[1])
 

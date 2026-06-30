@@ -812,9 +812,25 @@ async def auto_place_pcb(args: dict[str, Any]) -> dict[str, Any]:
     refine_report: Dict[str, Any] = {}
     refine_cfg = cfg.get("refine", {}) if isinstance(cfg.get("refine"), dict) else {}
     if refine_only or refine_cfg.get("enabled", True):
+        # Phase 2 (Universal Engine): when constraint_placement is enabled, run the
+        # electrical-reasoning pass (tools/pcb_reasoning) to get per-ref constraints
+        # (keep-close decoupling, keep-away analog/switching, anchor) and hand them
+        # to refine_placement so the reasoning drives the layout. Constraints are
+        # position-independent (derived from the netlist/pins), so deriving them
+        # from the file/IR is consistent with the in-memory positions. Off -> None.
+        constraints = None
+        cp = refine_cfg.get("constraint_placement", {})
+        if isinstance(cp, dict) and cp.get("enabled", False):
+            try:
+                from .pcb_reasoning import analyze as _reason_analyze
+                _rep = _reason_analyze(pcb_path)
+                if _rep.get("ok"):
+                    constraints = {c["ref"]: c for c in _rep.get("components", [])}
+            except Exception:                               # noqa: BLE001
+                constraints = None
         try:
             from ..layout.place_refine import refine_placement
-            refine_report = refine_placement(root, refine_cfg) or {}
+            refine_report = refine_placement(root, refine_cfg, constraints) or {}
         except Exception as exc:                            # noqa: BLE001 — never block a placement on refine
             refine_report = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
