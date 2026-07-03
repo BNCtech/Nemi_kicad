@@ -34,18 +34,39 @@ import sexpdata
 from ..settings import sym_lib_dir as _sym_lib_dir, envil_home as _envil_home
 
 def _kicad_user_sym_dirs() -> list:
-    """KiCad per-user symbol dirs (Documents/KiCad/<ver>/symbols) for versions 7-10."""
-    from pathlib import Path as _P
-    base = _P.home() / "Documents" / "KiCad"
-    return [str(base / v / "symbols") for v in ("10.0", "9.0", "8.0", "7.0")]
+    """KiCad per-user symbol dirs (Documents/KiCad/<ver>/symbols), any version —
+    globbed rather than a fixed version list so a future KiCad release (or the
+    fork's own 10.99-style version string) is picked up without a code edit."""
+    base = Path.home() / "Documents" / "KiCad"
+    try:
+        return [str(p / "symbols") for p in base.glob("*") if p.is_dir()]
+    except OSError:
+        return []
+
+
+def _program_files_sym_dirs() -> list:
+    """Any installed app's bundled symbols under Program Files, e.g.
+    ``KiCad/9.0/share/kicad/symbols`` or the Envil fork's own
+    ``Envil CAD/share/kicad/symbols`` — globbed by shape, not by product name
+    or version, so this works for any install on any machine without edits."""
+    roots = []
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        base = os.environ.get(var, "").strip()
+        if not base:
+            continue
+        try:
+            roots.extend(
+                str(p) for p in Path(base).glob("*/share/kicad/symbols") if p.is_dir()
+            )
+        except OSError:
+            continue
+    return roots
+
 
 DEFAULT_SYM_ROOTS = (
     [str(_sym_lib_dir())]
     + _kicad_user_sym_dirs()
-    + [
-        "C:/Program Files/KiCad/9.0/share/kicad/symbols",
-        "C:/Program Files/KiCad/8.0/share/kicad/symbols",
-    ]
+    + _program_files_sym_dirs()
 )
 
 
@@ -158,14 +179,19 @@ def _discover_config_roots() -> Tuple[str, ...]:
 
 def _candidate_roots() -> List[str]:
     """Ordered candidate roots (may include non-existent ones — useful for
-    diagnostics). Priority: explicit $KICAD_SYMBOL_DIR, the app's own config
-    (auto-detected), the bundled lib, then any installed KiCad share dirs."""
+    diagnostics). Priority: explicit $KICAD_SYMBOL_DIR, a path this user
+    previously told the AI about (asked once, remembered from then on), the
+    app's own config (auto-detected), the bundled lib, then any installed
+    KiCad share dirs."""
     raw = os.environ.get("KICAD_SYMBOL_DIR", "")
     extras = [p for p in raw.split(os.pathsep) if p.strip()] if raw else []
+    from ..settings import user_library_override as _user_override
+    told = _user_override("symbol_dir")
+    user_told = [str(told)] if told else []
     bundled = str(_envil_home() / "kicad-sym-lib")
     out: List[str] = []
     seen: set = set()
-    for p in extras + list(_discover_config_roots()) + [bundled] + DEFAULT_SYM_ROOTS:
+    for p in extras + user_told + list(_discover_config_roots()) + [bundled] + DEFAULT_SYM_ROOTS:
         if not p:
             continue
         key = os.path.normcase(os.path.normpath(p))

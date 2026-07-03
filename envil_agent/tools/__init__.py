@@ -83,6 +83,7 @@ from .trace_net import trace_net
 from .edit_symbol import edit_symbol
 from .create_footprint import create_footprint
 from .create_component import create_component
+from .library_setup import check_kicad_library, set_kicad_library_path
 
 # Schematic-side tools — every verb here reads or edits a .kicad_sch.
 # Running these from pcbnew makes no sense (the user is not looking at
@@ -157,6 +158,8 @@ COMMON_TOOLS = [
     add_design_rule,
     list_design_rules,
     remove_design_rule,
+    check_kicad_library,
+    set_kicad_library_path,
 ]
 
 ALL_TOOLS = SCHEMATIC_TOOLS + PCB_TOOLS + COMMON_TOOLS
@@ -209,4 +212,6 @@ __all__ = [
     "edit_symbol",
     "create_footprint",
     "create_component",
+    "check_kicad_library",
+    "set_kicad_library_path",
 ]
