@@ -508,6 +508,281 @@ def find_wrong_crossing_junctions(
     return out
 
 
+# ----- Net-identity resolution + cross-net touch guard (C1) ---------------
+#
+# The interconnection defect: two circuits placed close together can have a
+# wire of net A land (endpoint-on-midspan T-tap, pure crossing, or collinear
+# overlap) on a wire of net B. `add_missing_junction_dots` then dots the T-tap
+# from GEOMETRY ALONE and shorts A to B. These helpers give the repair pass a
+# NET-IDENTITY check so it only ever bonds wires that resolve to the SAME net,
+# and flags the accidental cross-net coincidences (real shorts) instead.
+
+class _UnionFind:
+    """Minimal union-find over hashable keys (quantized wire endpoints)."""
+
+    def __init__(self) -> None:
+        self._parent: Dict[Any, Any] = {}
+
+    def find(self, x: Any) -> Any:
+        self._parent.setdefault(x, x)
+        root = x
+        while self._parent[root] != root:
+            root = self._parent[root]
+        # Path-compress.
+        while self._parent[x] != root:
+            self._parent[x], x = root, self._parent[x]
+        return root
+
+    def union(self, a: Any, b: Any) -> None:
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self._parent[ra] = rb
+
+
+def resolve_wire_nets(
+    wires: List[Wire],
+    labels: Optional[List[Label]] = None,
+    power_ports: Optional[List[Tuple[str, float, float]]] = None,
+    pins: Optional[List[Dict[str, Any]]] = None,
+    junctions: Optional[List[Point]] = None,
+    tol_mm: float = 0.05,
+) -> Tuple[List[Any], Dict[Any, frozenset]]:
+    """Group wires into electrically-connected clusters and attach each
+    cluster the set of NET NAMES that provably drive it.
+
+    Connectivity is built ONLY from unambiguous joins --- wires sharing an
+    endpoint, wires sharing a pin tip, and EXISTING junction dots (including a
+    dot sitting mid-span, which is a real, already-committed T-tap). Bare
+    endpoint-on-midspan T-taps WITHOUT a dot are deliberately NOT unioned:
+    whether they should connect is exactly the question the caller is asking.
+
+    Net NAMES come only from labels + power-port rails (the two things that
+    name a net in KiCad). Pins union for connectivity but carry no name, so a
+    cluster with no label/port stays unnamed --- and an unnamed side can never
+    be *proven* to differ from another net, keeping the guard conservative.
+
+    Returns (root_of_wire, names_of_root) where root_of_wire[i] is the cluster
+    root of wire i and names_of_root[root] is a frozenset of net names.
+    """
+    labels = labels or []
+    power_ports = power_ports or []
+    pins = pins or []
+    junctions = junctions or []
+
+    def q(x: float, y: float) -> Tuple[float, float]:
+        return (round(x, 2), round(y, 2))
+
+    uf = _UnionFind()
+    # Endpoint node per wire end; the two ends of a wire are joined.
+    ends: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+    for (ax, ay), (bx, by) in wires:
+        ka, kb = q(ax, ay), q(bx, by)
+        uf.union(ka, kb)
+        ends.append((ka, kb))
+
+    # Wires sharing a pin tip are connected through the component pin.
+    for pin in pins:
+        px, py = float(pin.get("x", 0.0)), float(pin.get("y", 0.0))
+        touching = [i for i, ((ax, ay), (bx, by)) in enumerate(wires)
+                    if _on_seg(px, py, ax, ay, bx, by, tol_mm)]
+        for j in touching[1:]:
+            uf.union(ends[touching[0]][0], ends[j][0])
+
+    # Existing junction dots commit a connection --- union every wire that
+    # touches the dot (endpoint OR interior: a mid-span dot is a real T-tap).
+    for (jx, jy) in junctions:
+        touching = [i for i, ((ax, ay), (bx, by)) in enumerate(wires)
+                    if _on_seg(jx, jy, ax, ay, bx, by, tol_mm)]
+        for j in touching[1:]:
+            uf.union(ends[touching[0]][0], ends[j][0])
+
+    root_of_wire = [uf.find(ends[i][0]) for i in range(len(wires))]
+
+    # Attach names: a label / power port drives whatever wire it sits on.
+    names_of_root: Dict[Any, set] = defaultdict(set)
+
+    def _attach(name: str, x: float, y: float) -> None:
+        for i, ((ax, ay), (bx, by)) in enumerate(wires):
+            if _on_seg(x, y, ax, ay, bx, by, tol_mm):
+                names_of_root[root_of_wire[i]].add(name)
+
+    for (name, lx, ly) in labels:
+        if name:
+            _attach(name, lx, ly)
+    for (rail, px, py) in power_ports:
+        if rail:
+            _attach(rail, px, py)
+
+    frozen = {r: frozenset(s) for r, s in names_of_root.items()}
+    return root_of_wire, frozen
+
+
+def _wires_at_point(wires: List[Wire], x: float, y: float,
+                    tol_mm: float) -> Tuple[List[int], List[int]]:
+    """Split the wires touching (x,y) into (ending_here, tapping_midspan)."""
+    ending: List[int] = []
+    tapping: List[int] = []
+    for i, ((ax, ay), (bx, by)) in enumerate(wires):
+        if _pt_eq(x, y, ax, ay, tol_mm) or _pt_eq(x, y, bx, by, tol_mm):
+            ending.append(i)
+        elif _on_seg_interior(x, y, ax, ay, bx, by, tol_mm):
+            tapping.append(i)
+    return ending, tapping
+
+
+def find_cross_net_touches(
+    wires: List[Wire],
+    labels: Optional[List[Label]] = None,
+    power_ports: Optional[List[Tuple[str, float, float]]] = None,
+    pins: Optional[List[Dict[str, Any]]] = None,
+    junctions: Optional[List[Point]] = None,
+    tol_mm: float = 0.05,
+) -> List[Issue]:
+    """Points where wires of two DIFFERENT named nets physically coincide ---
+    the accidental-interconnection defect from placing circuits too close.
+
+    Two failure shapes are reported:
+      * A meet (T-tap or 3+ ends) that, if dotted, would merge two disjoint
+        named nets --- `add_missing_junction_dots` must NOT dot these.
+      * A collinear overlap of two differently-named wires --- KiCad bonds
+        these with NO dot, so the only fix is to SEPARATE the circuits
+        (Phase A distribute pass); reported so self-heal/the build can act.
+
+    Conservative by construction: a coincidence is flagged ONLY when both
+    sides resolve to non-empty, disjoint net-name sets. Same-net taps and any
+    tap with an unnamed side are left alone (never a false short warning)."""
+    root_of_wire, names_of_root = resolve_wire_nets(
+        wires, labels, power_ports, pins, junctions, tol_mm)
+    out: List[Issue] = []
+
+    def _named(i: int) -> frozenset:
+        return names_of_root.get(root_of_wire[i], frozenset())
+
+    def _disjoint_named(idxs: List[int]) -> Optional[Tuple[frozenset, frozenset]]:
+        seen: List[frozenset] = []
+        for i in idxs:
+            nm = _named(i)
+            if nm:
+                seen.append(nm)
+        for a in range(len(seen)):
+            for b in range(a + 1, len(seen)):
+                if seen[a].isdisjoint(seen[b]):
+                    return seen[a], seen[b]
+        return None
+
+    # --- Meets (candidate T-taps / multi-ends) ---
+    cand: Dict[Tuple[float, float], Point] = {}
+    for (ax, ay), (bx, by) in wires:
+        cand.setdefault((round(ax, 2), round(ay, 2)), (ax, ay))
+        cand.setdefault((round(bx, 2), round(by, 2)), (bx, by))
+    for (x, y) in cand.values():
+        ending, tapping = _wires_at_point(wires, x, y, tol_mm)
+        involved = ending + tapping
+        if len(involved) < 2:
+            continue
+        # Only meets that a dot would newly bond matter (>=1 tap, or 3+ ends).
+        if not (tapping or len(ending) >= 3):
+            continue
+        pair = _disjoint_named(involved)
+        if pair is None:
+            continue
+        a, b = pair
+        out.append(_issue(
+            "CROSS_NET_TOUCH", "error",
+            f"wires of different nets {sorted(a)} and {sorted(b)} coincide at "
+            f"({x:.2f},{y:.2f}); dotting this would short them --- separate the "
+            "circuits",
+            x=round(x, 2), y=round(y, 2),
+            nets=[sorted(a), sorted(b)], kind="meet",
+        ))
+
+    # --- Collinear overlaps (bond even without a dot) ---
+    for i in range(len(wires)):
+        (ax, ay), (bx, by) = wires[i]
+        for j in range(i + 1, len(wires)):
+            if _named(i).isdisjoint(_named(j)) and _named(i) and _named(j):
+                (cx, cy), (dx, dy) = wires[j]
+                # Collinear + overlapping: both horizontal on same Y (or both
+                # vertical on same X) with overlapping spans, sharing more than
+                # a single point.
+                horiz = (abs(ay - by) <= tol_mm and abs(cy - dy) <= tol_mm
+                         and abs(ay - cy) <= tol_mm)
+                vert = (abs(ax - bx) <= tol_mm and abs(cx - dx) <= tol_mm
+                        and abs(ax - cx) <= tol_mm)
+                if not (horiz or vert):
+                    continue
+                if horiz:
+                    lo1, hi1 = sorted((ax, bx)); lo2, hi2 = sorted((cx, dx))
+                else:
+                    lo1, hi1 = sorted((ay, by)); lo2, hi2 = sorted((cy, dy))
+                overlap = min(hi1, hi2) - max(lo1, lo2)
+                if overlap > tol_mm:
+                    out.append(_issue(
+                        "CROSS_NET_OVERLAP", "error",
+                        f"collinear wires of different nets {sorted(_named(i))} "
+                        f"and {sorted(_named(j))} overlap; KiCad bonds these --- "
+                        "separate the circuits",
+                        nets=[sorted(_named(i)), sorted(_named(j))],
+                        kind="overlap",
+                    ))
+    return out
+
+
+# ----- Exhaustive pin completeness (C2) -----------------------------------
+
+def find_incomplete_pins(
+    pins: Optional[List[Dict[str, Any]]] = None,
+    wires: Optional[List[Wire]] = None,
+    labels: Optional[List[Label]] = None,
+    no_connects: Optional[List[Point]] = None,
+    tol_mm: float = 0.05,
+) -> List[Issue]:
+    """Every pin of every PLACED symbol must terminate on something: a wire
+    (endpoint or mid-span), a net label, a no-connect marker, or another pin
+    tip (direct abutment). A pin touching none of those is a MISSING/floating
+    pin --- the 'pins not configured' defect.
+
+    Exhaustive by construction: `pins` comes from build_context, which loads
+    the REAL library symbol and enumerates ALL its pins --- so this also
+    catches pins the IR/LLM never mentioned, not just the ones it wired.
+
+    Pins whose electrical type is explicitly no-connect are exempt (the symbol
+    author already marked them unused)."""
+    pins = pins or []
+    wires = wires or []
+    labels = labels or []
+    no_connects = no_connects or []
+
+    out: List[Issue] = []
+    for k, pin in enumerate(pins):
+        etype = str(pin.get("etype", "") or "").lower()
+        if etype in ("no_connect", "not_connected", "nc"):
+            continue
+        px, py = float(pin.get("x", 0.0)), float(pin.get("y", 0.0))
+
+        on_wire = any(_on_seg(px, py, ax, ay, bx, by, tol_mm)
+                      for (ax, ay), (bx, by) in wires)
+        on_label = any(_pt_eq(px, py, lx, ly, tol_mm) for (_n, lx, ly) in labels)
+        on_nc = any(_pt_eq(px, py, nx, ny, tol_mm) for (nx, ny) in no_connects)
+        on_pin = any(j != k and _pt_eq(px, py,
+                                       float(o.get("x", 0.0)),
+                                       float(o.get("y", 0.0)), tol_mm)
+                     for j, o in enumerate(pins))
+        if on_wire or on_label or on_nc or on_pin:
+            continue
+
+        out.append(_issue(
+            "PIN_INCOMPLETE", "error",
+            f"pin {pin.get('number', '?')} ({pin.get('name', '?')}) of "
+            f"{pin.get('ref', '?')} at ({px:.2f},{py:.2f}) connects to nothing "
+            "--- wire it, label it, or mark it no-connect",
+            x=round(px, 2), y=round(py, 2),
+            ref=pin.get("ref"), pin=pin.get("number"),
+            pin_name=pin.get("name"), etype=etype,
+        ))
+    return out
+
+
 # ----- Dangling / open wire endpoints (checklist #2, #10) -----------------
 
 def find_dangling_wire_endpoints(

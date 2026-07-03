@@ -48,6 +48,17 @@ def _load_wiring_rules() -> dict:
         return {}
 
 
+def _load_electrical_integrity() -> dict:
+    """`electrical_integrity.*` gates (C1 net-aware junctions, C2 pin
+    completeness). All default OFF so behaviour is byte-identical until a
+    project opts in."""
+    try:
+        return (json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+                .get("electrical_integrity") or {})
+    except (OSError, ValueError):
+        return {}
+
+
 def _head(node: Any) -> Optional[str]:
     if isinstance(node, list) and node:
         first = node[0]
@@ -424,7 +435,8 @@ def emit_buses(sch_path: Path, ir_buses: List[Any]) -> Dict[str, Any]:
 
 # ----- R4 (general): junction dot at every multi-wire meet ----------------
 
-def add_missing_junction_dots(sch_path: Path) -> Dict[str, Any]:
+def add_missing_junction_dots(sch_path: Path,
+                              net_aware: bool = False) -> Dict[str, Any]:
     """R4 general enforcement --- the SUPERSET of split_four_way_junctions.
 
     Adds an explicit `(junction)` dot at EVERY wire meet that needs one and
@@ -443,10 +455,18 @@ def add_missing_junction_dots(sch_path: Path) -> Dict[str, Any]:
     (engine-generated, apply_ops-edited, or hand-drawn). Idempotent: a second
     call sees the dots it added and is a no-op.
 
-    Returns {"junctions_added": N, "points_needing_dots": M, "ok": bool}.
+    `net_aware` (C1): when True, any candidate point whose wires resolve to two
+    DIFFERENT named nets is NOT dotted --- dotting it would short two circuits
+    that merely landed on top of each other. Those points are returned under
+    `cross_net_skipped` so the build can flag / re-place them. Default False
+    keeps the pure-geometry behaviour byte-identical.
+
+    Returns {"junctions_added": N, "points_needing_dots": M, "ok": bool}
+    (plus "cross_net_skipped" when net_aware).
     """
     from .context import build_context
-    from .selectors import find_missing_junction_dots
+    from .selectors import find_missing_junction_dots, find_cross_net_touches
+    from .selectors import _pt_eq as _pteq
 
     try:
         ctx = build_context(sch_path)
@@ -456,8 +476,28 @@ def add_missing_junction_dots(sch_path: Path) -> Dict[str, Any]:
 
     needed = find_missing_junction_dots(ctx["wires"], ctx["junctions"])
     pts = [(iss["where"]["x"], iss["where"]["y"]) for iss in needed]
+
+    cross_net: List[Dict[str, Any]] = []
+    if net_aware:
+        touches = find_cross_net_touches(
+            ctx["wires"], ctx.get("labels"), ctx.get("power_ports"),
+            ctx.get("pins"), ctx["junctions"])
+        # Only "meet" touches carry a point to withhold a dot from; "overlap"
+        # touches have no dot to suppress (they need physical separation) but
+        # are still surfaced.
+        block = [(t["where"]["x"], t["where"]["y"]) for t in touches
+                 if t.get("where", {}).get("x") is not None
+                 and t.get("where", {}).get("kind") == "meet"]
+        cross_net = touches
+        if block:
+            pts = [p for p in pts
+                   if not any(_pteq(p[0], p[1], bx, by, 0.05) for bx, by in block)]
+
     if not pts:
-        return {"junctions_added": 0, "points_needing_dots": 0, "ok": True}
+        res = {"junctions_added": 0, "points_needing_dots": 0, "ok": True}
+        if net_aware:
+            res["cross_net_skipped"] = cross_net
+        return res
 
     text = sch_path.read_text(encoding="utf-8")
 
@@ -475,8 +515,65 @@ def add_missing_junction_dots(sch_path: Path) -> Dict[str, Any]:
                 "ok": False}
     new_text = text[:last_paren] + "\n" + additions + text[last_paren:]
     sch_path.write_text(new_text, encoding="utf-8")
-    return {"junctions_added": len(pts), "points_needing_dots": len(pts),
-            "ok": True}
+    res = {"junctions_added": len(pts), "points_needing_dots": len(pts),
+           "ok": True}
+    if net_aware:
+        res["cross_net_skipped"] = cross_net
+    return res
+
+
+# ----- C2: exhaustive pin completeness ------------------------------------
+
+def complete_pins(sch_path: Path,
+                  emit_no_connect: bool = False) -> Dict[str, Any]:
+    """Report every pin of every placed symbol that terminates on nothing
+    (see selectors.find_incomplete_pins). When `emit_no_connect`, append an
+    explicit `(no_connect)` at each such pin so a genuinely-unused pin becomes
+    INTENTIONAL rather than silently floating (and stops tripping ERC).
+
+    Auto-WIRING a floating pin by role is done upstream in the IR
+    (intent/pin_complete.py, gated by pin_completion rules) where the net
+    context exists; this post-render pass is detection + no-connect only, and
+    returns the incomplete-pin list so self-heal / the build can surface it.
+    Idempotent: pins already carrying a no-connect are exempt."""
+    from .context import build_context
+    from .selectors import find_incomplete_pins
+
+    try:
+        ctx = build_context(sch_path)
+    except Exception as exc:
+        return {"incomplete": 0, "no_connects_added": 0, "ok": False,
+                "error": f"{type(exc).__name__}: {exc}"}
+
+    issues = find_incomplete_pins(
+        ctx.get("pins"), ctx.get("wires"), ctx.get("labels"),
+        ctx.get("no_connects"))
+    res: Dict[str, Any] = {
+        "incomplete": len(issues),
+        "no_connects_added": 0,
+        "ok": True,
+        "pins": issues,
+    }
+    if not issues or not emit_no_connect:
+        return res
+
+    pts = [(iss["where"]["x"], iss["where"]["y"]) for iss in issues]
+    text = sch_path.read_text(encoding="utf-8")
+
+    def _n(v):
+        return f"{v:g}"
+    additions = "".join(
+        f"\t(no_connect (at {_n(x)} {_n(y)}) (uuid \"{_uuid.uuid4()}\"))\n"
+        for (x, y) in pts
+    )
+    last_paren = text.rfind(")")
+    if last_paren < 0:
+        res["ok"] = False
+        return res
+    sch_path.write_text(text[:last_paren] + "\n" + additions + text[last_paren:],
+                        encoding="utf-8")
+    res["no_connects_added"] = len(pts)
+    return res
 
 
 # ----- R11_TEXT: move symbol field text out from under wires --------------
@@ -710,7 +807,9 @@ def repair_after_render(
     # T-taps too. Default on once implemented (idempotent + electrically safe).
     if bool(rules.get("r4_add_junction_dots", True)):
         try:
-            r4d_res = add_missing_junction_dots(sch_path)
+            _ei = _load_electrical_integrity()
+            _net_aware = bool(_ei.get("net_aware_junctions", False))
+            r4d_res = add_missing_junction_dots(sch_path, net_aware=_net_aware)
             summary["ran"].append({"rule": "R4_DOTS", "result": r4d_res})
         except Exception as exc:
             summary["skipped"].append({
@@ -721,6 +820,23 @@ def repair_after_render(
     # R11_TEXT: relocate any Reference/Value text a wire runs across.
     # Text-only move -> connectivity unchanged. Idempotent; no-op when no
     # wire crosses a field. Default on (safe, matches r4_add_junction_dots).
+    # C2: exhaustive pin-completeness gate. Detection always when enabled;
+    # no-connect emission only when pin_completeness_emit_no_connect. Default
+    # off -> no-op, output byte-identical.
+    _ei2 = _load_electrical_integrity()
+    if bool(_ei2.get("pin_completeness", False)):
+        try:
+            pc_res = complete_pins(
+                sch_path,
+                emit_no_connect=bool(_ei2.get("pin_completeness_emit_no_connect",
+                                              False)))
+            summary["ran"].append({"rule": "C2_PINS", "result": pc_res})
+        except Exception as exc:
+            summary["skipped"].append({
+                "rule": "C2_PINS",
+                "reason": f"{type(exc).__name__}: {exc}",
+            })
+
     if bool(rules.get("r11_move_text_off_wire", True)):
         try:
             r11t_res = clear_wires_over_text(sch_path)

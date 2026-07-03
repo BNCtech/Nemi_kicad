@@ -18,6 +18,14 @@ into a TopologyIR JSON object. Output ONLY valid JSON — no prose, no \
 markdown fences. The downstream engine is deterministic Python; if your \
 JSON is wrong, the build fails.
 
+# Image-sourced input
+If the prompt starts with "[FROM IMAGE]:", the component list was extracted \
+from a circuit photo or schematic scan by a vision model. Treat that list as \
+ground truth — do NOT substitute, omit, or rename components. Your job is to \
+wire them correctly (power pins, decoupling, net connections) and fill in \
+any missing pin numbers from the library. Flag assumptions you had to make \
+in the "notes" field.
+
 # Output schema (TopologyIR)
 {
   "name": "human-readable circuit name",

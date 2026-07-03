@@ -23,6 +23,7 @@ page-scoped mode (eeschema panel vs pcbnew panel):
 full registry for any caller that needs everything (kicad-cli wrappers
 during dev, smoke tests, etc.).
 """
+from .analyze_circuit_image import analyze_circuit_image
 from .apply_ops import apply_ops
 from .assess_request import assess_request
 from .audit_diff_pairs import audit_diff_pairs
@@ -70,6 +71,9 @@ from .trace_net import trace_net
 from .edit_symbol import edit_symbol
 from .create_footprint import create_footprint
 from .create_component import create_component
+from .delete_symbol import delete_symbol
+from .delete_footprint import delete_footprint
+from .add_symbol_library import add_symbol_library
 
 # Schematic-side tools — every verb here reads or edits a .kicad_sch.
 # Running these from pcbnew makes no sense (the user is not looking at
@@ -77,6 +81,7 @@ from .create_component import create_component
 SCHEMATIC_TOOLS = [
     read_schematic,
     assess_request,
+    analyze_circuit_image,
     create_project,
     create_symbol,
     build_circuit,
@@ -93,6 +98,9 @@ SCHEMATIC_TOOLS = [
     edit_symbol,
     create_footprint,
     create_component,
+    delete_symbol,
+    delete_footprint,
+    add_symbol_library,
 ]
 
 # PCB-side tools — every verb here reads or edits a .kicad_pcb. Running
@@ -158,6 +166,7 @@ def tools_for_app(app: str | None):
 __all__ = [
     "ALL_TOOLS", "SCHEMATIC_TOOLS", "PCB_TOOLS", "COMMON_TOOLS",
     "tools_for_app",
+    "analyze_circuit_image",
     "read_schematic", "assess_request", "create_project", "create_symbol",
     "build_circuit", "generate_pcb", "update_pcb", "apply_ops",
     "erc_check", "erc_autofix", "drc_check", "drc_autofix",
@@ -177,4 +186,7 @@ __all__ = [
     "edit_symbol",
     "create_footprint",
     "create_component",
+    "delete_symbol",
+    "delete_footprint",
+    "add_symbol_library",
 ]

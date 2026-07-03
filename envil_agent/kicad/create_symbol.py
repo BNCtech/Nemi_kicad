@@ -112,7 +112,9 @@ def _read_datasheet_full(part_name: str, url: str) -> Optional[dict]:
 
     try:
         resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            # Sonnet 4.6, not Haiku — Haiku misreads datasheet pin tables and
+            # chip markings, which broke image/datasheet-based symbol creation.
+            model="claude-sonnet-4-6",
             max_tokens=4096,
             messages=[{"role": "user", "content": user_content}],
         )

@@ -1726,6 +1726,21 @@
     "columns": 8,
     "_placement_note": "Initial grid: footprints grouped by refdes prefix, laid from (origin_x,origin_y) at pitch_x/pitch_y, `columns` per row, blank band between groups. auto_place_pcb or a future router can refine afterward."
   },
+  "readability": {
+    "_comment": "Phase A layout-neatness pass (_readability_spread_columns). Default OFF -> output byte-identical. When enabled AND a placement has >= min_columns vertical columns (repeated 2-pin chains, e.g. an LED array), adjacent columns are spread apart so each column's field-text bbox PLUS net_label_reserve_mm (room for the net labels added later during routing) never overlaps its neighbour, leaving column_gap_mm of clear channel. Only ever INCREASES spacing and preserves each column's internal geometry, so chains stay intact. align_baseline shifts every column to a shared top baseline (the reference 'comb' look) -- default OFF because chains sharing a bottom rail (common GND) must not be misaligned.",
+    "enabled": false,
+    "min_columns": 3,
+    "column_gap_mm": 5.08,
+    "net_label_reserve_mm": 12.0,
+    "column_quantize_mm": 2.54,
+    "align_baseline": false
+  },
+  "electrical_integrity": {
+    "_comment": "Correctness guards that outrank cosmetics (Phase C). All default FALSE so builds stay byte-identical until a project opts in. net_aware_junctions (C1): before add_missing_junction_dots dots a T-tap/meet, resolve the net identity of the wires (labels + power-port rails name a net; wires/pins/existing dots union connectivity) and REFUSE to dot any point that would merge two DIFFERENT named nets -- the 'two nearby circuits got interconnected' short. Withheld points + collinear cross-net overlaps are returned under cross_net_skipped for the build to flag / re-place. pin_completeness (C2): every pin of every placed symbol must be wired, labelled, on a power port, or explicit no-connect; anything else is reported (and auto-completed via pin_completion role rules where one matches).",
+    "net_aware_junctions": false,
+    "pin_completeness": false,
+    "pin_completeness_emit_no_connect": false
+  },
   "wiring_rules": {
     "_comment": "Per-rule gates for the WIRING_RULES.md R-series. Each flag turns ONE engine-side enforcement on/off without code changes. Defaults chosen to preserve current behaviour: rules that have always been enforced default to true, rules added 2026-06-01 default to true once implemented but can be flipped off per project.",
     "r4_split_four_way": false,

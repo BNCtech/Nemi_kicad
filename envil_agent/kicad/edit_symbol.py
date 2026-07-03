@@ -535,7 +535,9 @@ def _read_datasheet_pins(sym: list, part_name: str) -> Optional[Dict[str, Any]]:
             ]
 
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            # Sonnet 4.6, not Haiku — Haiku misreads datasheet pin tables, which
+            # produced incomplete/incorrect pin lists on symbol edits from images.
+            model="claude-sonnet-4-6",
             max_tokens=2048,
             messages=[{"role": "user", "content": user_content}],
         )
@@ -841,6 +843,201 @@ def _apply_op(sym: list, op_dict: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+def _find_sym_lib_tables() -> List[Path]:
+    """KiCad's GLOBAL sym-lib-table(s) — one per installed KiCad version under
+    %APPDATA%/kicad/<ver>/, plus any KICAD_CONFIG_HOME override. Mirror of
+    ``create_symbol._find_sym_lib_tables`` so delete can undo the registration
+    create_symbol performed."""
+    import os
+
+    out: List[Path] = []
+    appdata = os.environ.get("APPDATA") or ""
+    if appdata:
+        base = Path(appdata) / "kicad"
+        if base.exists():
+            for ver in sorted(base.iterdir()):
+                t = ver / "sym-lib-table"
+                if t.is_file():
+                    out.append(t)
+    cfg = os.environ.get("KICAD_CONFIG_HOME")
+    if cfg:
+        t = Path(cfg) / "sym-lib-table"
+        if t.is_file() and t not in out:
+            out.append(t)
+    return out
+
+
+def _unregister_from_lib_tables(library: str) -> List[str]:
+    """Remove the ``(lib (name "<library>") ...)`` entry from KiCad's global
+    sym-lib-table(s). The reverse of ``create_symbol._register_in_lib_tables``:
+    idempotent (skips a table that never had the entry) and safe (backs the
+    table up to <name>.envil-bak before the first edit). Matches the one-line
+    entry format the registrar writes."""
+    import re as _re
+
+    notes: List[str] = []
+    for tbl in _find_sym_lib_tables():
+        try:
+            text = tbl.read_text(encoding="utf-8")
+        except OSError as exc:
+            notes.append(f"could not read {tbl.parent.name}/sym-lib-table: {exc}")
+            continue
+        pat = _re.compile(r'\(lib\s+\(name\s+"' + _re.escape(library) + r'"')
+        lines = text.splitlines(keepends=True)
+        kept = [ln for ln in lines if not pat.search(ln)]
+        if len(kept) == len(lines):
+            notes.append(f"not present in {tbl.parent.name}")
+            continue
+        try:
+            backup = tbl.with_name(tbl.name + ".envil-bak")
+            if not backup.exists():
+                backup.write_text(text, encoding="utf-8")
+            tbl.write_text("".join(kept), encoding="utf-8")
+            notes.append(f"unregistered from {tbl.parent.name}")
+        except OSError as exc:
+            notes.append(f"could not update {tbl.parent.name}: {exc}")
+    return notes
+
+
+def _refresh_symbol_caches() -> None:
+    """Drop the symbol-resolution lru_caches so a deleted symbol stops
+    resolving without a restart (mirror of create_symbol._refresh_caches)."""
+    try:
+        from . import symbol_geom as sg
+        for fn in ("load_symbol", "_all_symbols", "resolve_lib_id_by_value"):
+            obj = getattr(sg, fn, None)
+            if obj is not None and hasattr(obj, "cache_clear"):
+                obj.cache_clear()
+    except Exception:
+        pass
+
+
+# Library nicks envil creates and is allowed to delete from without force.
+# Every other nick in KiCad's sym-lib-table is a stock/shared library that must
+# be protected. create_symbol writes new parts under the "Custom" nick.
+_CUSTOM_LIB_NICKS = frozenset({"Custom", "envil_generated"})
+
+# Generator tags envil stamps into files it writes — the two create_symbol
+# paths use different strings, so both are accepted as proof of an envil part.
+_ENVIL_GEN_TAGS = ("envil-sym-gen", "envil_create_symbol")
+
+
+def delete_symbol(
+    lib_id: str,
+    unregister: bool = True,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """Delete a symbol from the local library — the reverse of create_symbol.
+
+    Behaviour depends on the on-disk layout:
+
+    * symdir layout (``<nick>.kicad_symdir/<part>.kicad_sym`` — how
+      create_symbol writes) or any single-symbol file: the whole .kicad_sym
+      file is removed. If that empties the ``.kicad_symdir`` folder it is
+      removed too and, when ``unregister`` is set, the library is stripped
+      from KiCad's global sym-lib-table(s).
+    * flat multi-symbol library (many symbols in one file): only the requested
+      symbol node is removed and the file is written back. This mutates a
+      shared library file, so it is refused unless ``force`` is True.
+
+    Safety: only symbols in an envil-managed custom library (nick in
+    ``_CUSTOM_LIB_NICKS``, or a file carrying an envil generator tag) may be
+    deleted without ``force``. Every other nick is a stock/shared KiCad library
+    and is refused, so a stray call cannot delete a stock part. NOTE: the
+    ``.kicad_symdir`` folder suffix is deliberately NOT used as a "custom"
+    signal — in current KiCad builds stock libraries ship as symdirs too.
+
+    Args:
+        lib_id:     'LibNick:PartName' (e.g. 'Custom:BQ76952').
+        unregister: also remove the library from KiCad's sym-lib-table when the
+                    delete empties it (default True).
+        force:      allow deleting a non-envil symbol / editing a shared
+                    multi-symbol library file (default False).
+
+    Returns a dict describing what was removed. Raises ``ValueError`` if the
+    symbol cannot be found or a guard blocks the delete.
+    """
+    path, tree, sym = _locate_symbol(lib_id)   # raises ValueError if missing
+
+    aliases = _load_aliases()
+    resolved = aliases.get(lib_id, lib_id)
+    libnick, part = resolved.split(":", 1)
+
+    text = path.read_text(encoding="utf-8")
+    # Decide whether this symbol lives in an envil-managed *custom* library.
+    # Only custom libraries may be deleted without force — every other nick in
+    # KiCad's sym-lib-table is a stock/shared library we must not touch.
+    #
+    # The ".kicad_symdir" folder suffix is NOT a "custom" signal: in current
+    # KiCad builds every stock library (Device, Timer, MCU_*, ...) also ships
+    # as a .kicad_symdir, so a folder-suffix check would happily wipe stock
+    # parts. Identify custom by the library nick, or by envil's generator tag.
+    is_custom_nick = libnick in _CUSTOM_LIB_NICKS
+    envil_made = any(tag in text for tag in _ENVIL_GEN_TAGS)
+    if not (is_custom_nick or envil_made) and not force:
+        raise ValueError(
+            f"{lib_id!r} is not in an envil-managed custom library — it lives "
+            f"in stock/shared library {libnick!r} at {path}. Refusing to delete "
+            f"a non-custom part; pass force=true if you really mean to."
+        )
+
+    sym_nodes = [c for c in tree[1:]
+                 if isinstance(c, list) and _head(c) == "symbol"]
+    single_file = _head(tree) == "symbol" or len(sym_nodes) <= 1
+
+    library_removed = False
+    unregister_notes: List[str] = []
+
+    if single_file:
+        try:
+            path.unlink()
+        except OSError as exc:
+            raise ValueError(f"could not delete {path}: {exc}") from exc
+        removed = f"deleted file {path}"
+        parent = path.parent
+        if parent.name.endswith(".kicad_symdir"):
+            try:
+                if not any(parent.iterdir()):
+                    parent.rmdir()
+                    library_removed = True
+            except OSError:
+                pass
+    else:
+        if not force:
+            raise ValueError(
+                f"{lib_id!r} is one of {len(sym_nodes)} symbols in a shared "
+                f"library file ({path.name}). Deleting it edits that shared "
+                f"file — pass force=true to proceed."
+            )
+        tree.remove(sym)
+        out_text = _fmt_sym(tree)
+        path.write_text(out_text, encoding="utf-8")
+        removed = f"removed symbol from {path} ({len(sym_nodes) - 1} remaining)"
+
+    if library_removed and unregister:
+        unregister_notes = _unregister_from_lib_tables(libnick)
+
+    _refresh_symbol_caches()
+
+    return {
+        "ok": True,
+        "lib_id": lib_id,
+        "removed": removed,
+        "library_removed": library_removed,
+        "unregister": unregister_notes,
+        "note": (
+            f"Deleted symbol {lib_id}. " + removed + "."
+            + (f" Library {libnick!r} was empty and removed"
+               + (" and unregistered from KiCad's symbol-library table"
+                  if unregister_notes and any(
+                      n.startswith("unregistered") for n in unregister_notes)
+                  else "")
+               + " — RESTART KiCad to refresh the symbol chooser."
+               if library_removed else "")
+        ),
+    }
+
 
 def apply_symbol_ops(
     lib_id: str,

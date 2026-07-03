@@ -48,6 +48,101 @@ DEFAULT_SYM_ROOTS = (
     ]
 )
 
+# KiCad ships with version-specific path tokens in sym-lib-table URIs.
+# These are not in os.environ or kicad_common.json, so we carry the defaults
+# here. On non-standard installs the token expands to a non-existent path
+# which _has_symbols() rejects cleanly — no harm done.
+_KICAD_BUILTIN_TOKENS: dict = {
+    "KICAD10_SYMBOL_DIR": "C:/Program Files/KiCad/10.0/share/kicad/symbols",
+    "KICAD9_SYMBOL_DIR":  "C:/Program Files/KiCad/9.0/share/kicad/symbols",
+    "KICAD8_SYMBOL_DIR":  "C:/Program Files/KiCad/8.0/share/kicad/symbols",
+    "KICAD7_SYMBOL_DIR":  "C:/Program Files/KiCad/7.0/share/kicad/symbols",
+    "KICAD_USER_DIR":     str(Path.home() / "Documents" / "KiCad"),
+}
+
+
+def _resolve_sym_lib_table(table: Path,
+                            extra_env: Optional[dict] = None) -> List[str]:
+    """Parse a KiCad sym-lib-table file and return the unique parent-directory
+    root for every ``(lib ...)`` entry whose URI can be fully expanded.
+
+    Token resolution order:
+      1. ``extra_env``  — caller-supplied (from kicad_common.json vars)
+      2. ``os.environ`` — process environment
+      3. ``_KICAD_BUILTIN_TOKENS`` — known KiCad version-path defaults
+
+    Entries whose URI still contains ``${…}`` after expansion are skipped
+    (unresolvable token — not an error)."""
+    import re
+    if not table.is_file():
+        return []
+    try:
+        txt = table.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+    env: dict = dict(extra_env or {})
+
+    def _sub(m: "re.Match") -> str:
+        k = m.group(1)
+        return (env.get(k) or os.environ.get(k)
+                or _KICAD_BUILTIN_TOKENS.get(k) or m.group(0))
+
+    roots: List[str] = []
+    seen: set = set()
+    for uri in re.findall(r'\(uri\s+"([^"]+)"', txt):
+        expanded = re.sub(r"\$\{([^}]+)\}", _sub, uri).replace("\\", "/").strip()
+        if "${" in expanded or not expanded:
+            continue
+        # The URI points to a .kicad_symdir or a flat .kicad_sym file;
+        # the root is its parent directory.
+        parent = expanded.rsplit("/", 1)[0] if "/" in expanded else expanded
+        key = os.path.normcase(os.path.normpath(parent))
+        if key not in seen:
+            seen.add(key)
+            roots.append(parent)
+    return roots
+
+
+# Project-level sym-lib-table roots — populated by inject_project_sym_roots()
+# when a tool knows the active KiCad project path. Included in _candidate_roots()
+# so _sym_roots() / load_symbol() / _all_symbols() all see project-local libs.
+_project_sym_roots: List[str] = []
+
+
+def inject_project_sym_roots(project_path: str) -> List[str]:
+    """Read the sym-lib-table in `project_path`'s directory and register its
+    library roots so the agent can find and edit project-local symbols.
+
+    Call this from any tool that receives a ``project_path`` argument before
+    the first ``load_symbol`` / ``_sym_roots`` call in that request.
+
+    Returns the list of newly discovered roots (empty if already known or
+    none found). Clears the symbol-resolution caches so the change takes
+    effect immediately."""
+    global _project_sym_roots
+    p = Path(project_path).expanduser()
+    if p.is_file():
+        p = p.parent
+    table = p / "sym-lib-table"
+    new_roots = _resolve_sym_lib_table(table)
+    changed = False
+    for r in new_roots:
+        key = os.path.normcase(os.path.normpath(r))
+        already = any(os.path.normcase(os.path.normpath(e)) == key
+                      for e in _project_sym_roots)
+        if not already:
+            _project_sym_roots.append(r)
+            changed = True
+    if changed:
+        # Clear caches so next call to _sym_roots / load_symbol picks up
+        # the new roots.
+        _discover_config_roots.cache_clear()
+        for fn_name in ("load_symbol", "_all_symbols", "resolve_lib_id_by_value"):
+            fn = globals().get(fn_name)
+            if fn is not None and hasattr(fn, "cache_clear"):
+                fn.cache_clear()
+    return new_roots
+
 
 def _has_symbols(root: Path) -> bool:
     """A root only counts if it actually holds symbols — either the fork's
@@ -98,74 +193,74 @@ def _kicad_config_dirs() -> List[Path]:
 def _discover_config_roots() -> Tuple[str, ...]:
     """Auto-detect the symbol library the *running KiCad app* uses — no
     hardcoded drive. Reads each ``kicad_common.json`` for its declared
-    environment vars (e.g. the fork's ``ENVIL_LIB_ROOT`` / any
-    ``*_SYMBOL_DIR``) and expands the sibling ``sym-lib-table`` URIs, so the
-    backend resolves symbols from exactly the same place eeschema does.
+    environment vars and expands every ``sym-lib-table`` URI (using
+    ``_resolve_sym_lib_table`` which falls back to ``_KICAD_BUILTIN_TOKENS``
+    so version tokens like ``${KICAD10_SYMBOL_DIR}`` always resolve).
     Cached for the process; results are filtered for real symbol content by
     the caller."""
     import json
-    import re
 
     found: List[str] = []
+    seen: set = set()
 
-    def _add(val: str, env: dict) -> None:
+    def _add(val: str) -> None:
         if not val:
             return
-        env = env if isinstance(env, dict) else {}
-        # Expand ${VAR} against the app's own env block, then the OS env.
-        def _sub(m):
-            k = m.group(1)
-            return env.get(k) or os.environ.get(k) or m.group(0)
-        expanded = re.sub(r"\$\{([^}]+)\}", _sub, val)
-        if "${" in expanded:
-            return  # unresolved variable — skip
-        p = expanded.replace("\\", "/").strip()
-        if p and p not in found:
-            found.append(p)
+        key = os.path.normcase(os.path.normpath(val))
+        if key not in seen:
+            seen.add(key)
+            found.append(val.replace("\\", "/").strip())
 
     for cfg_dir in _kicad_config_dirs():
-        env: dict = {}
+        # Extract env vars from kicad_common.json (used for token expansion
+        # in the sibling sym-lib-table).
+        extra_env: dict = {}
         common = cfg_dir / "kicad_common.json"
         try:
             if common.is_file():
                 data = json.loads(common.read_text(encoding="utf-8"))
-                raw_env = (data.get("environment") or {})
-                env = raw_env.get("vars", raw_env) if isinstance(raw_env, dict) else {}
-                if not isinstance(env, dict):
-                    env = {}
-                if isinstance(env, dict):
-                    for k, v in env.items():
+                raw_env = data.get("environment") or {}
+                env_vars = (raw_env.get("vars", raw_env)
+                            if isinstance(raw_env, dict) else {})
+                if isinstance(env_vars, dict):
+                    extra_env = env_vars
+                    for k, v in env_vars.items():
                         if isinstance(v, str) and (
-                            "SYMBOL" in k.upper() or "LIB_ROOT" in k.upper()
-                            or "SYM" in k.upper()):
-                            _add(v, env)
+                                "SYMBOL" in k.upper()
+                                or "LIB_ROOT" in k.upper()
+                                or "SYM" in k.upper()):
+                            _add(v)
         except (OSError, ValueError):
-            env = {}
-        # Expand the sym-lib-table URIs and take each library's parent dir —
-        # this is precisely the set of roots the app loads symbols from.
-        table = cfg_dir / "sym-lib-table"
-        try:
-            if table.is_file():
-                txt = table.read_text(encoding="utf-8", errors="ignore")
-                for uri in re.findall(r'\(uri\s+"([^"]+)"', txt):
-                    parent = uri.rsplit("/", 1)[0] if "/" in uri else uri
-                    _add(parent, env)
-        except OSError:
             pass
+        # Parse the global sym-lib-table for this KiCad version.  Every URI
+        # whose parent directory is added here becomes a root that _sym_roots()
+        # can discover — so user-added libs registered via KiCad's
+        # "Preferences → Manage Symbol Libraries" are found automatically.
+        for root in _resolve_sym_lib_table(cfg_dir / "sym-lib-table", extra_env):
+            _add(root)
 
     return tuple(found)
 
 
 def _candidate_roots() -> List[str]:
     """Ordered candidate roots (may include non-existent ones — useful for
-    diagnostics). Priority: explicit $KICAD_SYMBOL_DIR, the app's own config
-    (auto-detected), the bundled lib, then any installed KiCad share dirs."""
+    diagnostics).
+
+    Priority:
+      1. Explicit $KICAD_SYMBOL_DIR
+      2. Project-local roots (inject_project_sym_roots)
+      3. Auto-detected config roots (global sym-lib-table + kicad_common.json)
+      4. Bundled Envil lib
+      5. DEFAULT_SYM_ROOTS (hardcoded KiCad install + user dirs)
+    """
     raw = os.environ.get("KICAD_SYMBOL_DIR", "")
     extras = [p for p in raw.split(os.pathsep) if p.strip()] if raw else []
     bundled = str(_envil_home() / "kicad-sym-lib")
     out: List[str] = []
     seen: set = set()
-    for p in extras + list(_discover_config_roots()) + [bundled] + DEFAULT_SYM_ROOTS:
+    for p in (extras + _project_sym_roots
+              + list(_discover_config_roots())
+              + [bundled] + DEFAULT_SYM_ROOTS):
         if not p:
             continue
         key = os.path.normcase(os.path.normpath(p))

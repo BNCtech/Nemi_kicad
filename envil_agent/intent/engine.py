@@ -3107,7 +3107,7 @@ def _place_components(ir: TopologyIR,
     # shapes or per-class templates — dynamic and generic per the user
     # rule `feedback_dynamic_universal_quality`.
     if not ir.blocks and not _has_ic_anchor(ir):
-        return _place_universal_discrete(ir)
+        return _readability_spread_columns(_place_universal_discrete(ir))
 
     if ir.blocks:
         _mb = _load_layout_config().get("multi_block", {})
@@ -3134,7 +3134,8 @@ def _place_components(ir: TopologyIR,
         if (_anchored == len(ir.blocks)
                 or (_mb.get("allow_partial_zoning", False)
                     and _anchored >= _min_anchored)):
-            return _place_components_zoned(ir, paper=paper)
+            return _readability_spread_columns(
+                _place_components_zoned(ir, paper=paper))
 
     anchor_ref = _pick_anchor(ir).ref
     pin_index = _build_pin_to_component_index(ir)
@@ -3821,6 +3822,86 @@ def _abs_bbox_with_fields(c: "PlacedComp") -> Tuple[float, float, float, float]:
         return base
     return (min(base[0], ft[0]), min(base[1], ft[1]),
             max(base[2], ft[2]), max(base[3], ft[3]))
+
+
+def _readability_cfg() -> Dict[str, Any]:
+    """Phase A neatness knobs from layout_config.json -> readability.
+    All default to the OFF / byte-identical behaviour."""
+    cfg = _load_layout_config().get("readability", {}) or {}
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "min_columns": int(cfg.get("min_columns", 3)),
+        "column_gap_mm": float(cfg.get("column_gap_mm", 5.08)),
+        "net_label_reserve_mm": float(cfg.get("net_label_reserve_mm", 12.0)),
+        "column_quantize_mm": float(cfg.get("column_quantize_mm", 2.54)),
+        "align_baseline": bool(cfg.get("align_baseline", False)),
+    }
+
+
+def _readability_spread_columns(
+        placed: List["PlacedComp"]) -> List["PlacedComp"]:
+    """Gated Phase A layout-neatness pass. Groups the placed components into
+    vertical columns (by shared X), then shifts adjacent columns RIGHTWARD so
+    each column's field-text bbox --- inflated by a net-label reserve for the
+    labels added later during routing --- never overlaps its neighbour, with
+    `column_gap_mm` of clear channel between them.
+
+    Why columns, not components: the reported defect is repeated 2-pin chains
+    (LED + resistor legs) whose net/value labels bleed into the neighbouring
+    chain. Moving whole columns keeps every chain's internal wiring intact and
+    only ever INCREASES horizontal spacing --- so a same-net rail spanning the
+    columns still lands on the same pins, just wider.
+
+    No-op unless readability.enabled and there are >= min_columns columns, so
+    sparse boards (a single MCU, a crystal block) are never touched and the
+    default-off config leaves all output byte-identical."""
+    cfg = _readability_cfg()
+    if not cfg["enabled"] or not placed:
+        return placed
+
+    q = max(0.01, cfg["column_quantize_mm"])
+    reserve = cfg["net_label_reserve_mm"]
+    gap = cfg["column_gap_mm"]
+
+    # Bucket components into columns by quantised X.
+    columns: Dict[float, List["PlacedComp"]] = {}
+    for pc in placed:
+        key = round(pc.pos[0] / q) * q
+        columns.setdefault(key, []).append(pc)
+    if len(columns) < cfg["min_columns"]:
+        return placed
+
+    def _col_bbox(members: List["PlacedComp"]) -> Tuple[float, float, float, float]:
+        xs1, ys1, xs2, ys2 = [], [], [], []
+        for m in members:
+            bx1, by1, bx2, by2 = _abs_bbox_with_fields(m)
+            xs1.append(bx1); ys1.append(by1); xs2.append(bx2); ys2.append(by2)
+        return (min(xs1) - reserve, min(ys1), max(xs2) + reserve, max(ys2))
+
+    # Optional shared top baseline: align every column's topmost body edge.
+    if cfg["align_baseline"]:
+        tops = {k: min(_abs_outer_bbox(m)[1] for m in v)
+                for k, v in columns.items()}
+        target_top = min(tops.values())
+        for k, members in columns.items():
+            dy = target_top - tops[k]
+            if abs(dy) > 0.01:
+                for m in members:
+                    m.pos = _snap_grid((m.pos[0], m.pos[1] + dy))
+
+    # Sweep columns left->right; push each so it clears the previous one.
+    ordered = sorted(columns.items(),
+                     key=lambda kv: sum(m.pos[0] for m in kv[1]) / len(kv[1]))
+    running_right: Optional[float] = None
+    for _key, members in ordered:
+        left, _t, right, _b = _col_bbox(members)
+        if running_right is not None and left < running_right + gap:
+            shift = (running_right + gap) - left
+            for m in members:
+                m.pos = _snap_grid((m.pos[0] + shift, m.pos[1]))
+            right += shift
+        running_right = right
+    return placed
 
 
 def _seg_intersects_rect(a: Tuple[float, float], b: Tuple[float, float],

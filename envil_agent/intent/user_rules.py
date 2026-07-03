@@ -384,11 +384,12 @@ def emit_dru(directives: List[Dict[str, Any]], project_path: str
             lines.append(f'  (condition "{d["condition"]}")')
         if d["dru"] == "disallow":
             obj = d.get("disallow") or "via"
-            lines.append(f'  (disallow {obj}))')
+            lines.append(f'  (disallow {obj})')
         else:
             unit = d.get("unit", "mm")
             val = d.get("value")
-            lines.append(f'  (constraint {d["dru"]} ({d["bound"]} {val}{unit})))')
+            lines.append(f'  (constraint {d["dru"]} ({d["bound"]} {val}{unit}))')
+        lines.append(')')
         lines.append("")
     try:
         target.write_text("\n".join(lines), encoding="utf-8")
