@@ -1,0 +1,42 @@
+{
+  "_about": "Tier-2 multi-layer A* cost router (tools/route_pcb_astar.py + layout/router_astar.py). Where route_pcb_simple (Tier 1) does fast single-layer L/Z Manhattan, this tier runs a grid A* over (x,y,layer) with a real cost function so it can spend a VIA to reach a shorter/clearer route across two layers. Use it for the nets Tier 1 leaves as ratsnest. Every knob is here \u00e2\u20ac\u201d no per-circuit logic, no magic numbers. enabled=false makes the tool a no-op.",
+  "_cost_doc": "Path cost = travelled distance + bend_penalty_mm per 90-deg corner + off_axis_penalty_mm per step against a layer's preferred axis + via_penalty_mm per layer change. Raise via_penalty_mm to make the router hoard layers (fewer vias, longer detours); lower it to via freely. bend/off_axis are small nudges for cleaner, convention-following copper.",
+  "enabled": true,
+  "layers": [
+    "F.Cu",
+    "B.Cu"
+  ],
+  "layer_axis": {
+    "F.Cu": "h",
+    "B.Cu": "v"
+  },
+  "grid_pitch_mm": 0.5,
+  "bend_penalty_mm": 0.5,
+  "via_penalty_mm": 5.0,
+  "off_axis_penalty_mm": 0.15,
+  "bounds_margin_mm": 8.0,
+  "max_nodes": 120000,
+  "default_track_width_mm": 0.25,
+  "default_clearance_mm": 0.2,
+  "use_net_class_width": true,
+  "via_drill_mm": 0.3,
+  "via_size_mm": 0.6,
+  "max_pads_per_net": 8,
+  "max_net_span_mm": 0,
+  "_max_net_span_note": "0 -> auto from the board diagonal (like route_pcb_simple).",
+  "skip_nets": [
+    "GND",
+    "AGND",
+    "DGND",
+    "PGND",
+    "EGND",
+    "SGND",
+    "VSS",
+    "0",
+    ""
+  ],
+  "_skip_note": "Ground/return nets are left to the copper pour (auto_zones_pcb); pass force_route_nets to override.",
+  "edge_clearance_enabled": true,
+  "edge_clearance_mm": 0.5,
+  "respect_existing_copper": true
+}

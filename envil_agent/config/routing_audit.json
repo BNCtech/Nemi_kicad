@@ -1,0 +1,41 @@
+{
+  "_comment": "Config for routing_audit — the deterministic gate for step 7 (PCB Routing). Read-only: parses the .kicad_pcb tracks/vias and asserts each net's copper obeys its net-class width, routing is complete (no unrouted nets), tracks keep off the board edge, and corners are 45deg not 90. Net->class resolution is reused from route_pcb_simple (patterns + class widths from the .kicad_pro) so the gate agrees with the router. All dynamic — net class is derived from the actual net name via the project's patterns, never a per-circuit list. Cached; RESTART backend after edits. Verdict in words.",
+  "_rule_source": "Master flow step 7 (PCB Routing) automation checks + PCB_RULES routing section.",
+
+  "enabled": true,
+
+  "rules": {
+    "unrouted_nets": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rule 7 — when a board has tracks (routing started/finished), every multi-pad net must have copper. A net with >=2 pads and no track/via is unrouted (ratsnest). A wholly-unrouted board reports NOT ROUTED instead of spamming one error per net."
+    },
+    "track_width_vs_class": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rules 1/3 — every track segment must be >= its net's net-class width (resolved via .kicad_pro netclass_patterns + classes) and the board min_track_width. A power net on a thin default track is a flag."
+    },
+    "track_edge_clearance": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rule 6 — no track may run within the copper-to-edge clearance of the Edge.Cuts outline."
+    },
+    "corner_90": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rule 5 — 45deg or curved corners, never 90. Two same-net same-layer segments meeting at a vertex within corner_tol_deg of a right angle are flagged."
+    }
+  },
+
+  "default_track_width_mm": 0.25,
+  "corner_tol_deg": 10.0,
+  "copper_layers": ["F.Cu", "B.Cu", "In1.Cu", "In2.Cu", "In3.Cu", "In4.Cu"],
+
+  "verdict": {
+    "clean": "ROUTING VERIFIED — {n} nets routed, widths/corners/edge OK",
+    "issues": "ROUTING NOT CLEAN — {e} error(s), {w} warning(s)",
+    "no_tracks": "NOT ROUTED — board has no tracks yet ({t} nets to route)"
+  },
+
+  "max_examples_per_rule": 15
+}

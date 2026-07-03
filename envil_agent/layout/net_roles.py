@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 import sexpdata
 
@@ -76,35 +76,23 @@ def _classify_one(names: List[str], pintypes: Set[str], sig_cfg: Dict,
     return ""
 
 
-async def classify_project_nets(sch_path: str, timeout: float = 60.0
-                                ) -> Dict[str, str]:
-    """Run KiCad's netlister and return {net_name: netclass} for every net that
-    resolves to a non-Default role from its name + connected pin types."""
-    order = _role_order()
-    if not order:
-        return {}
+async def _load_nets(sch_path: str, timeout: float):
+    """Run KiCad's netlister once and yield (net_name, pintypes, pinfuncs) for
+    every REAL net. Returns [] on any failure so every caller degrades to a
+    name-pattern-only fallback rather than raising."""
     text = await _run_netlist_text(sch_path, timeout)
     if not text:
-        return {}
+        return []
     try:
         root = sexpdata.loads(text)
     except Exception:
-        return {}
+        return []
     if _head(root) != "export":
-        return {}
+        return []
     nets_node = _kid(root, "nets")
     if not nets_node:
-        return {}
-
-    sig_cfg = _sig_cfg()
-    try:
-        from ..tools.pcb_reasoning import _matches_any as match
-    except Exception:
-        def match(pats, names, _cfg):       # substring fallback (length-guarded)
-            up = [n.upper() for n in names]
-            return any(len(p) >= 3 and p.upper() in n for p in pats for n in up)
-
-    out: Dict[str, str] = {}
+        return []
+    out = []
     for net in _kids(nets_node, "net"):
         nm = _val(net, "name")
         if not nm or nm.lower().startswith("unconnected-"):
@@ -118,6 +106,115 @@ async def classify_project_nets(sch_path: str, timeout: float = 60.0
             pf = _val(node, "pinfunction")
             if pf:
                 pinfuncs.add(pf)
+        out.append((nm, pintypes, pinfuncs))
+    return out
+
+
+def _num_from_match(m) -> Optional[float]:
+    """Pull a magnitude out of a regex match. Handles the split "3V3"/"12V5" form
+    (two numeric groups -> 3.3 / 12.5) and the plain decimal/whole form ("48",
+    "3.3", "400" in the last non-empty group). Returns None on no match."""
+    if m is None:
+        return None
+    if m.lastindex and m.lastindex >= 2 and m.group(1) and m.group(2):
+        frac = m.group(2)
+        try:
+            return int(m.group(1)) + int(frac) / (10 ** len(frac))
+        except ValueError:
+            return None
+    g = next((x for x in reversed(m.groups()) if x), None)
+    try:
+        return float(g) if g is not None else None
+    except ValueError:
+        return None
+
+
+def _parse_magnitude(name: str, sub_cfg: Dict) -> Optional[float]:
+    """Search `name` with the regex in a `voltage`/`current` sub-config block and
+    return the parsed magnitude (V or A). Ignores the block's enable flag — that
+    gates ROLE assignment, not raw parsing (the power-integrity report parses even
+    when auto-assign is off). Returns None on no regex / no match / bad regex."""
+    import re
+    rx = (sub_cfg or {}).get("name_regex")
+    if not name or not rx:
+        return None
+    try:
+        return _num_from_match(re.search(str(rx), name))
+    except re.error:
+        return None
+
+
+def _auto_elec_cfg() -> Dict:
+    try:
+        from ..intent import default_rules as _dr
+        return (_dr.load_cfg().get("auto_assign_electrical") or {})
+    except Exception:
+        return {}
+
+
+def parse_voltage_from_name(name: str) -> Optional[float]:
+    """Volts parsed from a net name (e.g. '+48V'->48, '3V3'->3.3, '400VDC'->400),
+    or None. Public — reused by the power-integrity report for the rail voltage."""
+    return _parse_magnitude(name, _auto_elec_cfg().get("voltage") or {})
+
+
+def parse_current_from_name(name: str) -> Optional[float]:
+    """Amps parsed from a net name (e.g. 'MOTOR_5A'->5), or None. Public — reused
+    by the power-integrity report to seed a net's design current from its name."""
+    return _parse_magnitude(name, _auto_elec_cfg().get("current") or {})
+
+
+def _electrical_class(name: str) -> str:
+    """Parse a voltage/current magnitude embedded in a NET NAME and map it to the
+    covering HV_*/I_* net class, so the IPC clearance/width DRU rules activate
+    without hand-assignment. Regexes + enable flags come from
+    default_rules.json:auto_assign_electrical (config-no-hardcode). Voltage wins
+    over current when both parse. Returns "" when nothing parses / feature off."""
+    if not name:
+        return ""
+    try:
+        from ..intent import default_rules as _dr
+    except Exception:
+        return ""
+    cfg = _auto_elec_cfg()
+    vcfg = cfg.get("voltage") or {}
+    if bool(vcfg.get("enabled", False)) and vcfg.get("name_regex"):
+        volts = _parse_magnitude(name, vcfg)
+        if volts is not None:
+            cls = _dr.netclass_for_voltage(volts)
+            if cls:
+                return cls
+    ccfg = cfg.get("current") or {}
+    if bool(ccfg.get("enabled", False)) and ccfg.get("name_regex"):
+        amps = _parse_magnitude(name, ccfg)
+        if amps is not None:
+            cls = _dr.netclass_for_current(amps)
+            if cls:
+                return cls
+    return ""
+
+
+async def classify_project_nets(sch_path: str, timeout: float = 60.0
+                                ) -> Dict[str, str]:
+    """Run KiCad's netlister and return {net_name: netclass} for every net that
+    resolves to a non-Default role from its name + connected pin types."""
+    order = _role_order()
+    if not order:
+        return {}
+    nets = await _load_nets(sch_path, timeout)
+    if not nets:
+        return {}
+
+    sig_cfg = _sig_cfg()
+    try:
+        from ..tools.pcb_reasoning import _matches_any as match
+    except Exception:
+        def match(pats, names, _cfg):       # substring fallback (length-guarded)
+            up = [n.upper() for n in names]
+            return any(len(p) >= 3 and p.upper() in n for p in pats for n in up)
+
+    out: Dict[str, str] = {}
+    for nm, pintypes, pinfuncs in nets:
         # Match signatures against the net name AND every connected pin function
         # -> classification follows the actual circuit, not naming convention.
         names = [nm] + sorted(pinfuncs)
@@ -125,3 +222,37 @@ async def classify_project_nets(sch_path: str, timeout: float = 60.0
         if cls:
             out[nm] = cls
     return out
+
+
+async def classify_project_all(sch_path: str, timeout: float = 60.0
+                               ) -> Dict[str, Dict[str, str]]:
+    """One netlist pass -> both role classes (POWER/ANALOG/…) and IPC electrical
+    classes (HV_*/I_* parsed from net names). Returns
+    {"roles": {net: class}, "electrical": {net: class}}. Electrical wins on
+    conflict at the caller since it encodes a hard IPC clearance/width floor."""
+    order = _role_order()
+    nets = await _load_nets(sch_path, timeout)
+    if not nets:
+        return {"roles": {}, "electrical": {}}
+
+    roles: Dict[str, str] = {}
+    electrical: Dict[str, str] = {}
+    if order:
+        sig_cfg = _sig_cfg()
+        try:
+            from ..tools.pcb_reasoning import _matches_any as match
+        except Exception:
+            def match(pats, names, _cfg):
+                up = [n.upper() for n in names]
+                return any(len(p) >= 3 and p.upper() in n for p in pats for n in up)
+        for nm, pintypes, pinfuncs in nets:
+            cls = _classify_one([nm] + sorted(pinfuncs), pintypes, sig_cfg,
+                                order, match)
+            if cls:
+                roles[nm] = cls
+
+    for nm, _pt, _pf in nets:
+        ecls = _electrical_class(nm)
+        if ecls:
+            electrical[nm] = ecls
+    return {"roles": roles, "electrical": electrical}

@@ -128,6 +128,25 @@ def run_lint(context: Dict[str, Any]) -> List[Dict[str, Any]]:
     return issues
 
 
+def silent_short_issues(sch_path: Any) -> List[Dict[str, Any]]:
+    """Honest-verify helper: run the wiring lint on a .kicad_sch and return
+    ONLY the silent-short class --- SHORTED_COMPONENT + COLINEAR_WIRE_BRIDGE ---
+    the shorts KiCad ERC passes green on (a part bridged onto one net, or one
+    wire laid across both pads of a 2-pin part).
+
+    Read-only; returns [] on any parse error so a caller can treat "no data" as
+    "could not verify" rather than crash. Requires those two rules to be
+    `enabled: true` in config/lint_rules.json (run_lint skips disabled rules)."""
+    from pathlib import Path as _Path
+    from .context import build_context
+    try:
+        issues = run_lint(build_context(_Path(str(sch_path))))
+    except Exception:
+        return []
+    ids = {"SHORTED_COMPONENT", "COLINEAR_WIRE_BRIDGE"}
+    return [i for i in issues if i.get("id") in ids]
+
+
 class LintEngine:
     """OO wrapper around `run_lint` for callers that prefer it. Caches
     the rule set so tight inner loops do not re-read the JSON file."""

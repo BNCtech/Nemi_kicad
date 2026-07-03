@@ -183,12 +183,27 @@ def _compose_card(name: str, dims: Dict[str, Optional[float]],
         den += w
     overall = (num / den) if den else 0.0
 
+    # The user prefers a verdict WORD over a percentage (a % reads as a grade,
+    # not something actionable). Mirror pcb_quality: only a config that sets
+    # show_percentage=true gets numbers; the default reports the band word.
+    # (durable user rule: no percentages in quality cards.)
+    show_pct = bool(cfg.get("show_percentage", False))
+
     lines = [f"# SCHEMATIC QUALITY — {name}"]
     for d in ("Electrical", "Wiring"):
         sc = dims.get(d)
-        lines.append(f"  {d:<14}{'n/a' if sc is None else f'{sc:5.0f}%'}")
+        if sc is None:
+            bar = "n/a"
+        elif show_pct:
+            bar = f"{sc:5.0f}%"
+        else:
+            bar = _band_for(sc, bands)
+        lines.append(f"  {d:<14}{bar}")
     lines.append("  " + "─" * 21)
-    lines.append(f"  **Overall: {overall:.0f}% — {_band_for(overall, bands)}**")
+    if show_pct:
+        lines.append(f"  **Overall: {overall:.0f}% — {_band_for(overall, bands)}**")
+    else:
+        lines.append(f"  **Overall: {_band_for(overall, bands)}**")
 
     if findings:
         lines.append("")

@@ -1,0 +1,49 @@
+{
+  "_comment": "Config for power_audit — the deterministic gate for step 8 (Power/Ground). Read-only: COMPOSES the existing power_integrity_pcb tool (Vdrop + IPC-2152 width per power net — rules 2/3) and adds the checks it doesn't cover: a ground/power plane is actually poured (rule 1), every zone is filled (rule 4), and no via carries more than its current limit (rule 5). Power nets are the IR's real is_power roles (dynamic). Cached; RESTART backend after edits. Verdict in words.",
+  "_rule_source": "Master flow step 8 (Power/Ground) + power_integrity_pcb (rules 2/3) + PCB_RULES power section.",
+
+  "enabled": true,
+
+  "rules": {
+    "power_width": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rule 2 — a power net's narrowest routed copper must meet the IPC-2152 width for its current, when the current is DERIVED from the design (explicit arg / ampacity table / parsed from the net name). Hard error."
+    },
+    "power_width_assumed": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rule 2, no-hardcode: when the net current is only the POWER-class DEFAULT (an assumption, not derived from THIS circuit), a thin trace is a WARNING not an error — the board is not failed on an assumed current. Annotate the real current (net_currents / a NAME like +5V_2A / ampacity.net_current_a) to promote it to a hard check."
+    },
+    "voltage_drop": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rules 2/3 — Vdrop and current density over budget (thin neck / long run). Sourced from power_integrity_pcb drop/J warnings."
+    },
+    "ground_plane": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rule 1 — a solid ground/power plane must be poured: at least one copper zone assigned to a power net (IR is_power). No zone on any power net => no plane."
+    },
+    "zone_filled": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rule 4 — every defined zone must actually be filled (carry filled_polygon geometry). A defined-but-unfilled zone delivers no copper; run the zone fill."
+    },
+    "via_current": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rule 5 — a power net's current spread over its vias must stay under per_via_current_a per via. current / via_count > limit => add vias or enlarge."
+    }
+  },
+
+  "per_via_current_a": 1.0,
+
+  "verdict": {
+    "clean": "POWER OK — plane poured, widths + vias within budget ({n} power nets)",
+    "issues": "POWER NOT CLEAN — {e} error(s), {w} warning(s) across {n} power nets",
+    "no_power": "NO POWER NETS — nothing to check (no net had an inferred current)"
+  },
+
+  "max_examples_per_rule": 15
+}

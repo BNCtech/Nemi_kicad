@@ -1,0 +1,107 @@
+{
+  "_comment": "Config for the footprint_audit tool — the per-BOARD validation pass that checks every placed symbol's Footprint assignment against the physical .kicad_mod, on a rendered .kicad_sch. This is the 'verify it's legal' half of the assign/validate split: pcb_gen + _resolve_default_footprint ASSIGN; footprint_audit VERIFIES. Complements check_pins.py (which validates the config maps statically) by validating the actual generated board. Read once and cached; RESTART the backend after edits. No Python literals per feedback_no_hardcode_json_config; verdict is words, never a % per feedback_no_percentage_scores.",
+  "_rule_source": "DATASHEET_RULES + user footprint-assignment rule set (rules 1-8).",
+
+  "enabled": true,
+
+  "rules": {
+    "_comment": "One entry per checkable rule. enabled=false skips it. severity is one of error | warning | review | info and only affects how it's counted + the verdict; the tool never mutates the board.",
+
+    "explicit_package": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rule 1 — every part must carry an EXPLICIT package identifier; the footprint must not be guessed from the symbol alone. Fires when the assignment's provenance is a guess tier (see provenance.guess_sources)."
+    },
+    "footprint_resolves": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "The Lib:Footprint id must resolve to a real .kicad_mod on this machine (fp-lib-table + standard roots). An empty Footprint field also fails here."
+    },
+    "pin_pad_match": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rule 2 — every symbol pin NUMBER must exist as a footprint pad, and vice-versa. Mechanical pads (number '') and unnumbered symbol pins ('?','~') are ignored, matching check_pins.py."
+    },
+    "tech_type": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rule 5 — the footprint's pad technology (through-hole vs SMD) must match the intended assembly process (see assembly_process)."
+    },
+    "connector_review": {
+      "enabled": true,
+      "severity": "review",
+      "_rule": "Rule 6 — connectors, switches and mechanical parts have no universal land pattern; flag each for human dimensional review against the datasheet."
+    },
+    "polarity_pin1": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rule 7 — polarized / keyed parts (diode, LED, electrolytic cap, transistor, IC) must have a pad '1' the symbol's pin 1 can key to. Warns when a flagged part's footprint has no pad '1'."
+    },
+    "courtyard": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rule 8a — every footprint must carry courtyard geometry (F.CrtYd / B.CrtYd) for downstream DFM + collision checks."
+    },
+    "model_3d": {
+      "enabled": true,
+      "severity": "info",
+      "_rule": "Rule 8b — warn (info) when a footprint has no (model ...) 3D reference. Info-only: a missing STEP never blocks a board."
+    }
+  },
+
+  "provenance": {
+    "_comment": "How _resolve_default_footprint_traced chose the footprint. trusted = a deliberate, reproducible decision; guess = inferred from family prefix or the symbol's own default, which Rule 1 warns against. An explicit Footprint in the architect IR always counts as 'explicit_ir' (most trusted).",
+    "trusted_sources": ["explicit_ir", "by_lib_id", "alias_lib_id"],
+    "guess_sources": ["by_prefix", "symbol_default"]
+  },
+
+  "assembly_process": {
+    "_comment": "Expected board assembly tech. 'mixed' accepts both THT and SMD parts (default — most Envil prototype boards mix them). 'smt' flags any through-hole part; 'tht' flags any SMD part. Override per project by editing this value.",
+    "default": "mixed",
+    "allowed": ["mixed", "smt", "tht"]
+  },
+
+  "mechanical_refdes_prefixes": {
+    "_comment": "Rule 6 — DYNAMIC triage (Appendix A). A part is connector/mechanical by its REFERENCE-designator prefix, derived per-part at runtime from the actual refdes — not a per-circuit list. The alpha prefix of the ref (J1->J, MH2->MH) is looked up here; the category is shown in the finding. This is the primary signal; review_classes below is only a generic lib_id fallback.",
+    "map": {
+      "J": "connector", "P": "connector", "X": "connector", "CN": "connector",
+      "SW": "switch", "S": "switch",
+      "K": "relay", "RY": "relay",
+      "MK": "mounting", "MH": "mounting", "H": "mounting",
+      "LS": "speaker", "SP": "speaker", "BZ": "buzzer",
+      "BT": "battery", "BAT": "battery",
+      "M": "motor", "T": "transformer"
+    }
+  },
+
+  "polarity_signals": {
+    "_comment": "Rule 7 — DYNAMIC. A part needs pin-1 / polarity keying if, derived from the SYMBOL's own pins at runtime: (a) any pin carries a polarity-marker NAME, or (b) it has >= min_pins (so pin-1 orientation matters), or (c) its pins have asymmetric electrical types. lib_class_hints is a generic part-class fallback ONLY for polarized parts whose symbol leaves pins unnamed (e.g. C_Polarized). No per-circuit data anywhere.",
+    "pin_name_tokens": ["A", "K", "+", "-", "ANODE", "CATHODE", "POS", "NEG"],
+    "min_pins": 3,
+    "etype_asymmetry": true,
+    "lib_class_hints": ["polarized", "electrolytic", "tantalum", ":cp", "cp_", ":d_", "diode", ":led", "led_"]
+  },
+
+  "review_classes": {
+    "_comment": "Rule 6 FALLBACK only (generic part-class, not per-circuit). Used when the refdes prefix above doesn't classify the part. Lower-cased substrings tested against lib_id.",
+    "lib_id_substrings": [
+      "connector", "conn_", "switch", ":sw_", "relay", "jack",
+      "terminal", "socket", "mounting", "mechanical", "motor", "battery"
+    ]
+  },
+
+  "skip_ref_prefixes": {
+    "_comment": "Reference prefixes that are virtual (power ports, PWR_FLAG, no-connects) and carry no footprint — never audited.",
+    "prefixes": ["#PWR", "#FLG", "#"]
+  },
+
+  "verdict": {
+    "_comment": "Word verdicts only (feedback_no_percentage_scores). {n}=parts audited, {e}=errors, {w}=warnings, {r}=review items.",
+    "clean": "FOOTPRINTS VERIFIED — {n} parts audited, all checks passed",
+    "review_only": "FOOTPRINTS OK — {n} parts, {r} need human review (connectors/mechanical)",
+    "issues": "FOOTPRINTS NOT CLEAN — {e} error(s), {w} warning(s), {r} review across {n} parts",
+    "no_parts": "NO PARTS — schematic has no components to audit"
+  },
+
+  "max_examples_per_rule": 12
+}

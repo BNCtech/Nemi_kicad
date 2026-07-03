@@ -10,8 +10,24 @@
   "build_flow": {
     "_comment": "Cursor / coding-agent build flow (2026-06-22, user: 'first folder create pannitu tha circuit create panna permission kekkanum ... appadi thana cursor claude eppadi work aakuthu'). When folder_first=true (default), a NEW whole-circuit request runs: (1) ask Project name -> (2) call create_project to make the EMPTY project folder+files (loads in Project Files, ALWAYS succeeds) -> (3) ask the design questions -> (4) build_circuit with out_path=<the created .kicad_sch> to fill the circuit INTO that project. The workspace exists before its contents, so a circuit with doubts/errors never costs the user the folder. Read by agent.py:_folder_first_enabled, which appends FOLDER_FIRST_RULE and SUPPRESSES the one-step ASK_ASSUMPTIONS_RULE + PROJECT_NAMING_RULE (whose ordering would contradict it). Set false to restore the legacy one-step flow (ask design questions, then build folder+circuit together in one build_circuit call).",
     "folder_first": true,
+    "_clarify_before_create_doc": "Clarify-first ordering inside folder_first (2026-07-01, user: 'entha action panra before user keeta doubt and suggestion kekkanum' — ask the user's doubts/suggestions BEFORE any action, including creating the empty project folder). When true (default) AND folder_first=true, the NEW-circuit flow reorders to: (1) ask Project name -> (2) ask the design choices + raise doubts/suggestions and WAIT -> (3) only AFTER the user answers, call create_project (nothing at all is written to disk before that) -> (4) 'Want me to build it?' -> build_circuit into the folder. Read by agent.py:_clarify_before_create_enabled, which swaps FOLDER_FIRST_RULE for FOLDER_FIRST_CLARIFY_RULE. Set false to restore the original folder-first order (create the empty folder right after the name, then ask the design questions).",
+    "clarify_before_create": true,
     "_confirm_each_step_doc": "Cursor-style step approval (2026-06-25, user: 'erc clean next step update pcb polama kekkanum ... user permission kudutha aprom tha nee aatha pannnum ... aprom tha user ku puriyum ai enna pannuthunu'). When true, the AI runs the build pipeline as APPROVED STEPS instead of one black box: it tells the user what it will do and asks before each major action — ERC check, ERC fix, PCB update, layout, score. Concretely build_circuit STOPS after the schematic (ERC-cleaned) and DEFERS the PCB (summary.pcb.deferred); the agent then asks 'ERC clean — update the PCB now?' and only on OK calls generate_pcb. Read by build_circuit (defer PCB) + agent.py (appends STEP_CONFIRMATION_RULE). Set false for the legacy one-shot build (schematic + PCB + finish in one call).",
-    "confirm_each_step": true
+    "confirm_each_step": true,
+    "_gate_enforcement_doc": "Stage-gates enforcement (2026-07-02). When true, the AI runs the matching READ-ONLY validation gate after each build stage (footprint_audit after footprint assignment, update_audit after generate/update_pcb, board_setup_audit after set_design_rules, placement_audit after placement, routing_audit after routing, power_audit after zones, drc_audit at DRC, dfm_audit before sign-off, gerber_gate before ship) and refuses to call a stage done / advance while its gate reports errors. pipeline_gate {path} gives a whole-project GO/NO-GO in one call (used before ship_design + on 'is it ready?'). Read by agent.py:_gate_enforcement_enabled (appends GATE_ENFORCEMENT_RULE). Gates are read-only — the build tools fix. Set false to restore the pre-enforcement prompt (byte-identical prefix, cache-stable).",
+    "gate_enforcement": true
+  },
+  "part_creation": {
+    "_comment": "Clarify-first for LIBRARY part creation (2026-07-01, user: 'symbol and footprint create panra appovum tha keekanum' — ask doubts/choices before creating a symbol/footprint too, same as the circuit flow). When true (default), before calling create_symbol / create_footprint / create_component the AI first shows ONE round of chip questions (package / variant / library + 'use datasheet defaults') plus any doubt/suggestion, and WAITS — nothing is written to the library until the user answers. Read by agent.py:_clarify_before_create_part_enabled, which appends CREATE_PART_CLARIFY_RULE. Datasheet URL is still auto-located silently (rule 2b2) — never asked. Skipped when the user's request already pins the exact MPN+package, or when the symbol is a sub-step already approved inside a build. Set false to restore the old behaviour (create on trigger, no ask).",
+    "clarify_before_create": true
+  },
+  "verify_loop": {
+    "_comment": "Honest verify loop (2026-07-01, user: 'i need dynamic solution not only single circuit solution'). After a build AND after connectivity-changing schematic edits, run ERC + the silent-short lint (SHORTED_COMPONENT/COLINEAR_WIRE_BRIDGE -- shorts KiCad ERC passes green on) and surface the REAL findings so the AI can never claim 'complete/clean' without verification. build_circuit adds summary.erc (real ERC count from self_heal) + summary.wiring (silent shorts). apply_ops adds summary.verify (erc_errors + silent_shorts) after an edit. The HONEST-ERC prompt rule forbids claiming clean unless both are 0. Universal (any circuit), read-only checks (no byte changes). Set enabled=false to skip entirely; run_erc / run_silent_short_lint toggle each check.",
+    "enabled": true,
+    "run_erc": true,
+    "run_silent_short_lint": true,
+    "_edit_verbs_doc": "Which apply_ops verbs trigger the post-edit re-verify. EMPTY LIST = re-verify after ANY successful op (safest, honest default). Populate to restrict re-verify to connectivity-changing verbs only and skip ERC on purely cosmetic edits.",
+    "edit_verbs": []
   },
   "project_naming": {
     "_comment": "Cursor-style project naming (2026-06-21, user request: 'cursor folder structure ku user-kitta kekkuma, athu maathiri kicad-layum venum'). When enabled the agent proposes a project name + folder path INSIDE the NEW-circuit build preview (a 'Project:' and 'Folder:' line just above 'Want me to build it?'), and the user can override the name/folder before confirming -- exactly like Cursor showing the file tree before it writes. The agreed name flows build_circuit(project_name=...) -> RouterState.project_name -> graphs/nodes/render.py, which sets ir.name so the per-circuit folder, the .kicad_sch basename, the child sheet files and the title block all follow the user's chosen name instead of the architect's auto ir.name. Read by agent.py:_project_naming_enabled (appends PROJECT_NAMING_RULE to the system prompt) and render_node (the ir.name override, only when project_name is set AND out_path is empty). Set enabled=false (propose_in_preview=false) to restore the fully-automatic naming -- byte-stable: the prompt prefix drops the suffix and, with no project_name in state, render_node is unchanged. Ignored when overwriting an open file (out_path set keeps that file's name).",
@@ -620,8 +636,8 @@
       "w": 60.0,
       "h": 50.0
     },
-    "deoverlap": false,
-    "separate_overlapping_blocks": false,
+    "deoverlap": true,
+    "separate_overlapping_blocks": true,
     "_separate_comment": "When two functional blocks' COMPONENTS physically overlap (not just their padded boxes), `deoverlap` alone can't fix it because it never clips contents. This pass runs BEFORE deoverlap/recenter: it pushes the whole overlapping block (all its components, rigidly) apart along the axis of least penetration until each pair of content bboxes has a clear `separation_gap_mm` between them. Fixes 'block on top of block' when a tall IC (e.g. ATmega) overflows its zone cell into a stacked neighbour. Grid-snapped; bounded by separation_max_iters. Disable for legacy output.",
     "separation_gap_mm": 22.0,
     "separation_max_iters": 40
@@ -1074,6 +1090,14 @@
       "A3": {
         "w_mm": 420,
         "h_mm": 297
+      },
+      "A2": {
+        "w_mm": 594,
+        "h_mm": 420
+      },
+      "A1": {
+        "w_mm": 841,
+        "h_mm": 594
       }
     },
     "margin_mm": {
@@ -1151,6 +1175,7 @@
       { "tool": "auto_thermal_vias_pcb", "enabled": true },
       { "tool": "silkscreen_cleanup_pcb", "enabled": true },
       { "tool": "drc_autofix", "enabled": true, "args": { "apply": true, "max_rounds": 2 } },
+      { "tool": "connect_stray_pads", "enabled": false },
       { "tool": "pcb_verify", "enabled": true }
     ],
     "_steps_note": "Canonical post-import pipeline (manual `auto_layout_pcb` runs ALL of these incl. route). set_design_rules (net classes + fab clearances), mounting holes and fiducials were added 2026-06-24 so the one-shot tool also writes design rules + fab features. The AUTOMATIC post-build finish (build_circuit) runs this same list but SKIPS the tools in pcb_gen.finish_skip_tools (default route_pcb_simple)."
@@ -1746,7 +1771,15 @@
     "r11_text_clear_step_mm": 1.27,
     "r11_text_clear_max_tries": 6,
     "r11_text_clear_margin_mm": 0.3,
-    "_r11_text_status": "ACTIVE (added 2026-06-08): lint.repair.clear_wires_over_text resolves the R11_TEXT warning (a wire running across a component's Reference/Value text). The router's obstacle set is body-only (_abs_outer_bbox), so it never avoided field text; this post-render pass nudges the obscured field anchor outward in r11_text_clear_step_mm steps (up/down/right/left, nearest-clear wins, up to r11_text_clear_max_tries) until its text bbox clears every wire + every OTHER component body. Moves ONLY the (property ... (at)) anchor -> connectivity byte-identical. Idempotent; byte-stable when no wire crosses a field. Set false to keep the legacy warn-only behaviour."
+    "_r11_text_status": "ACTIVE (added 2026-06-08): lint.repair.clear_wires_over_text resolves the R11_TEXT warning (a wire running across a component's Reference/Value text). The router's obstacle set is body-only (_abs_outer_bbox), so it never avoided field text; this post-render pass nudges the obscured field anchor outward in r11_text_clear_step_mm steps (up/down/right/left, nearest-clear wins, up to r11_text_clear_max_tries) until its text bbox clears every wire + every OTHER component body. Moves ONLY the (property ... (at)) anchor -> connectivity byte-identical. Idempotent; byte-stable when no wire crosses a field. Set false to keep the legacy warn-only behaviour.",
+    "r2_reroute_wires_off_bodies": true,
+    "r2_reroute_body_margin_mm": 0.5,
+    "r2_reroute_clearance_mm": 1.27,
+    "r2_reroute_overlap_tol_mm": 0.05,
+    "r2_reroute_relocate_max_tries": 10,
+    "fit_design_to_sheet": true,
+    "_fit_design_to_sheet_status": "ACTIVE (added 2026-07-02): lint.repair.fit_design_to_sheet enforces the HARD 'design never crosses the sheet border / title block' rule POST-RENDER. Measures the drawn content bbox (symbols+wires+labels+text+block rects); if it sits outside the drawable area (margins from hierarchy_layout.margin_mm) or over the bottom-right title block (hierarchy_layout.title_block_reserve_mm), it (1) UNIFORMLY translates the whole design onto the sheet -- every coordinate shifts by the same dx,dy so the net list is byte-identical -- and (2) if the content genuinely does not fit the current paper, upsizes (paper) to the smallest hierarchy_layout.page_sizes entry that fits. Skips (lib_symbols ...) (symbol-internal relative coords). Idempotent; byte-stable when the design already fits. Set false to disable.",
+    "_r2_reroute_status": "ACTIVE (added 2026-07-02): lint.repair.reroute_wires_off_bodies resolves the R2 'wire over component' report -- a wire that runs THROUGH a body it does not connect to is bent into an L/Z around the body, keeping BOTH endpoints fixed so the net list is byte-identical. Detection is find_wires_piercing_bodies (which already skips a wire terminating at that part's OWN pins). A candidate detour is rejected if it would stack collinearly on another wire (never creates a new short). r2_reroute_body_margin_mm = pierce-detection shrink (matches the selector default); r2_reroute_clearance_mm = min gap between the detour and the body edge (snapped to a grid line beyond it); r2_reroute_overlap_tol_mm = collinear-overlap tolerance. Does NOT touch the pin-to-pin SHORT case (both wire ends on both pins of one part) -- that genuinely bonds both pins per the KiCad 'only wire ends connect' rule and cannot be fixed geometrically; SHORTED_COMPONENT/COLINEAR_WIRE_BRIDGE surface it. Runs FIRST in repair_after_render so junction-dot + text-clear see final geometry. Idempotent; byte-stable when no wire pierces a body. Set false for legacy warn-only R2."
   },
   "placement": {
     "_comment": "Engine-level placement tuning. `satellite_gap_mm` is the clear distance between an IC pin tip and the nearest pin of the radial satellite (cap / resistor). 2.54 = tight (was default), 5.08 = 2 grid cells, more visible breathing room for dense ICs like 74HC595 with many pins. The other knobs were previously hardcoded mm constants in engine.py module scope (ZONE_W, ZONE_H, CLEARANCE, power-cluster radius, spiral step) and have been pulled here so different circuit densities can tune them without code edits.",

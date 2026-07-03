@@ -4,6 +4,11 @@
   "_sources": "Values cross-referenced against each fab's published capabilities page. Re-check yearly; tiers change. Author each profile from the fab's PUBLIC capability sheet, not from forum lore.",
   "_default_profile": "jlcpcb_standard",
 
+  "_enforce_fab_floor": true,
+  "_enforce_fab_floor_note": "When true (default), set_design_rules clamps the net-class via/track/clearance values AND the via_dimensions presets from net_classes.json UP to the active fab floor (x margin) as it writes them — so a class or preset authored below the selected fab's minimum (e.g. a 0.2mm via drill under JLCPCB's 0.3mm) can never ship. Only ever RAISES a sub-floor value (never lowers), so a config already at/above the floor is byte-identical. This is the max(config, fab*margin) rule from ipc_constraints.json applied to classes + presets, closing the gap board_setup_audit caught. Set false to write net_classes.json values verbatim (pre-fix behaviour).",
+  "_default_margin": 1.0,
+  "_margin_note": "Board Setup rule 2: design_value >= fab_min * margin. The margin is the safety factor that keeps a design rule off the fab's absolute floor, where manufacturing tolerance would eat into it. 1.0 = write the raw fab floor (default; byte-identical to pre-margin behaviour). Set to ~1.2-1.5 for prototype comfort (or set a per-profile `design_margin`, or pass `margin` to set_design_rules). Scales ONLY the geometric clearance/width/drill/annular/hole minimums that tolerance narrows — never silk legibility, mask slivers, or layer count. Values still floor at max(IPC_electrical, fab*margin, class) once ipc_constraints is layered in.",
+
   "profiles": {
     "jlcpcb_standard": {
       "_comment": "JLCPCB standard 2-layer / 4-layer service. The cheap default tier. Per https://jlcpcb.com/capabilities/pcb-capabilities (last verified 2026-05).",
@@ -47,6 +52,8 @@
       "min_edge_to_copper_mm": 0.25,
       "allow_microvias": true,
       "allow_blind_buried_vias": true,
+      "min_microvia_diameter_mm": 0.3,
+      "min_microvia_drill_mm": 0.15,
       "max_copper_layers": 32,
       "default_copper_weight_oz": 1.0,
       "default_board_thickness_mm": 1.6,

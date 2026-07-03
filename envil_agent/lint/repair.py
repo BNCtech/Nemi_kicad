@@ -48,6 +48,14 @@ def _load_wiring_rules() -> dict:
         return {}
 
 
+def _load_layout_section(name: str) -> dict:
+    try:
+        return (json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+                .get(name) or {})
+    except (OSError, ValueError):
+        return {}
+
+
 def _head(node: Any) -> Optional[str]:
     if isinstance(node, list) and node:
         first = node[0]
@@ -691,6 +699,734 @@ def clear_wires_over_text(sch_path: Path) -> Dict[str, Any]:
             "unresolved": unresolved, "ok": True}
 
 
+# ----- R2 auto-fix: reroute a wire that pierces a component body ----------
+
+def _wire_block(p: Tuple[float, float], q: Tuple[float, float],
+                uuid_val: str) -> str:
+    """One `(wire ...)` s-expr in the file's canonical form, WITHOUT the
+    leading tab (the caller reuses the tab that preceded the replaced
+    wire) and WITHOUT a trailing newline."""
+    return (
+        f"(wire (pts (xy {_num(p[0])} {_num(p[1])}) "
+        f"(xy {_num(q[0])} {_num(q[1])}))\n"
+        "\t\t(stroke (width 0) (type default))\n"
+        f"\t\t(uuid \"{uuid_val}\")\n"
+        "\t)"
+    )
+
+
+def _seg_pierces_box(a: Tuple[float, float], b: Tuple[float, float],
+                     box: Tuple[float, float, float, float],
+                     margin: float) -> bool:
+    """True if the Manhattan segment a-b passes through the INTERIOR of
+    `box` (shrunk by `margin`, so an endpoint sitting on the edge / a pin
+    tip is a touch, not a pierce). Manhattan (H or V) only; a diagonal
+    (should never occur here) falls back to a midpoint test."""
+    x1, y1, x2, y2 = box
+    sx1, sy1, sx2, sy2 = x1 + margin, y1 + margin, x2 - margin, y2 - margin
+    if sx1 >= sx2 or sy1 >= sy2:
+        return False
+    (ax, ay), (bx, by) = a, b
+    if abs(ay - by) < 1e-6:                       # horizontal
+        if not (sy1 < ay < sy2):
+            return False
+        lo, hi = (ax, bx) if ax <= bx else (bx, ax)
+        return lo < sx2 and hi > sx1
+    if abs(ax - bx) < 1e-6:                        # vertical
+        if not (sx1 < ax < sx2):
+            return False
+        lo, hi = (ay, by) if ay <= by else (by, ay)
+        return lo < sy2 and hi > sy1
+    mx, my = (ax + bx) / 2, (ay + by) / 2
+    return sx1 < mx < sx2 and sy1 < my < sy2
+
+
+def _seg_overlaps_wire(a: Tuple[float, float], b: Tuple[float, float],
+                       wire: Tuple[Tuple[float, float], Tuple[float, float]],
+                       tol: float) -> bool:
+    """True if segment a-b lies COLLINEAR and overlapping with `wire` --- a
+    stacked overlap is a short in KiCad, so a detour must never create one.
+    Perpendicular crossings are allowed (crossing wires do not connect
+    without a junction dot), so this only tests the collinear case."""
+    (ax, ay), (bx, by) = a, b
+    (cx, cy), (dx, dy) = wire
+    horiz = (abs(ay - by) <= tol and abs(cy - dy) <= tol
+             and abs(ay - cy) <= tol)
+    vert = (abs(ax - bx) <= tol and abs(cx - dx) <= tol
+            and abs(ax - cx) <= tol)
+    if horiz:
+        lo = max(min(ax, bx), min(cx, dx))
+        hi = min(max(ax, bx), max(cx, dx))
+    elif vert:
+        lo = max(min(ay, by), min(cy, dy))
+        hi = min(max(ay, by), max(cy, dy))
+    else:
+        return False
+    return hi - lo > tol
+
+
+def _seg_pierces_foreign(
+    a: Tuple[float, float], b: Tuple[float, float],
+    boxes_ref: List[Tuple[str, float, float, float, float]],
+    pins: List[Tuple[float, float, str]],
+    margin: float,
+) -> bool:
+    """True if segment a-b pierces a body it does NOT connect to --- the
+    exact rule the R2 detector (`find_wires_piercing_bodies`) uses: a body is
+    EXEMPT for this segment when one of the segment's endpoints is a pin of
+    that same body (a wire may leave/enter its own part's body at the pin).
+    Keeping this identical to the detector guarantees the repair never
+    produces a segment the detector will re-flag."""
+    for (ref, x1, y1, x2, y2) in boxes_ref:
+        touches_own = any(
+            pref == ref and (_pt_close(a, (px, py), margin)
+                             or _pt_close(b, (px, py), margin))
+            for (px, py, pref) in pins)
+        if touches_own:
+            continue
+        if _seg_pierces_box(a, b, (x1, y1, x2, y2), margin):
+            return True
+    return False
+
+
+def _path_ok(path: List[Tuple[float, float]],
+             boxes_ref: List[Tuple[str, float, float, float, float]],
+             pins: List[Tuple[float, float, str]],
+             other_wires: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+             margin: float, tol: float) -> bool:
+    """A candidate detour is acceptable iff no segment pierces a FOREIGN body
+    (pin-aware, matching the R2 detector) AND no segment stacks collinearly
+    on another net's wire (which would be a new short)."""
+    for i in range(len(path) - 1):
+        seg_a, seg_b = path[i], path[i + 1]
+        if _seg_pierces_foreign(seg_a, seg_b, boxes_ref, pins, margin):
+            return False
+        for w in other_wires:
+            if _seg_overlaps_wire(seg_a, seg_b, w, tol):
+                return False
+    return True
+
+
+def _grid_beyond(edge: float, direction: int, grid: float = _GRID_MM) -> float:
+    """Snap `edge` to the nearest grid line strictly on the `direction`
+    side (-1 = smaller coord, +1 = larger), so a detour always clears the
+    body edge and lands on-grid (KiCad needs grid-aligned endpoints)."""
+    if direction < 0:
+        return math.floor(edge / grid) * grid
+    return math.ceil(edge / grid) * grid
+
+
+def _route_around_box(
+    a: Tuple[float, float], b: Tuple[float, float],
+    blocker: Tuple[float, float, float, float],
+    boxes_ref: List[Tuple[str, float, float, float, float]],
+    pins: List[Tuple[float, float, str]],
+    other_wires: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+    clear: float, margin: float, tol: float,
+) -> Optional[List[Tuple[float, float]]]:
+    """Return a Manhattan detour [a, ..., b] that clears every FOREIGN body
+    and every other-net wire, or None if no simple L / Z does. The endpoints
+    a and b are preserved EXACTLY --- only the middle bends away from the
+    body, so connectivity is byte-identical."""
+    ax, ay = a
+    bx, by = b
+    # 1. Two L variants (only distinct when a and b differ on both axes).
+    if abs(ax - bx) > 1e-6 and abs(ay - by) > 1e-6:
+        for corner in ((bx, ay), (ax, by)):
+            path = [a, corner, b]
+            if _path_ok(path, boxes_ref, pins, other_wires, margin, tol):
+                return path
+    # 2. Z-detour around the blocker's nearer long edge.
+    x1, y1, x2, y2 = blocker
+    if abs(ay - by) < 1e-6:                       # horizontal wire -> over/under
+        for edge, d in ((y1 - clear, -1), (y2 + clear, +1)):
+            dy = _grid_beyond(edge, d)
+            if y1 - margin <= dy <= y2 + margin:  # snapped back onto the body
+                continue
+            path = [a, (ax, dy), (bx, dy), b]
+            if _path_ok(path, boxes_ref, pins, other_wires, margin, tol):
+                return path
+    elif abs(ax - bx) < 1e-6:                      # vertical wire -> left/right
+        for edge, d in ((x1 - clear, -1), (x2 + clear, +1)):
+            dx = _grid_beyond(edge, d)
+            if x1 - margin <= dx <= x2 + margin:
+                continue
+            path = [a, (dx, ay), (dx, by), b]
+            if _path_ok(path, boxes_ref, pins, other_wires, margin, tol):
+                return path
+    return None
+
+
+def _pt_close(p: Tuple[float, float], q: Tuple[float, float],
+              tol: float) -> bool:
+    return abs(p[0] - q[0]) <= tol and abs(p[1] - q[1]) <= tol
+
+
+def _endpoint_degree(pt: Tuple[float, float],
+                     wires: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+                     tol: float) -> int:
+    """How many wire ENDPOINTS coincide with `pt`. Degree 1 == the wire
+    dead-ends here (nothing else is wired to this point)."""
+    n = 0
+    for (a, b) in wires:
+        if _pt_close(pt, a, tol):
+            n += 1
+        if _pt_close(pt, b, tol):
+            n += 1
+    return n
+
+
+def _on_segment(px: float, py: float, ax: float, ay: float,
+                bx: float, by: float, tol: float) -> bool:
+    """(px,py) on Manhattan segment a-b (endpoints included), within tol."""
+    if abs(ay - by) <= tol:                       # horizontal
+        lo, hi = (ax, bx) if ax <= bx else (bx, ax)
+        return abs(py - ay) <= tol and lo - tol <= px <= hi + tol
+    if abs(ax - bx) <= tol:                        # vertical
+        lo, hi = (ay, by) if ay <= by else (by, ay)
+        return abs(px - ax) <= tol and lo - tol <= py <= hi + tol
+    return False
+
+
+def _body_entry_point(keep: Tuple[float, float], moved: Tuple[float, float],
+                      box: Tuple[float, float, float, float]
+                      ) -> Optional[Tuple[float, float]]:
+    """Where the segment keep->moved crosses the boundary of `box`, coming
+    from the outside endpoint `keep`. Manhattan only."""
+    x1, y1, x2, y2 = box
+    if abs(keep[1] - moved[1]) < 1e-6:            # horizontal
+        entry_x = x1 if keep[0] < moved[0] else x2
+        return (entry_x, keep[1])
+    if abs(keep[0] - moved[0]) < 1e-6:             # vertical
+        entry_y = y1 if keep[1] < moved[1] else y2
+        return (keep[0], entry_y)
+    return None
+
+
+def _clamp_overshoot(
+    a: Tuple[float, float], b: Tuple[float, float],
+    blocker: Tuple[float, float, float, float], pierced_ref: str,
+    ctx: Dict[str, Any],
+    wires: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+    other_wires: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+    margin: float, tol: float,
+) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    """When a wire OVERSHOOTS its target pin and dead-ends INSIDE the pierced
+    body (the common 'wire over component' cause), pull the buried dead-end
+    back onto the first pin of that body the wire crosses (or the body-entry
+    edge). Returns (keep_endpoint, new_target) or None when it is not safe.
+
+    Safe only when the buried end is a genuine dead-end: degree 1, no
+    junction / label / foreign pin on it, and the removed overshoot does not
+    lie on another wire (which would be a real bond). Those guards keep the
+    net list identical --- the wire connects the same live points, just
+    without the dead stub that poked into the body."""
+    x1, y1, x2, y2 = blocker
+    sx1, sy1, sx2, sy2 = x1 + margin, y1 + margin, x2 - margin, y2 - margin
+
+    def _inside(p):
+        return sx1 < p[0] < sx2 and sy1 < p[1] < sy2
+
+    if _inside(a) and not _inside(b):
+        moved, keep = a, b
+    elif _inside(b) and not _inside(a):
+        moved, keep = b, a
+    else:
+        return None                               # both / neither inside
+
+    # The buried end must bond nothing but this wire.
+    if _endpoint_degree(moved, wires, tol) != 1:
+        return None
+    if any(_pt_close(moved, (jx, jy), tol)
+           for (jx, jy) in ctx.get("junctions", [])):
+        return None
+    if any(_pt_close(moved, (lx, ly), tol)
+           for (_n, lx, ly) in ctx.get("labels", [])):
+        return None
+    if any(_pt_close(moved, (px, py), tol)
+           for (px, py, _r) in ctx.get("pin_positions", [])):
+        return None                               # a pin sits on it -> leave it
+
+    # Prefer landing on the first pin of the pierced body along keep->moved.
+    pins_on = [(px, py) for (px, py, pref) in ctx.get("pin_positions", [])
+               if pref == pierced_ref
+               and _on_segment(px, py, keep[0], keep[1], moved[0], moved[1], tol)]
+    if pins_on:
+        target = min(pins_on,
+                     key=lambda p: (p[0] - keep[0]) ** 2 + (p[1] - keep[1]) ** 2)
+    else:
+        target = _body_entry_point(keep, moved, blocker)
+        if target is None:
+            return None
+
+    if _pt_close(target, keep, tol) or _pt_close(target, moved, tol):
+        return None
+    if _seg_pierces_foreign(keep, target, ctx.get("bboxes", []),
+                            ctx.get("pin_positions", []), margin):
+        return None
+    # The removed overshoot (target->moved) must not bond to another wire.
+    for w in other_wires:
+        if _seg_overlaps_wire(target, moved, w, tol):
+            return None
+    return keep, target
+
+
+_LABEL_NAME_RE = re.compile(r"\(label\s+\"([^\"]+)\"")
+_LABEL_AT_RE = re.compile(r"\(at\s+(-?[0-9.]+)\s+(-?[0-9.]+)(\s+-?[0-9.]+)?\)")
+
+
+def _move_label(text: str, name: str, old_xy: Tuple[float, float],
+                new_xy: Tuple[float, float], tol: float) -> Tuple[str, bool]:
+    """Rewrite the `(at x y rot)` of the local label `name` sitting at
+    `old_xy` to `new_xy`, preserving the rotation token. Matches by name +
+    position so the right instance moves when a net has several labels."""
+    for s, e in _find_balanced_spans(text, "label"):
+        chunk = text[s:e]
+        m_name = _LABEL_NAME_RE.search(chunk)
+        if not m_name or m_name.group(1) != name:
+            continue
+        m_at = _LABEL_AT_RE.search(chunk)
+        if not m_at:
+            continue
+        try:
+            lx, ly = float(m_at.group(1)), float(m_at.group(2))
+        except (TypeError, ValueError):
+            continue
+        if abs(lx - old_xy[0]) > tol or abs(ly - old_xy[1]) > tol:
+            continue
+        rot = m_at.group(3) or ""
+        new_at = f"(at {_num(new_xy[0])} {_num(new_xy[1])}{rot})"
+        new_chunk = chunk[:m_at.start()] + new_at + chunk[m_at.end():]
+        return text[:s] + new_chunk + text[e:], True
+    return text, False
+
+
+def _relocate_buried_label(
+    a: Tuple[float, float], b: Tuple[float, float],
+    ctx: Dict[str, Any],
+    wires: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+    other_wires: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+    boxes_ref: List[Tuple[str, float, float, float, float]],
+    margin: float, tol: float, clear: float, max_tries: int,
+) -> Optional[Tuple[Tuple[float, float], Tuple[float, float], str,
+                    Tuple[float, float]]]:
+    """When a body-piercing wire dead-ends at a NET LABEL that was placed
+    inside a body (the ne555 'DIS label inside U1' case), relocate the label
+    + its stub to a clear spot reachable by a clean straight stub from the
+    pin. A local net label bonds purely by NAME, so moving it keeps the net
+    intact --- proven here by comparing KiCad's netlist before/after.
+
+    Returns (keep_pin, new_anchor, label_name, old_anchor) or None. Safe only
+    when the buried end is a degree-1 dead-end carrying exactly one label and
+    a clear straight stub exists that pierces no foreign body, overlaps no
+    wire, and lands on no pin / wire-end / junction / other label."""
+    bboxes = ctx.get("bboxes", [])
+    pins = ctx.get("pin_positions", [])
+    labels = ctx.get("labels", [])
+    junctions = ctx.get("junctions", [])
+
+    def _inside_any(p):
+        for (_r, x1, y1, x2, y2) in bboxes:
+            if (x1 + margin < p[0] < x2 - margin
+                    and y1 + margin < p[1] < y2 - margin):
+                return True
+        return False
+
+    if _inside_any(a) and not _inside_any(b):
+        moved, keep = a, b
+    elif _inside_any(b) and not _inside_any(a):
+        moved, keep = b, a
+    else:
+        return None
+    if _endpoint_degree(moved, wires, tol) != 1:
+        return None
+    named = [nm for (nm, lx, ly) in labels if _pt_close(moved, (lx, ly), tol)]
+    if len(named) != 1:
+        return None                               # no label, or ambiguous
+    name = named[0]
+
+    def _clear_anchor(p):
+        if _inside_any(p):
+            return False
+        if any(_pt_close(p, (px, py), tol) for (px, py, _r) in pins):
+            return False
+        if any(_pt_close(p, wp, tol) for w in wires for wp in w):
+            return False
+        if any(_pt_close(p, (jx, jy), tol) for (jx, jy) in junctions):
+            return False
+        if any(_pt_close(p, (lx, ly), tol) for (_n, lx, ly) in labels):
+            return False
+        return True
+
+    # Straight stub from the pin in each cardinal direction; nearest clear
+    # anchor with a clean route wins.
+    for r in range(1, max_tries + 1):
+        for (dx, dy) in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+            p = (round(keep[0] + dx * clear * r, 2),
+                 round(keep[1] + dy * clear * r, 2))
+            if not _clear_anchor(p):
+                continue
+            if _seg_pierces_foreign(keep, p, boxes_ref, pins, margin):
+                continue
+            if any(_seg_overlaps_wire(keep, p, w, tol) for w in other_wires):
+                continue
+            return keep, p, name, moved
+    return None
+
+
+def reroute_wires_off_bodies(
+    sch_path: Path, ctx: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """R2 auto-fix (WIRING_RULES.md R2): reroute any wire that runs THROUGH
+    a component's body around it, keeping both endpoints fixed.
+
+    This is the missing repair for the user's 'wire over component' report.
+    `find_wires_piercing_bodies` already detects a wire crossing a body it
+    does NOT connect to (it skips a wire terminating at that part's own
+    pins); this pass RESOLVES it by bending the wire's middle clear of the
+    body. Because only the interior bends and the two endpoints are
+    untouched, the net list is byte-identical --- the wire connects exactly
+    the same two points, just via an L or Z instead of straight through.
+
+    Deliberately does NOT touch the pin-to-pin SHORT case (a single wire
+    whose two ENDS land on both pins of one part). Per the KiCad
+    connectivity rule confirmed from the official docs --- 'only wire ends
+    create connections; a wire merely crossing a pin's middle does not
+    connect' --- that case genuinely bonds both pins, and an L from pin to
+    pin would still bond them. It cannot be fixed geometrically without
+    knowing the intended net, so it is left for SHORTED_COMPONENT /
+    COLINEAR_WIRE_BRIDGE to surface (see [[project_silent_short_lint]]).
+
+    Never creates a new short: a candidate detour is rejected if any of its
+    segments would stack collinearly on another wire. Idempotent (a
+    rerouted wire no longer pierces -> second call is a no-op) and
+    byte-stable when no wire pierces a body.
+
+    Returns {"wires_rerouted": N, "piercings_found": M, "unresolved": K,
+             "ok": bool}.
+    """
+    from .context import build_context
+    from .selectors import find_wires_piercing_bodies
+
+    rules = _load_wiring_rules()
+    margin = float(rules.get("r2_reroute_body_margin_mm", 0.5))
+    clear = float(rules.get("r2_reroute_clearance_mm", _GRID_MM))
+    tol = float(rules.get("r2_reroute_overlap_tol_mm", 0.05))
+
+    if ctx is None:
+        try:
+            ctx = build_context(sch_path)
+        except Exception as exc:
+            return {"wires_rerouted": 0, "piercings_found": 0, "unresolved": 0,
+                    "ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    wires = ctx["wires"]
+    bboxes = ctx["bboxes"]
+    pin_positions = ctx["pin_positions"]
+
+    issues = find_wires_piercing_bodies(wires, bboxes, pin_positions,
+                                        margin_mm=margin)
+    if not issues:
+        return {"wires_rerouted": 0, "piercings_found": 0, "unresolved": 0,
+                "ok": True}
+
+    bbox_by_ref = {ref: (x1, y1, x2, y2) for (ref, x1, y1, x2, y2) in bboxes}
+
+    text = sch_path.read_text(encoding="utf-8")
+    coords, spans = _extract_wires(text)
+
+    def _close(u: float, v: float) -> bool:
+        return abs(u - v) <= 0.02
+
+    def _match_span(ws, we, used) -> Optional[int]:
+        for i, (cx1, cy1, cx2, cy2) in enumerate(coords):
+            if i in used:
+                continue
+            fwd = (_close(cx1, ws[0]) and _close(cy1, ws[1])
+                   and _close(cx2, we[0]) and _close(cy2, we[1]))
+            rev = (_close(cx1, we[0]) and _close(cy1, we[1])
+                   and _close(cx2, ws[0]) and _close(cy2, ws[1]))
+            if fwd or rev:
+                return i
+        return None
+
+    reloc_max = int(rules.get("r2_reroute_relocate_max_tries", 10))
+    replacements: List[Tuple[int, int, str]] = []
+    label_moves: List[Tuple[str, Tuple[float, float], Tuple[float, float]]] = []
+    used: set = set()
+    unresolved = 0
+    for iss in issues:
+        where = iss.get("where", {})
+        ws = where.get("wire_start")
+        we = where.get("wire_end")
+        pierced = where.get("pierces")
+        if not ws or not we or pierced not in bbox_by_ref:
+            unresolved += 1
+            continue
+        si = _match_span(ws, we, used)
+        if si is None:
+            unresolved += 1
+            continue
+        cx1, cy1, cx2, cy2 = coords[si]
+        a, b = (cx1, cy1), (cx2, cy2)
+        blocker = bbox_by_ref[pierced]
+        # Route around EVERY body via the pin-aware foreign-pierce test: a
+        # body is exempt only for a segment that touches its own pin (exactly
+        # the R2 detector's rule), so the detour may leave/enter the endpoint
+        # parts at their pins but never cuts through any other body. Using the
+        # detector's own rule guarantees the result never re-flags as R2.
+        other_wires = [w for j, w in enumerate(wires) if j != si]
+        path = _route_around_box(a, b, blocker, bboxes, pin_positions,
+                                 other_wires, clear, margin, tol)
+        if path is None or len(path) < 2:
+            # Reroute-around can't help when an endpoint is buried inside the
+            # body (the wire overshot its target pin). Try clamping the dead
+            # overshoot back onto the pin it crossed.
+            clamp = _clamp_overshoot(a, b, blocker, pierced, ctx, wires,
+                                     other_wires, margin, tol)
+            if clamp is not None:
+                keep, target = clamp
+                s, e, orig_uuid = spans[si]
+                uid = orig_uuid or str(_uuid.uuid4())
+                replacements.append((s, e, _wire_block(keep, target, uid)))
+                used.add(si)
+                continue
+            # Last resort: the wire dead-ends at a NET LABEL placed inside the
+            # body. Relocate the label + stub to a clear spot (bonds by name,
+            # so the net is unchanged).
+            reloc = _relocate_buried_label(a, b, ctx, wires, other_wires,
+                                           bboxes, margin, tol, clear, reloc_max)
+            if reloc is None:
+                unresolved += 1
+                continue
+            keep, new_anchor, lname, old_anchor = reloc
+            s, e, orig_uuid = spans[si]
+            uid = orig_uuid or str(_uuid.uuid4())
+            replacements.append((s, e, _wire_block(keep, new_anchor, uid)))
+            label_moves.append((lname, old_anchor, new_anchor))
+            used.add(si)
+            continue
+        s, e, orig_uuid = spans[si]
+        blocks = []
+        for k in range(len(path) - 1):
+            uid = (orig_uuid or str(_uuid.uuid4())) if k == 0 else str(_uuid.uuid4())
+            blocks.append(_wire_block(path[k], path[k + 1], uid))
+        replacements.append((s, e, "\n\t".join(blocks)))
+        used.add(si)
+
+    if not replacements:
+        return {"wires_rerouted": 0, "piercings_found": len(issues),
+                "unresolved": unresolved, "ok": True}
+
+    # Apply wire replacements right-to-left so earlier offsets stay valid.
+    replacements.sort(key=lambda r: r[0], reverse=True)
+    for s, e, new_text in replacements:
+        text = text[:s] + new_text + text[e:]
+    # Then move any relocated labels (content-matched, offset-independent).
+    labels_moved = 0
+    for (lname, old_xy, new_xy) in label_moves:
+        text, ok = _move_label(text, lname, old_xy, new_xy, tol)
+        if ok:
+            labels_moved += 1
+    sch_path.write_text(text, encoding="utf-8")
+    return {"wires_rerouted": len(replacements), "piercings_found": len(issues),
+            "labels_moved": labels_moved, "unresolved": unresolved, "ok": True}
+
+
+# ----- fit-to-sheet: keep the whole design inside the page border ---------
+
+_PAPER_RE = re.compile(r'\(paper\s+"([^"]+)"\)')
+_AT_TOK_RE = re.compile(r"\(at\s+(-?[0-9.]+)\s+(-?[0-9.]+)((?:\s+-?[0-9.]+)?)\)")
+# Absolute 2-coordinate tokens that carry a drawn position: wire/polyline
+# points (xy) and graphic rectangle/arc corners (start/end/mid/center).
+# `at` is handled separately (it keeps an optional rotation field).
+_COORD2_RE = re.compile(
+    r"\((xy|start|end|mid|center)\s+(-?[0-9.]+)\s+(-?[0-9.]+)\)")
+
+
+def _content_bbox(ctx: Dict[str, Any]):
+    """Union bbox of everything drawn: component bodies, wires, label anchors,
+    field/RefDes text boxes, power-port names, junctions and block rectangles.
+    Returns (minx, miny, maxx, maxy) or None when the sheet is empty."""
+    xs: List[float] = []
+    ys: List[float] = []
+    for (a, b) in ctx.get("wires", []):
+        xs += [a[0], b[0]]
+        ys += [a[1], b[1]]
+    for (_r, x1, y1, x2, y2) in ctx.get("bboxes", []):
+        xs += [x1, x2]
+        ys += [y1, y2]
+    for (_r, _f, x1, y1, x2, y2) in ctx.get("text_bboxes", []):
+        xs += [x1, x2]
+        ys += [y1, y2]
+    for tup in ctx.get("blocks", []):
+        _n, x1, y1, x2, y2 = tup
+        xs += [x1, x2]
+        ys += [y1, y2]
+    for (_n, x, y) in ctx.get("labels", []):
+        xs.append(x)
+        ys.append(y)
+    for (_n, x, y) in ctx.get("power_ports", []):
+        xs.append(x)
+        ys.append(y)
+    for (x, y) in ctx.get("junctions", []):
+        xs.append(x)
+        ys.append(y)
+    if not xs or not ys:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _pick_paper(cw: float, ch: float, current: str, pages: Dict[str, Any],
+                ml: float, mr: float, mt: float, mb: float,
+                tbw: float, tbh: float) -> Optional[str]:
+    """Smallest page (>= current where possible) whose drawable area fits a
+    cw x ch design AND lets it dodge the bottom-right title block by top-left
+    placement. Returns a paper name, or None if even the largest can't fit
+    (caller then best-effort-places on the largest)."""
+    cands = []
+    for name, d in pages.items():
+        try:
+            cands.append((name, float(d["w_mm"]), float(d["h_mm"])))
+        except (TypeError, ValueError, KeyError):
+            continue
+    if not cands:
+        return None
+    cands.sort(key=lambda p: p[1] * p[2])
+
+    def _fits(w, h):
+        dw, dh = w - ml - mr, h - mt - mb
+        if cw > dw or ch > dh:
+            return False
+        # top-left placement dodges the title block if the content clears it
+        # on at least one axis.
+        return (cw <= dw - tbw) or (ch <= dh - tbh)
+
+    for name, w, h in cands:
+        if _fits(w, h):
+            return name
+    return None
+
+
+def fit_design_to_sheet(sch_path: Path,
+                        ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Enforce the HARD 'design never crosses the sheet border / title block'
+    rule POST-RENDER (see [[feedback_layout_within_sheet]]).
+
+    If the drawn content sits outside the drawable area (page minus margins)
+    or over the bottom-right title block, this (1) UNIFORMLY translates the
+    whole design so its top-left corner lands at the margin -- every
+    coordinate shifts by the SAME (dx, dy) so the net list is byte-identical
+    -- and (2) if the content genuinely does not fit the current paper,
+    upsizes `(paper "..")` to the smallest configured page that fits.
+
+    Coordinates inside `(lib_symbols ...)` are symbol-INTERNAL (relative to
+    each symbol origin) and are left untouched; only absolute instance /
+    wire / label / junction / text coordinates move. Idempotent (a fitted
+    design needs dx=dy=0) and byte-stable when the design already fits.
+
+    Returns {"translated": bool, "dx", "dy", "paper_from", "paper_to",
+             "was_outside": bool, "ok": bool}.
+    """
+    hl = _load_layout_section("hierarchy_layout")
+    pages = hl.get("page_sizes") or {}
+    m = hl.get("margin_mm") or {}
+    ml = float(m.get("left", 15.0))
+    mr = float(m.get("right", 15.0))
+    mt = float(m.get("top", 15.0))
+    mb = float(m.get("bottom", 12.0))
+    tb = hl.get("title_block_reserve_mm") or {}
+    tbw = float(tb.get("width_mm", 110.0))
+    tbh = float(tb.get("height_mm", 30.0))
+
+    noop = {"translated": False, "dx": 0.0, "dy": 0.0,
+            "was_outside": False, "ok": True}
+    try:
+        if ctx is None:
+            from .context import build_context
+            ctx = build_context(sch_path)
+    except Exception as exc:
+        return {**noop, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    bbox = _content_bbox(ctx)
+    if bbox is None:
+        return noop
+    minx, miny, maxx, maxy = bbox
+    cw, ch = maxx - minx, maxy - miny
+
+    text = sch_path.read_text(encoding="utf-8")
+    pm = _PAPER_RE.search(text)
+    cur_paper = pm.group(1) if pm else "A4"
+    cur = pages.get(cur_paper)
+    cur_w = float(cur["w_mm"]) if cur else 297.0
+    cur_h = float(cur["h_mm"]) if cur else 210.0
+
+    # Does the design already sit fully inside the drawable area AND clear the
+    # title block on the current paper? If so, nothing to do (byte-stable).
+    draw_x1, draw_y1 = ml, mt
+    draw_x2, draw_y2 = cur_w - mr, cur_h - mb
+    tb_x1, tb_y1 = draw_x2 - tbw, draw_y2 - tbh
+    inside = (minx >= draw_x1 - 0.01 and miny >= draw_y1 - 0.01
+              and maxx <= draw_x2 + 0.01 and maxy <= draw_y2 + 0.01)
+    clears_tb = (maxx <= tb_x1 + 0.01) or (maxy <= tb_y1 + 0.01)
+    if inside and clears_tb:
+        return noop
+
+    # Need to move (and maybe grow the page). Pick the target paper.
+    target = _pick_paper(cw, ch, cur_paper, pages, ml, mr, mt, mb, tbw, tbh)
+    if target is None:                       # nothing fits -> use the largest
+        big = sorted(((n, float(d["w_mm"]), float(d["h_mm"]))
+                      for n, d in pages.items()), key=lambda p: p[1] * p[2])
+        target = big[-1][0] if big else cur_paper
+    tw = float(pages[target]["w_mm"]) if target in pages else cur_w
+    th = float(pages[target]["h_mm"]) if target in pages else cur_h
+
+    # Translate so the content's top-left lands at the margin.
+    dx = ml - minx
+    dy = mt - miny
+    if abs(dx) < 0.01 and abs(dy) < 0.01 and target == cur_paper:
+        return noop
+
+    # Rewrite paper token first (offsets before lib_symbols are unaffected).
+    if target != cur_paper and pm:
+        text = text[:pm.start()] + f'(paper "{target}")' + text[pm.end():]
+
+    # Exclude the (lib_symbols ...) span: those coordinates are symbol-relative.
+    lib_spans = _find_balanced_spans(text, "lib_symbols")
+    lib_lo, lib_hi = (lib_spans[0] if lib_spans else (-1, -1))
+
+    def _in_lib(pos: int) -> bool:
+        return lib_lo <= pos < lib_hi
+
+    # Shift every absolute coordinate token OUTSIDE lib_symbols: instance /
+    # field / label / text / junction `(at)`, wire & polyline `(xy)`, and
+    # graphic rectangle/arc `(start|end|mid|center)` (the block boxes are
+    # top-level rectangles). lib_symbols coords are symbol-relative -> skipped.
+    edits: List[Tuple[int, int, str]] = []
+    for mo in _AT_TOK_RE.finditer(text):
+        if _in_lib(mo.start()):
+            continue
+        x = float(mo.group(1)) + dx
+        y = float(mo.group(2)) + dy
+        edits.append((mo.start(), mo.end(),
+                      f"(at {_num(x)} {_num(y)}{mo.group(3)})"))
+    for mo in _COORD2_RE.finditer(text):
+        if _in_lib(mo.start()):
+            continue
+        tok = mo.group(1)
+        x = float(mo.group(2)) + dx
+        y = float(mo.group(3)) + dy
+        edits.append((mo.start(), mo.end(), f"({tok} {_num(x)} {_num(y)})"))
+
+    edits.sort(key=lambda e: e[0], reverse=True)
+    for s, e, rep in edits:
+        text = text[:s] + rep + text[e:]
+    sch_path.write_text(text, encoding="utf-8")
+    return {"translated": True, "dx": round(dx, 3), "dy": round(dy, 3),
+            "paper_from": cur_paper, "paper_to": target,
+            "was_outside": True, "tokens_shifted": len(edits), "ok": True}
+
+
 # ----- top-level dispatcher used by graphs/nodes/render.py ----------------
 
 def repair_after_render(
@@ -704,6 +1440,36 @@ def repair_after_render(
     summary: Dict[str, Any] = {"ran": [], "skipped": []}
     if not sch_path.exists():
         return summary
+
+    # Fit-to-sheet: keep the whole design inside the page border + off the
+    # title block (HARD layout rule). Runs FIRST -- it uniformly translates
+    # every coordinate (and may upsize the paper), so all later passes see the
+    # final positions. Connectivity byte-identical; byte-stable when the
+    # design already fits.
+    if bool(rules.get("fit_design_to_sheet", True)):
+        try:
+            fit_res = fit_design_to_sheet(sch_path)
+            summary["ran"].append({"rule": "FIT_TO_SHEET", "result": fit_res})
+        except Exception as exc:
+            summary["skipped"].append({
+                "rule": "FIT_TO_SHEET",
+                "reason": f"{type(exc).__name__}: {exc}",
+            })
+
+    # R2: reroute any wire that runs THROUGH a component body around it.
+    # Runs after fit-to-sheet so it sees final positions. Endpoints are
+    # preserved -> connectivity is byte-identical; only acts when a wire
+    # genuinely pierces a body, and never creates a new collinear overlap.
+    # Idempotent + byte-stable when nothing pierces. Off -> legacy warn-only.
+    if bool(rules.get("r2_reroute_wires_off_bodies", True)):
+        try:
+            r2_res = reroute_wires_off_bodies(sch_path)
+            summary["ran"].append({"rule": "R2_REROUTE", "result": r2_res})
+        except Exception as exc:
+            summary["skipped"].append({
+                "rule": "R2_REROUTE",
+                "reason": f"{type(exc).__name__}: {exc}",
+            })
 
     # R4 general: add a junction dot at every 3+ meet AND mid-span T-tap.
     # Superset of r4_split_four_way (4-way only) --- repairs electrically-open

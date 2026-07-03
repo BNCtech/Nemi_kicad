@@ -1,0 +1,30 @@
+{
+  "_about": "Phase 2 of the Universal PCB AI Engine — voltage-drop / current-density REPORT (a read-only check, not a fix). Consumed by tools/power_integrity_pcb.py. For every POWER net it measures the routed copper (total length + bottleneck width from the .kicad_pcb tracks), infers the net's design current (same source as the ampacity tool: layout_config.json:ampacity.net_current_a + power_net_patterns + class_design_current_a), then computes R = rho*L/A, Vdrop = I*R and current density J = I/A, and flags a WARNING when the drop or density exceeds the thresholds here or the trace is narrower than the IPC-2152 recommended width. Pure physics + config — no per-circuit logic. enabled=false makes the tool a no-op.",
+  "_units": "resistivity in ohm*metre; distances mm; current A; voltage V; density A/mm^2. 1 oz copper = copper_thickness_mm_per_oz.",
+
+  "enabled": true,
+
+  "resistivity_ohm_m": 1.724e-8,
+  "_resistivity_note": "Annealed copper at 20 C. Copper's tempco is ~0.393%/C, so a rail running hot (60-90 C) has ~15-30% higher resistance and drop. Bump this (e.g. 2.1e-8 for ~70 C) or pass temp_c to model a hot board.",
+  "temp_coefficient_per_c": 0.00393,
+  "reference_temp_c": 20.0,
+
+  "default_copper_weight_oz": 1.0,
+  "copper_thickness_mm_per_oz": 0.0348,
+
+  "min_power_current_a": 0.5,
+  "_min_power_note": "Nets whose inferred design current is below this are treated as signal nets and skipped — power integrity only matters for rails.",
+
+  "via_resistance_mohm": 1.0,
+  "_via_note": "Approx series resistance added per via on the net (plated 0.3 mm barrel ~ 0.5-1 mOhm). Set 0 to ignore via resistance.",
+
+  "vdrop_warn_pct": 3.0,
+  "vdrop_warn_abs_v": 0.10,
+  "_vdrop_note": "WARN when Vdrop exceeds vdrop_warn_pct of the rail voltage (when the rail voltage is known from the net name / net_voltages arg) OR exceeds vdrop_warn_abs_v absolute. 3 percent is the common rail-integrity budget for a logic supply.",
+
+  "current_density_warn_a_per_mm2": 55.0,
+  "_density_note": "Advisory ceiling. IPC-2152 external 1 oz at ~10-20 C rise sits around 50 A/mm^2; above ~55 the trace runs hot. Scales physically with copper weight because a wider cross-section lowers J.",
+
+  "width_margin_pct": 10.0,
+  "_width_note": "WARN when the net's bottleneck (narrowest) track is more than width_margin_pct below the IPC-2152 recommended width for its current (read from ipc_constraints.json:width_by_current.bands). This is the honest 'trace too thin for its current' check."
+}

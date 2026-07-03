@@ -55,7 +55,8 @@ def _load_cfg() -> Dict[str, Any]:
 class Comp:
     """One component as the reasoning engine sees it."""
     __slots__ = ("ref", "prefix", "lib_id", "value", "footprint",
-                 "pins", "nets", "characters", "role", "score", "constraints")
+                 "pins", "nets", "characters", "role", "score", "constraints",
+                 "confidence", "role_reason")
 
     def __init__(self, ref: str) -> None:
         self.ref = ref
@@ -69,6 +70,8 @@ class Comp:
         self.role: str = "passive"
         self.score: float = 0.0
         self.constraints: Dict[str, Any] = {}
+        self.confidence: float = 0.0       # how sure the role decision is (0..1)
+        self.role_reason: List[str] = []   # human-readable signals behind the role
 
 
 def _prefix_of(ref: str) -> str:
@@ -253,16 +256,49 @@ def _is_power_pkg(comp: Comp, cfg: Dict[str, Any]) -> bool:
     return any(str(p).upper() in fp for p in cfg.get("power_packages", []))
 
 
+def _conf_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    return cfg.get("role_confidence", {}) or {}
+
+
+def _set_conf(comp: Comp, cfg: Dict[str, Any], base_key: str,
+              default: float, *reasons: str) -> None:
+    """Record confidence + reason on the comp. Base value comes from
+    config.role_confidence[base_key]; a small corroboration bonus is added per
+    matching electrical character (capped) so a role backed by several agreeing
+    signals reads as more certain than one backed by a single pattern. No-op on
+    confidence when the block is disabled (reasons still recorded, cheap)."""
+    cc = _conf_cfg(cfg)
+    comp.role_reason = list(reasons)
+    if not cc.get("enabled", True):
+        return
+    base = float(cc.get(base_key, default))
+    per_char = float(cc.get("corroboration_per_char", 0.0))
+    max_bonus = float(cc.get("corroboration_max_bonus", 0.0))
+    cap = float(cc.get("max_confidence", 0.99))
+    bonus = min(max_bonus, per_char * max(0, len(comp.characters)))
+    comp.confidence = round(min(cap, base + bonus), 3)
+    if comp.characters:
+        comp.role_reason.append("signals: " + ", ".join(sorted(comp.characters)))
+
+
 def _role_for(comp: Comp, cfg: Dict[str, Any]) -> Tuple[str, bool]:
     """Return (role, protected). A 'protected' role (lib-id MCU) is never demoted
-    by the controller->peripheral post-pass."""
+    by the controller->peripheral post-pass. Side effect: sets comp.confidence +
+    comp.role_reason for the branch that decided the role."""
     # 1. Device class from lib_id wins (a TVS is a TVS, an inductor an inductor).
     lr = _lib_role(comp, cfg)
     if lr == "mosfet":
-        return ("power_switch", False) if _is_power_pkg(comp, cfg) else ("small_signal_switch", False)
+        if _is_power_pkg(comp, cfg):
+            _set_conf(comp, cfg, "lib_class_hint", 0.95,
+                      "lib_class:mosfet", "power package")
+            return ("power_switch", False)
+        _set_conf(comp, cfg, "lib_class_hint", 0.95, "lib_class:mosfet")
+        return ("small_signal_switch", False)
     if lr == "controller":
+        _set_conf(comp, cfg, "lib_class_hint", 0.95, "lib_class:controller")
         return ("controller", True)
     if lr:
+        _set_conf(comp, cfg, "lib_class_hint", 0.95, f"lib_class:{lr}")
         return (lr, False)
     # 2. Pin-behaviour role rules.
     for rule in cfg.get("role_rules", []):
@@ -287,7 +323,10 @@ def _role_for(comp: Comp, cfg: Dict[str, Any]) -> Tuple[str, bool]:
         if "two_pin_across_any" in rule:
             if not any(_two_pin_across(comp, a, b) for a, b in rule["two_pin_across_any"]):
                 continue
+        _set_conf(comp, cfg, "pin_behaviour_rule", 0.8,
+                  f"pin_rule:{rule['role']}")
         return (rule["role"], False)
+    _set_conf(comp, cfg, "fallback_passive", 0.3, "fallback:no signature matched")
     return ("passive", False)
 
 
@@ -392,6 +431,28 @@ def analyze(path: Path) -> Dict[str, Any]:
                 and not protected.get(c.ref)
                 and not (c.characters & ctrl_sig)):
             c.role = "peripheral_ic"
+            cc = _conf_cfg(cfg)
+            if cc.get("enabled", True):
+                c.confidence = round(float(cc.get("controller_demoted", 0.5)), 3)
+            c.role_reason = (["demoted: non-anchor controller lacking a "
+                              "controller signature"] + c.role_reason)
+    # Confidence feedback loop: fold in the learned per-lib_id bias so a part
+    # whose role has repeatedly caused ROUTING conflicts on past boards reads less
+    # certain now (adaptive reasoning). Gated + empty-store-safe -> byte-stable
+    # until the loop has actually learned something. Never blocks analysis.
+    try:
+        from ..intent import confidence_feedback as _cf
+        if _cf.is_enabled():
+            _floor = float((_cf.load_cfg().get("attribution", {}) or {}).get("floor", 0.1))
+            _cap = float((cfg.get("role_confidence", {}) or {}).get("max_confidence", 0.99))
+            for c in comp_list:
+                b = _cf.learned_bias(c.lib_id)
+                if b:
+                    c.confidence = round(min(_cap, max(_floor, c.confidence + b)), 3)
+                    c.role_reason.append(f"learned bias {b:+.2f} (prior routing conflicts)")
+    except Exception:                                       # noqa: BLE001
+        pass
+
     # constraints per role
     role_constraints = cfg.get("constraints", {})
     merge_chars = set(cfg.get("constraint_merge_chars", []))
@@ -410,25 +471,46 @@ def analyze(path: Path) -> Dict[str, Any]:
 
     domains = _emergent_domains(comp_list, cfg)
 
+    cc = _conf_cfg(cfg)
+    emit_conf = bool(cc.get("enabled", True))
+    low_thresh = float(cc.get("low_confidence_threshold", 0.5))
+
+    def _comp_entry(c: Comp) -> Dict[str, Any]:
+        e = {
+            "ref": c.ref,
+            "role": c.role,
+            "characters": sorted(c.characters),
+            "pins": len(c.pins),
+            "nets": sorted(set(c.nets)),
+            "score": round(c.score, 1),
+            "constraints": c.constraints,
+        }
+        # Additive + gated: only emit the confidence fields when the block is on,
+        # so an existing project's sidecar stays byte-identical with it off.
+        if emit_conf:
+            e["confidence"] = c.confidence
+            e["role_reason"] = c.role_reason
+            e["lib_id"] = c.lib_id   # stable key the feedback loop persists by
+        return e
+
     report = {
         "ok": True,
         "source": source,
         "anchor": anchor.ref,
         "emergent_domains": domains,
         "recommended_layers": _recommend_layers(comp_list, domains, cfg),
-        "components": [
-            {
-                "ref": c.ref,
-                "role": c.role,
-                "characters": sorted(c.characters),
-                "pins": len(c.pins),
-                "nets": sorted(set(c.nets)),
-                "score": round(c.score, 1),
-                "constraints": c.constraints,
-            }
-            for c in sorted(comp_list, key=lambda c: -c.score)
-        ],
+        "components": [_comp_entry(c)
+                       for c in sorted(comp_list, key=lambda c: -c.score)],
     }
+    # Surface the parts the engine is unsure about so a placer/router (or the
+    # user) can treat their role as a guess rather than fact.
+    if emit_conf:
+        report["low_confidence"] = [
+            {"ref": c.ref, "role": c.role, "confidence": c.confidence,
+             "reason": c.role_reason}
+            for c in sorted(comp_list, key=lambda c: c.confidence)
+            if c.confidence < low_thresh
+        ]
     return report
 
 
@@ -453,15 +535,23 @@ def _print_report(report: Dict[str, Any]) -> None:
         return
     print(f"source={report['source']}  anchor={report['anchor']}  "
           f"domains={', '.join(report['emergent_domains']) or '-'}")
-    print(f"{'REF':<6}{'ROLE':<14}{'SCORE':>6}  CHARACTERS / CONSTRAINTS")
+    print(f"{'REF':<6}{'ROLE':<14}{'SCORE':>6}{'CONF':>6}  CHARACTERS / CONSTRAINTS")
     for c in report["components"]:
         cons = ", ".join(f"{k}={v}" for k, v in c["constraints"].items()
                          if k not in ("is_anchor",))
         anchor = "  <-- ANCHOR" if c["constraints"].get("is_anchor") else ""
-        print(f"{c['ref']:<6}{c['role']:<14}{c['score']:>6.0f}  "
+        conf = c.get("confidence")
+        conf_s = f"{conf:>6.2f}" if isinstance(conf, (int, float)) else " " * 6
+        print(f"{c['ref']:<6}{c['role']:<14}{c['score']:>6.0f}{conf_s}  "
               f"[{', '.join(c['characters'])}]{anchor}")
         if cons:
             print(f"        {cons}")
+    low = report.get("low_confidence") or []
+    if low:
+        print(f"\nLOW CONFIDENCE ({len(low)}) — role is a guess, verify before trusting:")
+        for c in low:
+            print(f"  {c['ref']:<6}{c['role']:<14}conf={c['confidence']:.2f}  "
+                  f"({'; '.join(c['reason'])})")
 
 
 def main(argv: List[str]) -> int:

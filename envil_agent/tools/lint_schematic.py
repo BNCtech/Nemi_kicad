@@ -40,22 +40,37 @@ _CHECKLIST = {
 _SEV_ORDER = {"error": 0, "warning": 1, "info": 2}
 
 
-def _rule_checklist_map() -> Dict[str, int]:
-    """rule-id -> checklist item, read from config (no hardcoding)."""
+def _rule_checklist_map() -> Dict[str, List[int]]:
+    """rule-id -> [checklist items], read from config (no hardcoding).
+
+    A rule may cover MORE than one checklist item (e.g. WIRE_DANGLING is
+    both "floating wires" #2 and "open wire ends" #10; PIN_UNCONNECTED is
+    both "pin-to-wire" #1 and "unused pins NC" #7). Config carries the
+    scalar `checklist_item` (primary, used for the `[#N]` tag) plus an
+    optional `checklist_items` list for the extras; both are unioned here.
+    """
     cfg_path = (Path(__file__).resolve().parent.parent
                 / "config" / "lint_rules.json")
-    out: Dict[str, int] = {}
+    out: Dict[str, List[int]] = {}
     try:
         cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return out
     for r in cfg.get("rules") or []:
+        items: List[int] = []
         ci = r.get("checklist_item")
         if isinstance(ci, int):
-            out[str(r.get("id"))] = ci
-    # R2 covers checklist #3 but predates the checklist_item field; map it.
-    out.setdefault("R2", 3)
-    out.setdefault("R11", 8)
+            items.append(ci)
+        for x in (r.get("checklist_items") or []):
+            if isinstance(x, int) and x not in items:
+                items.append(x)
+        if items:
+            out[str(r.get("id"))] = items
+    # R2 (#3 wire-through-symbol) and R11 (#6 net-label-on-wire) predate the
+    # checklist_item field, so map them here. R11 is a label sitting ON a wire
+    # (#6), NOT a wire over component text (#8) --- that is R11_TEXT.
+    out.setdefault("R2", [3])
+    out.setdefault("R11", [6])
     return out
 
 
@@ -145,7 +160,7 @@ async def lint_schematic(args: dict[str, Any]) -> dict[str, Any]:
             for it in group[:25]:
                 rid = it.get("id", "?")
                 ci = ci_map.get(rid)
-                tag = f"[#{ci}] " if ci else ""
+                tag = f"[#{ci[0]}] " if ci else ""
                 lines.append(f"    - {tag}{rid}: {it.get('message', '')}")
                 hint = it.get("fix_hint")
                 if hint:
@@ -157,9 +172,8 @@ async def lint_schematic(args: dict[str, Any]) -> dict[str, Any]:
     # Per-checklist roll-up so the user sees the image's 10 items directly.
     hit = defaultdict(int)
     for it in issues:
-        ci = ci_map.get(it.get("id", ""))
-        if ci:
-            hit[ci] += 1
+        for n in ci_map.get(it.get("id", ""), []):
+            hit[n] += 1
     lines.append("  Checklist:")
     for n in sorted(_CHECKLIST):
         status = f"✗ {hit[n]}" if hit.get(n) else "✓"

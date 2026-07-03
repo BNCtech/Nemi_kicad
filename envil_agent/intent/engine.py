@@ -253,12 +253,37 @@ def _resolve_default_footprint(lib_id: str,
       5. Empty string (caller handles)
 
     No hardcoding in code per `feedback_no_hardcode_json_config`: edit
-    the JSON file to extend, never this function."""
+    the JSON file to extend, never this function.
+
+    Thin wrapper over `_resolve_default_footprint_traced` — behaviour is
+    byte-identical; it just drops the provenance tag the tracer also
+    returns."""
+    return _resolve_default_footprint_traced(lib_id, geom)[0]
+
+
+def _resolve_default_footprint_traced(lib_id: str,
+                                       geom: Optional[Any] = None
+                                       ) -> Tuple[str, str]:
+    """Same resolution as `_resolve_default_footprint`, but ALSO reports
+    *which* lookup step produced the footprint — the provenance. The
+    footprint_audit tool needs this to tell a deliberate per-part mapping
+    apart from a family/symbol GUESS, per the rule "every part must carry
+    an explicit package identifier; never infer it from the symbol alone."
+
+    Returns ``(footprint, source)`` where ``source`` is one of:
+      ``"by_lib_id"``      exact lib_id hit in footprint_defaults.json
+      ``"alias_lib_id"``   hit after alias-resolving the lib_id
+      ``"by_prefix"``      longest-prefix family default  (a guess)
+      ``"symbol_default"`` the lib_symbol's own Footprint field (a guess)
+      ``""``               nothing matched — footprint is empty
+
+    The returned footprint string is exactly what `_resolve_default_footprint`
+    returns (that function delegates here), so this is non-breaking."""
     cfg = _load_footprint_defaults()
     by_lib = cfg.get("by_lib_id", {}) or {}
     fp = by_lib.get(lib_id)
     if fp is not None:
-        return str(fp)
+        return str(fp), "by_lib_id"
 
     # Alias-resolved lookup: aliases.json maps Timer:NE555 -> Timer:NE555P;
     # the user's footprint map may key on the resolved name only.
@@ -268,7 +293,7 @@ def _resolve_default_footprint(lib_id: str,
         if resolved and resolved != lib_id:
             fp = by_lib.get(resolved)
             if fp is not None:
-                return str(fp)
+                return str(fp), "alias_lib_id"
     except Exception:
         pass
 
@@ -282,7 +307,7 @@ def _resolve_default_footprint(lib_id: str,
             best_match = str(value)
             best_len = len(prefix)
     if best_len > 0:
-        return best_match
+        return best_match, "by_prefix"
 
     # Fall back to the symbol's own default Footprint property in the
     # lib_symbol — KiCad's stdlib ships sensible defaults for most
@@ -295,10 +320,10 @@ def _resolve_default_footprint(lib_id: str,
                         and str(child[1]) == "Footprint"):
                     val = str(child[2])
                     if val:
-                        return val
+                        return val, "symbol_default"
         except Exception:
             pass
-    return ""
+    return "", ""
 
 
 def _resolve_part_metadata(lib_id: str, value: str,

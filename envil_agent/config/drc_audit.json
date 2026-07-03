@@ -1,0 +1,40 @@
+{
+  "_comment": "Config for drc_audit — the deterministic gate for step 9 (DRC). Read-only: COMPOSES the existing drc_check tool (headless kicad-cli DRC against the board's own .kicad_pro rules) and turns its result into a hard pass/fail per the master-flow step-9 rules: errors=0, unconnected=0, shorts=0, silk not on pads. drc_check already runs DRC against the SAME rule set board_setup_audit validates, so there's one authoritative constraint source. Cached; RESTART backend after edits. Verdict in words.",
+  "_rule_source": "Master flow step 9 (DRC) + drc_check + pcb_verify silk-on-pad.",
+
+  "enabled": true,
+
+  "rules": {
+    "drc_errors": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rule 1 — DRC errors = 0 (hard gate): clearance, track width, hole spacing, overlapping copper. Any error-severity violation blocks."
+    },
+    "unconnected": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rule 2 — unconnected items = 0. A ratsnest line left at DRC time is a hard block (routing incomplete)."
+    },
+    "shorts": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rule 3 — shorts = 0. Any violation whose type/description names a short is a hard block."
+    },
+    "silk_on_pad": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rule 4 — silkscreen not on pads / not clipped. Reuses pcb_verify's structural silk-over-pad check."
+    }
+  },
+
+  "unconnected_types": ["unconnected_item", "unconnected"],
+  "short_keywords": ["short", "shorting", "shorted"],
+
+  "verdict": {
+    "clean": "DRC VERIFIED — 0 errors, 0 unconnected, 0 shorts ({w} warning(s))",
+    "issues": "DRC NOT CLEAN — {e} error(s), {u} unconnected, {s} short(s), {w} warning(s)",
+    "unavailable": "DRC UNAVAILABLE — kicad-cli DRC could not run (KiCad/board issue, not a design fail)"
+  },
+
+  "max_examples_per_rule": 15
+}

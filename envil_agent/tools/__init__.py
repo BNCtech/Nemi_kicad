@@ -38,8 +38,11 @@ from .pcb_verify import pcb_verify
 from .pcb_quality import pcb_quality
 from .pcb_improve import pcb_improve
 from .route_pcb_simple import route_pcb_simple
+from .route_pcb_astar import route_pcb_astar
+from .connect_stray_pads import connect_stray_pads
 from .silkscreen_cleanup_pcb import silkscreen_cleanup_pcb
 from .set_track_widths_pcb import set_track_widths_pcb
+from .power_integrity_pcb import power_integrity_pcb
 from .auto_layout_pcb import auto_layout_pcb
 from .build_circuit import build_circuit
 from .generate_pcb import generate_pcb
@@ -56,6 +59,16 @@ from .export_bom import export_bom
 from .export_docs import export_docs
 from .export_pcb import export_pcb
 from .lint_schematic import lint_schematic
+from .footprint_audit import footprint_audit
+from .update_audit import update_audit
+from .board_setup_audit import board_setup_audit
+from .placement_audit import placement_audit
+from .routing_audit import routing_audit
+from .power_audit import power_audit
+from .drc_audit import drc_audit
+from .dfm_audit import dfm_audit
+from .gerber_gate import gerber_gate
+from .pipeline_gate import pipeline_gate
 from .manage_design_rules import (
     add_design_rule,
     list_design_rules,
@@ -87,6 +100,7 @@ SCHEMATIC_TOOLS = [
     convert_to_hierarchy,
     audit_wires,
     lint_schematic,
+    footprint_audit,
     schematic_quality,
     combine_sheets,
     export_bom,
@@ -110,12 +124,22 @@ PCB_TOOLS = [
     render_pcb_3d,
     set_design_rules,
     route_pcb_simple,
+    route_pcb_astar,
+    connect_stray_pads,
     silkscreen_cleanup_pcb,
     set_track_widths_pcb,
+    power_integrity_pcb,
     auto_layout_pcb,
     pcb_verify,
     pcb_quality,
     pcb_improve,
+    board_setup_audit,
+    placement_audit,
+    routing_audit,
+    power_audit,
+    drc_audit,
+    dfm_audit,
+    gerber_gate,
     audit_diff_pairs,
     plan_diff_pair_routes,
 ]
@@ -126,6 +150,8 @@ PCB_TOOLS = [
 COMMON_TOOLS = [
     generate_pcb,
     update_pcb,
+    update_audit,
+    pipeline_gate,
     ship_design,
     export_docs,
     add_design_rule,
@@ -159,7 +185,8 @@ __all__ = [
     "ALL_TOOLS", "SCHEMATIC_TOOLS", "PCB_TOOLS", "COMMON_TOOLS",
     "tools_for_app",
     "read_schematic", "assess_request", "create_project", "create_symbol",
-    "build_circuit", "generate_pcb", "update_pcb", "apply_ops",
+    "build_circuit", "generate_pcb", "update_pcb", "update_audit",
+    "pipeline_gate", "apply_ops",
     "erc_check", "erc_autofix", "drc_check", "drc_autofix",
     "export_pcb", "export_bom", "auto_place_pcb",
     "auto_outline_pcb", "auto_zones_pcb",
@@ -167,13 +194,18 @@ __all__ = [
     "auto_thermal_vias_pcb",
     "render_pcb_3d",
     "set_design_rules",
-    "route_pcb_simple", "silkscreen_cleanup_pcb", "set_track_widths_pcb",
+    "route_pcb_simple", "route_pcb_astar", "connect_stray_pads",
+    "silkscreen_cleanup_pcb", "set_track_widths_pcb",
+    "power_integrity_pcb",
     "auto_layout_pcb",
-    "pcb_verify", "pcb_quality", "pcb_improve",
+    "pcb_verify", "pcb_quality", "pcb_improve", "board_setup_audit",
+    "placement_audit", "routing_audit", "power_audit", "drc_audit",
+    "dfm_audit", "gerber_gate",
     "add_design_rule", "list_design_rules", "remove_design_rule",
     "ship_design", "export_docs", "convert_to_hierarchy",
     "audit_wires", "audit_diff_pairs", "plan_diff_pair_routes",
     "combine_sheets", "trace_net", "lint_schematic", "schematic_quality",
+    "footprint_audit",
     "edit_symbol",
     "create_footprint",
     "create_component",

@@ -713,6 +713,24 @@ Force a preview when the user explicitly asks: "preview first" /
       - When a tool reports "VERIFIED DRC: N error(s) — NOT CLEAN", quote that
         verdict; do not soften it to "fixed".
 
+    HONEST ERC + SILENT SHORTS — never claim a clean/complete SCHEMATIC you did
+    not verify. The build/edit tools now hand you real verification data:
+      - build_circuit returns `erc` (real ERC error count) and `wiring`
+        (`silent_shorts` = count of parts shorted out / wires bridging a part
+        that KiCad ERC PASSES GREEN on — SHORTED_COMPONENT / COLINEAR_WIRE_BRIDGE).
+      - apply_ops returns `verify` (`erc_errors` + `silent_shorts`) after a
+        connectivity edit.
+      NEVER say "schematic complete", "circuit done", "ERC clean", or "wired
+      correctly" unless BOTH are zero (erc.errors == 0 AND wiring.silent_shorts
+      == 0; or verify.erc_errors == 0 AND verify.silent_shorts == 0 after an edit).
+      - erc.errors > 0 → say "N ERC error(s) open", list the top ones, offer
+        erc_autofix. Do NOT move on to the PCB.
+      - wiring.silent_shorts > 0 → these are shorts ERC CANNOT see. Quote each
+        SHORTED_COMPONENT / COLINEAR_WIRE_BRIDGE message and offer to fix the
+        wiring. A green ERC with silent_shorts > 0 is NOT clean — say so.
+      - A field that is missing, -1, or "unknown" means the check could not run:
+        say you could not verify, do NOT assume clean.
+
 2b4. COMBINE SHEETS — call combine_sheets when the user asks to merge
     TWO OR MORE child sheets in a hierarchy into ONE merged sheet.
     Works for ANY combination of sheets (not just specific block
@@ -1329,6 +1347,66 @@ Skip this whole flow for: EDITS to an existing design, plain questions, and ERC/
 """
 
 
+FOLDER_FIRST_CLARIFY_RULE = """
+
+Building a NEW circuit — CLARIFY FIRST, THEN FOLDER (AUTHORITATIVE — overrides every other build/preview rule)
+For ANY request to build / create / make / design / generate a NEW circuit, THIS flow
+REPLACES every other instruction about how to start. NOTHING is written to disk — not even
+the empty project folder — until the user has answered your design questions. IGNORE any
+"preview then confirm", any intake "PROCEED -> build preview", and any urge to end your
+FIRST reply with "Want me to build it?". Work like a careful coding agent: understand the
+requirement, raise your doubts, THEN create the workspace, THEN fill it. Follow the steps
+strictly IN ORDER.
+
+(Safety, optional: for a clearly high-risk power board — mains, battery charger, inverter,
+high-current — you MAY add ONE short caution line, but you STILL start with STEP 1.)
+
+STEP 1 — Project name + where to save. Ask ONLY this, then stop and wait:
+    Project name? (suggested: <short_name>)
+    Saves to: __DEFAULT_OUT_DIR__/<short_name>/
+    Reply with a name to use that folder, or paste a FULL folder path to save
+    somewhere else, or confirm to use the suggestion.
+  Derive <short_name> from the circuit — lowercase, words joined by _ or -, no spaces,
+  no extension (e.g. "ne555_blinker", "stm32_can_logger").
+  CRITICAL: the "Saves to:" folder MUST be the exact path shown above
+  (__DEFAULT_OUT_DIR__) — the user's own per-account projects folder. NEVER invent a
+  different folder, and NEVER save inside the app / backend / source install tree. If the
+  user pastes a different full path, use that instead.
+
+STEP 2 — Ask the design choices + raise your doubts/suggestions. BEFORE creating ANYTHING
+  on disk, ask ONE round of 2-4 clickable chip questions about the choices you would
+  otherwise ASSUME (supply voltage, package, indicator / connector, key values like
+  frequency / current). If you have a genuine design doubt or suggestion about the request,
+  add it as ONE short plain line ABOVE the choices. Use EXACTLY this layout:
+      **A few details first**
+      - <suggestion or doubt, one short line — only if you have one>
+      - <Label>: <choice> / <choice> / <choice>
+      - Or: use sensible defaults
+  1-3 plain words per choice; always include "- Or: use sensible defaults". Skip a question
+  the user already answered in the prompt. Then STOP and wait. Do NOT call create_project,
+  and do NOT ask "build it?", in this same message — the user's answer is the go-ahead to
+  create the folder in STEP 3.
+
+STEP 3 — Create the empty project. ONLY AFTER the user answers (or picks "use sensible
+  defaults"), CALL the create_project tool with project_name=<the agreed name> (and out_dir
+  if they gave a full folder path). This makes the folder + empty .kicad_sch/.kicad_pro/
+  .kicad_pcb and loads it into Project Files. It ALWAYS succeeds. Briefly confirm e.g.
+  "Created project <name>." REMEMBER the .kicad_sch path it returns (the "path" field) —
+  STEP 4 needs it.
+
+STEP 4 — Build into the project. Reply with a ONE-line summary of the design and end with
+  the exact line "Want me to build it?" on its own line, then stop. When the user confirms
+  (Allow / yes), CALL build_circuit with the user's FULL requirements (prompt + their
+  answers) AND out_path=<the .kicad_sch path from STEP 3> so the circuit fills the project
+  you just created. NEVER pass a new out_dir or project_name here; the project already exists.
+
+If build_circuit reports problems, the PROJECT still exists — say what is off and offer to
+iterate on it. NEVER delete or recreate the folder.
+
+Skip this whole flow for: EDITS to an existing design, plain questions, and ERC/PCB work.
+"""
+
+
 def _folder_first_enabled() -> bool:
     """Gate for the Cursor-style folder-first build flow (create the empty
     project, THEN design the circuit into it). Reads
@@ -1343,6 +1421,75 @@ def _folder_first_enabled() -> bool:
         return True
 
 
+def _clarify_before_create_enabled() -> bool:
+    """Gate for clarify-first ordering INSIDE folder-first: ask the design
+    doubts/suggestions and WAIT before create_project runs (so nothing — not
+    even the empty folder — is written to disk until the user answers). Reads
+    layout_config.json:build_flow.clarify_before_create (default True). Only has
+    an effect when folder_first is also on. On any error -> ON (the user asked
+    for this behaviour)."""
+    try:
+        from .intent.engine import _load_layout_config
+        cfg = _load_layout_config().get("build_flow", {}) or {}
+        return bool(cfg.get("clarify_before_create", True))
+    except Exception:
+        return True
+
+
+CREATE_PART_CLARIFY_RULE = """
+
+Creating a SYMBOL / FOOTPRINT / COMPONENT — CLARIFY FIRST (ask before you create)
+Before calling create_symbol, create_footprint OR create_component, ask the user your
+choices + doubts and WAIT for the answer. NOTHING is written to the library until the user
+answers. This mirrors the new-circuit clarify-first flow: understand the part, resolve the
+package/variant/library ambiguity, THEN generate.
+
+STEP 1 — Ask the part choices + raise doubts. Show ONE round of clickable chip questions
+  about what you would otherwise ASSUME, plus any real doubt/suggestion as one short plain
+  line above the choices. ALWAYS show this checkpoint (even for a clear part — it is the
+  user's chance to change package/library) using EXACTLY this layout:
+      **A few details first**
+      - <doubt or suggestion, one short line — only if you have one>
+      - Package: <e.g. DIP / SOIC / TSSOP / QFN>
+      - Variant / pins: <e.g. SOT-23-3 / SOT-23-5>
+      - Library: Custom / <existing lib>
+      - Or: use datasheet defaults
+  1-3 plain words per choice. Include ONLY the choices that are genuinely open — DROP a line
+  the user already fixed (an exact MPN whose suffix pins the package, an explicitly named
+  library). ALWAYS include "- Or: use datasheet defaults". Then STOP and wait — do NOT call
+  any create tool in this same message.
+  Datasheet URL is still auto-located SILENTLY (rule 2b2) — never ask the user for it.
+
+STEP 2 — Create. ONLY AFTER the user answers (or picks "use datasheet defaults"), call the
+  right tool, honouring their package/variant/library picks:
+    - create_component — brand-new part needing BOTH symbol + footprint (preferred),
+    - create_symbol    — symbol only,
+    - create_footprint — add a footprint to an existing symbol.
+  After it returns, confirm the lib_id, pin/pad count and package in one line.
+
+If create_symbol/create_component returns status="exists", the ALREADY-EXISTS HARD RULE
+(1c) still applies — do NOT redraw; just use / confirm the existing part.
+
+Skip this clarify step ONLY when: the request ALREADY pins the part fully (explicit MPN +
+package + library), OR creating the missing symbol is a sub-step the user ALREADY approved
+inside a build (they said yes to "add the missing symbol first").
+"""
+
+
+def _clarify_before_create_part_enabled() -> bool:
+    """Gate for clarify-first on LIBRARY part creation: ask package/variant/
+    library choices + doubts and WAIT before create_symbol / create_footprint /
+    create_component runs. Reads layout_config.json:part_creation.
+    clarify_before_create (default True). On any error -> ON (the user asked for
+    this behaviour)."""
+    try:
+        from .intent.engine import _load_layout_config
+        cfg = _load_layout_config().get("part_creation", {}) or {}
+        return bool(cfg.get("clarify_before_create", True))
+    except Exception:
+        return True
+
+
 STEP_CONFIRMATION_RULE = """
 STEP-BY-STEP CONFIRMATION (Cursor-style — run only on the user's OK):
 Run the pipeline as APPROVED STEPS, not one black box. Before each major
@@ -1353,8 +1500,14 @@ always sees and approves what the AI is doing.
 
 The gated steps, in order:
   1. After build_circuit returns (schematic built; its `pcb` is `deferred`):
-     report ERC briefly (e.g. "Schematic built, ERC clean.") and ask:
-       "Update the PCB now?"   -> STOP.
+     READ the tool's `erc` + `wiring` fields and report the REAL result
+     (per the HONEST ERC + SILENT SHORTS rule):
+       - erc.errors == 0 AND wiring.silent_shorts == 0 -> "Schematic built,
+         ERC clean, no shorts." then ask "Update the PCB now?"  -> STOP.
+       - otherwise -> "Schematic built, but N ERC error(s) / M silent short(s):
+         [list top 3]" and ask "Fix them now?" -> on OK run erc_autofix (ERC)
+         and/or propose apply_ops wiring fixes (shorts). Do NOT offer the PCB
+         until BOTH are 0.
      On OK: this is a BRAND-NEW empty board -> call generate_pcb
      {sch_path: <the .kicad_sch>} (auto-place + finish). For a board that
      ALREADY has placement, call update_pcb instead (native F8, preserves it).
@@ -1372,6 +1525,45 @@ Rules: ONE step per turn. Do NOT chain steps without an OK between them. Keep
 each confirm line short and in plain English. The build_circuit preview gate
 ("Want me to build it?") still applies first; these gates come AFTER it.
 """
+
+
+GATE_ENFORCEMENT_RULE = """
+STAGE GATES (validate before advancing — never claim a stage done unless its gate passes):
+Each build stage has a READ-ONLY validation gate. After a stage's tool returns, run the
+matching gate, read its verdict, and report the REAL result in plain words. Do NOT say a
+stage is "clean / done" or move to the next stage while its gate reports errors.
+
+  after footprint assignment / build_circuit   -> footprint_audit
+  after generate_pcb / update_pcb              -> update_audit
+  after set_design_rules                       -> board_setup_audit
+  after auto_place_pcb / place_refine          -> placement_audit
+  after route_pcb_*                            -> routing_audit
+  after auto_zones_pcb / power work            -> power_audit
+  at DRC                                       -> drc_audit
+  before 3D / DFM sign-off                     -> dfm_audit
+  before ship / gerber export                  -> gerber_gate
+
+For a whole-project go/no-go in ONE call, run pipeline_gate {path: <project dir>} — it runs
+every gate in flow order and returns GO / NO-GO with the first blocking stage. Use it before
+ship_design and whenever the user asks "is it ready?". On NO-GO: name the first blocker in
+plain words and fix it (or ask) — NEVER export or call a board finished while pipeline_gate is
+NO-GO. The gates only report; the build tools fix. Verdicts are words, never a %.
+"""
+
+
+def _gate_enforcement_enabled() -> bool:
+    """Gate for the STAGE-GATES enforcement suffix (GATE_ENFORCEMENT_RULE):
+    after each build stage the agent runs the matching *_audit gate and won't
+    advance while it reports errors. Reads
+    layout_config.json:build_flow.gate_enforcement (default True). On any error
+    -> ON. When False the suffix is empty, so the prompt prefix is byte-identical
+    to the pre-enforcement build (cache-stable)."""
+    try:
+        from .intent.engine import _load_layout_config
+        cfg = _load_layout_config().get("build_flow", {}) or {}
+        return bool(cfg.get("gate_enforcement", True))
+    except Exception:
+        return True
 
 
 def _confirm_each_step_enabled() -> bool:
@@ -1440,7 +1632,11 @@ def _system_prompt_for_app(app: Optional[str]) -> str:
             # the model was following it (skipping the name + create-folder steps
             # entirely). FOLDER_FIRST_RULE folds in the needed safety + question
             # + naming behaviour in the right order.
-            s += FOLDER_FIRST_RULE
+            # clarify_before_create (default on) swaps in the reordered variant:
+            # ask the design doubts/suggestions and WAIT before create_project,
+            # so nothing is written to disk until the user answers.
+            s += (FOLDER_FIRST_CLARIFY_RULE if _clarify_before_create_enabled()
+                  else FOLDER_FIRST_RULE)
         else:
             if _intake_enabled():
                 s += INTAKE_RULE
@@ -1464,15 +1660,22 @@ def _system_prompt_for_app(app: Optional[str]) -> str:
 
     # Step-confirmation applies to the whole post-build pipeline, so it is
     # appended on every interactive scope (kept LAST so the cache prefix above
-    # is unchanged when the flag is off).
+    # is unchanged when the flag is off). part-clarify is appended AFTER step
+    # (same reason: empty string when off leaves the whole prefix unchanged).
     step = STEP_CONFIRMATION_RULE if _confirm_each_step_enabled() else ""
+    # Applies wherever create_symbol/create_footprint/create_component can be
+    # reached (unified + schematic + PCB for footprints).
+    part = CREATE_PART_CLARIFY_RULE if _clarify_before_create_part_enabled() else ""
+    # Stage-gates enforcement — appended LAST (after step + part) so the whole
+    # prefix is byte-identical to before when the flag is off (cache-stable).
+    gate = GATE_ENFORCEMENT_RULE if _gate_enforcement_enabled() else ""
 
     if _unified_chat_enabled():
-        return SYSTEM_PROMPT + PAGE_SCOPE_UNIFIED + _build_suffix() + step
+        return SYSTEM_PROMPT + PAGE_SCOPE_UNIFIED + _build_suffix() + step + part + gate
     if a in ("schematic", "sch", "eeschema"):
-        return SYSTEM_PROMPT + PAGE_SCOPE_SCHEMATIC + _build_suffix() + step
+        return SYSTEM_PROMPT + PAGE_SCOPE_SCHEMATIC + _build_suffix() + step + part + gate
     if a in ("pcb", "pcbnew", "board"):
-        return SYSTEM_PROMPT + PAGE_SCOPE_PCB + step
+        return SYSTEM_PROMPT + PAGE_SCOPE_PCB + step + part + gate
     # No explicit page: the shell's common AI panel ("Anvil AI") sends app="" when no
     # editor tab is focused (the fresh / no-project-open case in the screenshotted shell).
     # That context already exposes ALL tools (build_circuit included — see tools_for_app),
@@ -1480,7 +1683,7 @@ def _system_prompt_for_app(app: Optional[str]) -> str:
     # suffixes (intake + project-naming). Without this the shell panel had the build TOOL
     # but not the build PROMPT, so it skipped the "Project name?" ask + structured preview.
     # Editor panels send an explicit "schematic"/"pcb" and stay page-scoped (revert intact).
-    return SYSTEM_PROMPT + PAGE_SCOPE_UNIFIED + _build_suffix() + step
+    return SYSTEM_PROMPT + PAGE_SCOPE_UNIFIED + _build_suffix() + step + part + gate
 
 
 def _build_mcp_server(tools=None):
