@@ -149,10 +149,22 @@ def kicad_cli() -> str:
     found = shutil.which("kicad-cli")
     if found:
         return found
-    for ver in ("9.0", "8.0", "7.0"):
+    for ver in ("10.0", "9.0", "8.0", "7.0"):
         cand = Path(f"C:/Program Files/KiCad/{ver}/bin/kicad-cli.exe")
         if cand.exists():
             return str(cand)
+    # Per-user, no-admin installs (envil_user.nsi — the VS Code/Chrome
+    # convention) land under %LocalAppData%\Programs\<any name>\bin, never
+    # under Program Files. Glob by shape, not by a fixed app name, so any
+    # such install (Envil CAD or stock KiCad) is found without an edit here.
+    local = os.environ.get("LocalAppData", "").strip()
+    if local:
+        try:
+            for cand in Path(local).glob("Programs/*/bin/kicad-cli.exe"):
+                if cand.is_file():
+                    return str(cand)
+        except OSError:
+            pass
     return "kicad-cli"
 
 

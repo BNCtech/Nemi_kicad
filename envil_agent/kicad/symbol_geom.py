@@ -45,21 +45,29 @@ def _kicad_user_sym_dirs() -> list:
 
 
 def _program_files_sym_dirs() -> list:
-    """Any installed app's bundled symbols under Program Files, e.g.
-    ``KiCad/9.0/share/kicad/symbols`` or the Envil fork's own
-    ``Envil CAD/share/kicad/symbols`` — globbed by shape, not by product name
-    or version, so this works for any install on any machine without edits."""
+    """Any installed app's bundled symbols, e.g. ``KiCad/9.0/share/kicad/symbols``
+    or the Envil fork's own ``Envil CAD/share/kicad/symbols`` — globbed by
+    shape, not by product name or version, so this works for any install on
+    any machine without edits.
+
+    Checks BOTH install styles Envil ships (see _installer_build/*.nsi):
+      - machine-wide, admin install -> %ProgramFiles% (envil.nsi/envil_pro.nsi)
+      - per-user, no-admin install  -> %LocalAppData%\\Programs
+        (envil_user.nsi — the VS Code/Chrome/Cursor convention; this is what
+        an installer run without admin rights actually produces, and it has
+        no reason to ever appear under Program Files)."""
     roots = []
-    for var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "LocalAppData"):
         base = os.environ.get(var, "").strip()
         if not base:
             continue
-        try:
-            roots.extend(
-                str(p) for p in Path(base).glob("*/share/kicad/symbols") if p.is_dir()
-            )
-        except OSError:
-            continue
+        for pattern in ("*/share/kicad/symbols", "Programs/*/share/kicad/symbols"):
+            try:
+                roots.extend(
+                    str(p) for p in Path(base).glob(pattern) if p.is_dir()
+                )
+            except OSError:
+                continue
     return roots
 
 
