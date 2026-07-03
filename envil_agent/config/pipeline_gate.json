@@ -1,0 +1,29 @@
+{
+  "_comment": "Config for pipeline_gate — the capstone that runs every PCB-flow validation gate in flow order and returns ONE go/no-go with the first blocking stage. This is the 'each stage ends in a hard pass/fail before the flow advances' spine from the master flow. Read-only: it only calls the individual read-only gates. Each gate resolves its own artifact (.kicad_sch / .kicad_pro / .kicad_pcb) from the project, so a schematic-only project passes steps 3-4 then reports the rest 'not applicable yet'. Cached; RESTART backend after edits. Verdict in words.",
+  "_rule_source": "Master flow: data/config -> AI decides -> deterministic validation -> pass/fail gate -> next stage.",
+
+  "enabled": true,
+
+  "mode": "report",
+  "_mode_note": "'report' runs every gate and shows the full picture (first blocker highlighted). 'gate' stops at the first FAIL (strict advance-only-on-pass).",
+
+  "stages": [
+    { "step": 3, "gate": "footprint_audit",  "enabled": true },
+    { "step": 4, "gate": "update_audit",     "enabled": true },
+    { "step": 5, "gate": "board_setup_audit","enabled": true },
+    { "step": 6, "gate": "placement_audit",  "enabled": true },
+    { "step": 7, "gate": "routing_audit",    "enabled": true },
+    { "step": 8, "gate": "power_audit",      "enabled": true },
+    { "step": 9, "gate": "drc_audit",        "enabled": true },
+    { "step": 10, "gate": "dfm_audit",       "enabled": true },
+    { "step": 11, "gate": "gerber_gate",     "enabled": true }
+  ],
+
+  "verdict": {
+    "go": "GO — all {passed} gate(s) pass",
+    "nogo": "NO-GO — blocked at step {step} {gate}: {detail}",
+    "partial": "NOT READY — {passed} gate(s) pass, {na} not applicable yet (artifact not built)"
+  },
+
+  "max_stages": 30
+}

@@ -3,6 +3,19 @@
   "version": 1,
   "enabled": true,
 
+  "_role_confidence_doc": "How SURE the engine is about each role, so a placer/router (or the user) can treat a low-confidence role as a guess rather than fact. Base value by decision path: a device CLASS read from lib_id is near-certain (lib_class_hint); a pin-behaviour rule match is strong but weaker (pin_behaviour_rule); a fallback to 'passive' with no signature is a guess (fallback_passive). A non-anchor controller demoted to peripheral_ic drops to controller_demoted. corroboration_per_char adds a small bonus per agreeing electrical character (capped at corroboration_max_bonus, overall clamped to max_confidence) so a role backed by several signals reads as more certain. Components with confidence < low_confidence_threshold are listed under report.low_confidence. enabled=false omits all confidence fields -> the sidecar stays byte-identical to the pre-feature output.",
+  "role_confidence": {
+    "enabled": true,
+    "lib_class_hint": 0.95,
+    "pin_behaviour_rule": 0.8,
+    "fallback_passive": 0.3,
+    "controller_demoted": 0.5,
+    "corroboration_per_char": 0.03,
+    "corroboration_max_bonus": 0.12,
+    "max_confidence": 0.99,
+    "low_confidence_threshold": 0.5
+  },
+
   "_dynamic_doc": "The engine classifies from PIN BEHAVIOUR + NET TOPOLOGY first (anchor, emergent domain, and most roles need no catalog at all — verified by ablation). Two OPTIONAL refinements handle distinctions that pin behaviour physically cannot make: device CLASS from lib_id (TVS vs LED) and current tier from footprint PACKAGE (power vs small-signal FET). These read a part's electrical CLASS / physical PACKAGE, never its part number, and they generalise to any unseen part. Set either flag false for pure pin+topology reasoning (the engine degrades gracefully — see ablation). At PCB stage the package tier can instead be derived from real pad-copper AREA (fully geometric).",
   "use_lib_class_hints": true,
   "use_package_tier": true,

@@ -11,7 +11,9 @@ Returns every key the rule set in `config/lint_rules.json` can consume:
   wires:          [((ax, ay), (bx, by))]
   bboxes:         [(ref, x1, y1, x2, y2)]            (outer body bbox, Y-down)
   pin_positions:  [(x, y, ref)]                       legacy tuple form (R2)
-  pins:           [{x, y, ref, name, number, etype}]  typed form (new rules)
+  pins:           [{x, y, ref, name, number, etype}]  typed form (new rules);
+                  includes hierarchical SHEET pins (ref = sheet name) so a wire
+                  landing on a sheet-border pin is a valid termination
   labels:         [(name, x, y)]
   label_names:    [str]
   junctions:      [(x, y)]
@@ -305,6 +307,46 @@ def build_context(sch_path: Path) -> Dict[str, Any]:
                     no_connects.append((float(at[1]), float(at[2])))
                 except (TypeError, ValueError):
                     pass
+
+        elif h == "sheet":
+            # Hierarchical sheet INSTANCE on the parent sheet. Its `(pin ...)`
+            # children are the connection terminals on the sheet border --- a
+            # wire landing on one is CONNECTED, not dangling. Without this the
+            # linter never sees them, so every wire terminating on a sheet pin
+            # false-flagged as WIRE_DANGLING and every sheet pin was invisible
+            # to PIN_UNCONNECTED (the hierarchy-top-sheet false-positive class).
+            # Sheet pin coords in `(at x y rot)` are ABSOLUTE schematic coords
+            # (already on the border), so no symbol transform is needed. The
+            # sheet body itself is a border box, not a component --- no bbox /
+            # RefDes text is registered (mirrors the power-port handling above).
+            sheet_name = ""
+            for c in child[1:]:
+                if (isinstance(c, list) and _head(c) == "property"
+                        and len(c) >= 3 and _sval(c[1]) == "Sheetname"):
+                    sheet_name = _sval(c[2])
+                    break
+            for c in child[1:]:
+                if not (isinstance(c, list) and _head(c) == "pin" and len(c) >= 2):
+                    continue
+                pname = _sval(c[1])
+                # KiCad stores the sheet-pin direction as the 2nd atom
+                # (input / output / bidirectional / tri_state / passive).
+                petype = "passive"
+                if len(c) >= 3 and isinstance(c[2], sexpdata.Symbol):
+                    petype = c[2].value()
+                at = _first_child(c, "at")
+                if not (at and len(at) >= 3):
+                    continue
+                try:
+                    px, py = float(at[1]), float(at[2])
+                except (TypeError, ValueError):
+                    continue
+                sref = sheet_name or "SHEET"
+                pin_positions.append((px, py, sref))
+                pins.append({
+                    "x": px, "y": py, "ref": sref,
+                    "name": pname, "number": pname, "etype": petype,
+                })
 
         elif h == "rectangle":
             # Functional-block box (intent/engine.py:_emit_block_rectangle).

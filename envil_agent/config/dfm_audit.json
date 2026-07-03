@@ -1,0 +1,55 @@
+{
+  "_comment": "Config for dfm_audit — the deterministic gate for step 10 (3D + DFM). Read-only, pure-Python (no kicad-cli): parses the .kicad_pcb for the manufacturability checks DRC can't see. Every reference designator is present (annotated), silkscreen text is legible (>= the board's own min height/width), connectors are flagged for a human orientation/keying confirm (Appendix A — the highest-risk category), and the board outline dimensions are reported for confirmation. Connector classification reuses footprint_audit's DYNAMIC refdes triage (one source of truth). Cached; RESTART backend after edits. Verdict in words.",
+  "_rule_source": "Master flow step 10 (3D+DFM) + Appendix A connector guardrail + PCB_RULES silk/DFM section.",
+
+  "enabled": true,
+
+  "rules": {
+    "refdes_present": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rule 3 — every footprint must carry a real reference designator. A placeholder (REF**) or empty ref = unannotated board; assembly can't place it."
+    },
+    "silk_legible": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rule 3 — silkscreen text must be >= the board's own min text height / stroke width (from .kicad_pro, else fab floor). Too-small silk won't print legibly."
+    },
+    "connector_orientation": {
+      "enabled": true,
+      "severity": "review",
+      "_rule": "Rule 2 + Appendix A — connectors/mechanical parts are the highest-risk category; a mirrored connector is electrically valid but physically useless. Every one is flagged for a REQUIRED human orientation / pin-1 / keying confirm."
+    },
+    "board_outline": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rule 5 — the board outline (Edge.Cuts) dimensions are reported for a final confirm; a missing outline is a hard flag. If expected_board_mm is set, mismatch beyond tolerance is flagged."
+    },
+    "model_3d": {
+      "enabled": true,
+      "severity": "info",
+      "_rule": "Rule 1 — a footprint with no 3D (model ...) reference can't be height/clash-checked in the 3D view. Info-only."
+    }
+  },
+
+  "placeholder_refs": ["REF**", "REF", "", "**", "?"],
+  "bom_exempt_attrs": ["exclude_from_pos_files", "exclude_from_bom", "board_only"],
+  "_exempt_note": "A footprint with NO numbered pad (mounting hole / logo) OR carrying one of these (attr ...) flags (fiducials + mounting holes are exclude_from_pos_files) is a fab feature, not an assembled BOM part — exempt from the refdes + 3D-model checks (it still gets silk-legibility, and the connector-orientation check still runs on every footprint since it's refdes-driven). Fully dynamic: derived from the footprint's own pads + attr, no per-name list.",
+  "silk_layers": ["F.SilkS", "B.SilkS"],
+  "skip_ref_prefixes": { "prefixes": ["#"] },
+
+  "expected_board_mm": {
+    "_comment": "Optional mechanical spec to check the outline against. null = just report the measured W x H. When set to [w, h], an outline outside tolerance_mm is flagged.",
+    "value": null,
+    "tolerance_mm": 1.0
+  },
+
+  "verdict": {
+    "clean": "DFM VERIFIED — {n} parts annotated, silk legible, outline {dims}",
+    "issues": "DFM NOT CLEAN — {e} error(s), {w} warning(s), {r} human-confirm across {n} parts",
+    "review_only": "DFM OK — {n} parts, {r} connector(s) need a human orientation confirm; outline {dims}",
+    "no_parts": "NO PARTS — board has no footprints to check"
+  },
+
+  "max_examples_per_rule": 15
+}

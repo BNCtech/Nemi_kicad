@@ -810,6 +810,7 @@ async def auto_place_pcb(args: dict[str, Any]) -> dict[str, Any]:
     # sweeps. Gated by `auto_place_pcb.refine.enabled`; when off this block is
     # skipped and the written file is byte-identical to the pre-refine output.
     refine_report: Dict[str, Any] = {}
+    lowconf_note = ""
     refine_cfg = cfg.get("refine", {}) if isinstance(cfg.get("refine"), dict) else {}
     if refine_only or refine_cfg.get("enabled", True):
         # Phase 2 (Universal Engine): when constraint_placement is enabled, run the
@@ -826,6 +827,17 @@ async def auto_place_pcb(args: dict[str, Any]) -> dict[str, Any]:
                 _rep = _reason_analyze(pcb_path)
                 if _rep.get("ok"):
                     constraints = {c["ref"]: c for c in _rep.get("components", [])}
+                    # Surface parts whose ROLE the reasoning engine is unsure
+                    # about — their placement constraints are a guess, so the
+                    # user knows to sanity-check rather than trust silently.
+                    _lc = _rep.get("low_confidence") or []
+                    if _lc:
+                        lowconf_note = (
+                            "\n  low-confidence roles (" + str(len(_lc)) + "): "
+                            + ", ".join(f"{c['ref']}={c['role']}@{c['confidence']:.2f}"
+                                        for c in _lc[:6])
+                            + (" ..." if len(_lc) > 6 else "")
+                            + " - verify before trusting the layout")
             except Exception:                               # noqa: BLE001
                 constraints = None
         try:
@@ -871,7 +883,7 @@ async def auto_place_pcb(args: dict[str, Any]) -> dict[str, Any]:
                                 f"{cfg.get('origin_y_mm', 50)}) mm\n"
                                 f"  pitch: {cfg.get('cell_pitch_x_mm', 12)} × "
                                 f"{cfg.get('cell_pitch_y_mm', 8)} mm"
-                                f"{refine_line}")}],
+                                f"{refine_line}{lowconf_note}")}],
         "ok": True,
         "path": str(pcb_path),
         "placed": moved,

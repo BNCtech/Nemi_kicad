@@ -1,0 +1,28 @@
+{
+  "_about": "Closes the reasoning->outcome loop (roadmap: 'the biggest new opportunity'). After a board is routed + DRC'd, ROUTING-category failures are attributed back to the components on the offending nets, and the confidence of those components' ROLE is reduced. The penalty is PERSISTED keyed by lib_id, so a part whose role repeatedly causes routing conflicts is trusted less on the NEXT board too (adaptive reasoning). Pure data + a small module (intent/confidence_feedback.py). Everything gated: apply_learned_bias off, or an empty store, leaves pcb_reasoning byte-identical.",
+
+  "enabled": true,
+
+  "attribution": {
+    "_comment": "Which DRC categories (config/drc_categories.json) count as a ROLE's fault. Only 'routing' by default — a starved_thermal is the zone engine's job, not evidence the role was misread (per the review: keep router/zone/role concerns separate). penalty_per_error is subtracted per implicated error; capped at max_penalty; never below floor.",
+    "penalize_categories": ["routing"],
+    "penalty_per_error": 0.12,
+    "max_penalty": 0.4,
+    "floor": 0.1
+  },
+
+  "persist": {
+    "_comment": "The learned prior. Keyed by lib_id (stable across boards, unlike refdes). Each observation nudges the part's bias by bias_per_observation toward -max_bias; observations decay so an old bad board fades. store is written next to the configs. Set enabled=false to keep feedback within a single run only.",
+    "enabled": true,
+    "store": "learned_confidence.json",
+    "key": "lib_id",
+    "bias_per_observation": 0.06,
+    "max_bias": 0.3,
+    "decay": 0.9
+  },
+
+  "apply_learned_bias": {
+    "_comment": "When on, pcb_reasoning.analyze() adds the persisted per-lib_id bias to each component's confidence (clamped to [floor,1]) and appends a reason. With an EMPTY store this is a no-op, so enabling it is byte-safe until the loop has actually learned something.",
+    "enabled": true
+  }
+}

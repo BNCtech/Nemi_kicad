@@ -1,0 +1,53 @@
+{
+  "_comment": "Config for placement_audit — the deterministic gate for step 6 (Component Placement). Read-only: parses the .kicad_pcb and asserts placement quality before routing. Reuses layout/place_refine.py geometry (courtyard bbox + overlap math) so its checks agree with the de-collision pass that produced the board. All classification is DYNAMIC (refdes prefix + net roles), never a per-circuit list, per feedback_dynamic_derive_not_list. Cached; RESTART backend after edits. Verdict in words.",
+  "_rule_source": "Master flow step 6 (Component Placement) automation checks + PCB_RULES placement section.",
+
+  "enabled": true,
+
+  "rules": {
+    "courtyard_overlap": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rule 8 — no two footprints' courtyards may overlap (would be a courtyard DRC error + unroutable). Bbox = *.CrtYd courtyard when present, else padextents+margin, exactly like place_refine."
+    },
+    "edge_clearance": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rule 8 — every footprint must sit inside the Edge.Cuts outline minus the board's copper-to-edge clearance. No Edge.Cuts at all => warn (step 6 rule 1: define the outline)."
+    },
+    "decoupling_proximity": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rule 3 — a decoupling/bypass cap must sit close to the IC power pin it serves. DYNAMIC: a cap on a power net (IR is_power) is matched to the nearest active IC on that same net and its distance checked against decoupling.max_mm."
+    },
+    "stacked_parts": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Two or more footprints at the same (x,y) are unplaced / stacked at a grid slot — a placement bug, not a real layout."
+    }
+  },
+
+  "clearance_mm": 0.0,
+  "use_courtyard": true,
+  "pad_bbox_margin_mm": 0.25,
+
+  "decoupling": {
+    "_comment": "Rule 3 DYNAMIC matching. cap_prefixes / ic_prefixes are GENERIC refdes classes (C = capacitor, U = IC) — a per-part signal derived from the reference designator, not a per-circuit list. A cap with a pad on a power net is treated as decoupling for the nearest IC that shares that net; it must be within max_mm.",
+    "cap_prefixes": ["C"],
+    "ic_prefixes": ["U", "IC"],
+    "max_mm": 5.0
+  },
+
+  "skip_ref_prefixes": {
+    "_comment": "Virtual / non-physical refs never audited for placement.",
+    "prefixes": ["#", "REF"]
+  },
+
+  "verdict": {
+    "clean": "PLACEMENT VERIFIED — {n} parts, no overlaps, inside outline, decoupling close",
+    "issues": "PLACEMENT NOT CLEAN — {e} error(s), {w} warning(s) across {n} parts",
+    "no_parts": "NO PARTS — board has no footprints to check"
+  },
+
+  "max_examples_per_rule": 15
+}

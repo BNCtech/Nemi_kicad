@@ -1,0 +1,19 @@
+{
+  "_comment": "Config for connect_stray_pads — connects a STRAY unconnected pad (a pad on a net that IS otherwise routed/poured, so route_pcb_simple / route_pcb_astar skip the net as 'done' and never route this one pad). It reads DRC's own unconnected_items (each gives the stray pad's point AND a point on the same-net copper), routes a stub between them, and DRC-VALIDATES every candidate — accepting only one that removes the unconnected item and adds NO short. Tries the back layer first (the front is usually where the blocking net sits), diagonal then L-shaped. Nothing is hardcoded: layers, width, order all here. Cached; RESTART backend after edits.",
+  "_rule_source": "Diagnosed 2026-07-02: routers treat a net with any copper as routed, leaving stray pads (e.g. C3.+5V behind +12V). Fix = per-pad stub on the clear layer, DRC-verified.",
+
+  "enabled": true,
+  "track_width_mm": 0.25,
+  "via_diameter_mm": 0.6,
+  "via_drill_mm": 0.3,
+  "coincidence_mm": 0.05,
+  "layers": ["B.Cu", "F.Cu"],
+  "try_l_routes": true,
+  "max_stray_pads": 20,
+
+  "verdict": {
+    "clean": "STRAY PADS CONNECTED — {fixed}/{total} routed, DRC-verified",
+    "partial": "STRAY PADS — {fixed}/{total} routed; {left} need manual routing (no legal stub found)",
+    "none": "NO STRAY PADS — nothing to connect"
+  }
+}

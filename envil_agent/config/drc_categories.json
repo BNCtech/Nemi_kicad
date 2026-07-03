@@ -1,0 +1,42 @@
+{
+  "_about": "Classifies KiCad DRC violation types into RESPONSIBILITY buckets so a benchmark can tell whether the ROUTER improved a board vs whether errors come from placement/fixture/zone strategy. Without this, a raw DRC total hides progress: routing can clear 8 unconnected nets and add 1 zone-thermal issue, and the total looks 'worse'. Pure data — retype a category with no code change. Types are kicad-cli's `type` strings.",
+  "_categories_doc": "routing = the router's own responsibility (copper paths/vias must never short or under-clear). manufacturing = DFM/zone strategy (silk, mask, thermal spokes, slivers) — fixed by re-pour / silk cleanup, NOT the router. placement = footprint arrangement (courtyards, holes) — fixed by place/DRU. fixture = invalid input geometry (bad outline, off-board). connectivity = ratsnest (unconnected) — routing REDUCES these, so a drop is progress.",
+
+  "fallback_category": "other",
+
+  "type_to_category": {
+    "clearance":              "routing",
+    "shorting_items":         "routing",
+    "tracks_crossing":        "routing",
+    "track_dangling":         "routing",
+    "via_dangling":           "routing",
+    "track_width":            "routing",
+    "annular_width":          "routing",
+    "copper_edge_clearance":  "routing",
+
+    "starved_thermal":        "manufacturing",
+    "silk_over_copper":       "manufacturing",
+    "silk_overlap":           "manufacturing",
+    "silk_edge_clearance":    "manufacturing",
+    "copper_sliver":          "manufacturing",
+    "solder_mask_bridge":     "manufacturing",
+    "isolated_copper":        "manufacturing",
+    "zone_has_empty_net":     "manufacturing",
+
+    "courtyards_overlap":     "placement",
+    "malformed_courtyard":    "placement",
+    "missing_courtyard":      "placement",
+    "hole_clearance":         "placement",
+    "hole_near_hole":         "placement",
+    "footprint":              "placement",
+    "lib_footprint_issues":   "placement",
+    "lib_footprint_mismatch": "placement",
+
+    "invalid_outline":        "fixture",
+    "item_on_disabled_layer": "fixture",
+    "unresolved_variable":    "fixture",
+
+    "unconnected_item":       "connectivity",
+    "unconnected_items":      "connectivity"
+  }
+}

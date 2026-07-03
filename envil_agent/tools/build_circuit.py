@@ -1012,6 +1012,35 @@ async def build_circuit(args: Dict[str, Any]) -> Dict[str, Any]:
     summary["route"] = final.get("route", "")
     summary["decision_log"] = final.get("decision_log") or []
 
+    # Honest verify loop (config: verify_loop) — surface the REAL post-build
+    # verification so the agent can NEVER claim "complete/clean" without data:
+    #   summary["erc"]    = the ERC error count self_heal computed on THIS sch
+    #                       (post-autofix); {"errors": -1, "unknown": true} if
+    #                       self_heal was disabled / the check could not run.
+    #   summary["wiring"] = silent-short lint (SHORTED_COMPONENT /
+    #                       COLINEAR_WIRE_BRIDGE) — shorts KiCad ERC passes
+    #                       green on. Both checks are read-only (no byte change).
+    # A missing/unknown value is reported as such, never as a false "clean".
+    try:
+        from ..intent.engine import _load_layout_config as _llc_v
+        _vl = (_llc_v() or {}).get("verify_loop", {}) or {}
+    except Exception:
+        _vl = {}
+    if _vl.get("enabled", True):
+        if _vl.get("run_erc", True):
+            _es = final.get("erc_summary")
+            summary["erc"] = (_es if isinstance(_es, dict)
+                              else {"errors": -1, "unknown": True})
+        if _vl.get("run_silent_short_lint", True):
+            try:
+                from ..lint.engine import silent_short_issues as _ssi
+                _shorts = _ssi(stats.get("path", ""))
+                summary["wiring"] = {"silent_shorts": len(_shorts),
+                                     "issues": _shorts}
+            except Exception as _exc:
+                summary["wiring"] = {"silent_shorts": -1,
+                                     "error": f"{type(_exc).__name__}: {_exc}"}
+
     # Phase 23 — drop an IR-block sidecar next to the .kicad_sch so the PCB
     # side can do functional placement (group footprints by block + role)
     # instead of the dumb refdes-prefix grid auto_place_pcb defaulted to.

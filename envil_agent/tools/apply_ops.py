@@ -2798,6 +2798,50 @@ async def apply_ops(args: dict[str, Any]) -> dict[str, Any]:
         "ops_failed": sum(1 for r in results if not r["ok"]),
         "results": results,
     }
+
+    # Honest verify loop (config: verify_loop) — after a connectivity-changing
+    # edit, re-run ERC + the silent-short lint on the file so the AI reports the
+    # REAL post-edit state (dangling pin from ERC, part shorted / wire bridge
+    # from the lint) instead of assuming the edit was clean. Additive: on any
+    # config-off / tool error the field is absent or carries an explicit
+    # unknown marker (-1), never a false "clean". edit_verbs=[] -> verify after
+    # ANY successful op; a non-empty list restricts it to those verbs.
+    try:
+        from ..intent.engine import _load_layout_config as _llc_v
+        _vl = (_llc_v() or {}).get("verify_loop", {}) or {}
+    except Exception:
+        _vl = {}
+    _edit_verbs = set(_vl.get("edit_verbs") or [])
+    _did_edit = any(r["ok"] and (not _edit_verbs or r["verb"] in _edit_verbs)
+                    for r in results)
+    if (_vl.get("enabled", True) and _did_edit
+            and str(path).lower().endswith(".kicad_sch")):
+        verify: Dict[str, Any] = {}
+        if _vl.get("run_erc", True):
+            try:
+                from .erc_check import erc_check as _erc
+                _er = await _erc.handler({"path": str(path)})
+                if not _er.get("is_error"):
+                    _erj = json.loads(_er["content"][0]["text"])
+                    verify["erc_errors"] = int(_erj.get("error_count", 0))
+                    verify["erc_warnings"] = int(_erj.get("warning_count", 0))
+                else:
+                    verify["erc_errors"] = -1
+            except Exception as _exc:                       # noqa: BLE001
+                verify["erc_errors"] = -1
+                verify["erc_error"] = f"{type(_exc).__name__}: {_exc}"
+        if _vl.get("run_silent_short_lint", True):
+            try:
+                from ..lint.engine import silent_short_issues as _ssi
+                _shorts = _ssi(str(path))
+                verify["silent_shorts"] = len(_shorts)
+                verify["silent_short_issues"] = _shorts
+            except Exception as _exc:                       # noqa: BLE001
+                verify["silent_shorts"] = -1
+                verify["silent_short_error"] = f"{type(_exc).__name__}: {_exc}"
+        if verify:
+            summary["verify"] = verify
+
     return {
         "content": [{"type": "text",
                       "text": json.dumps(summary, indent=2)}],

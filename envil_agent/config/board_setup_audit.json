@@ -1,0 +1,68 @@
+{
+  "_comment": "Config for board_setup_audit — the deterministic gate for step 5 (Board Setup). Read-only: parses the .kicad_pro (design_settings.rules + via_dimensions + net_settings) and the sibling .kicad_pcb, and asserts every constraint sits at or above the fab floor × safety margin, vias are arithmetically sound, and every power net is assigned a class. It does NOT write rules — set_design_rules does that (the generator); this proves the result is legal. Cached; RESTART backend after edits. Verdict in words (feedback_no_percentage_scores).",
+  "_rule_source": "User Board Setup rule set (rules 1,2,5,6,8) + master flow step 5.",
+
+  "enabled": true,
+
+  "rules": {
+    "rules_vs_fab": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rules 1/2 — each design_settings.rules min_* value must be >= fab floor (× margin on the geometric keys). A value below the fab floor is unmanufacturable; below floor×margin eats the safety factor."
+    },
+    "via_annular": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rule 5 — for every via preset: (via_diameter - drill)/2 >= fab min_annular_ring, drill >= fab min_via_drill, and (if via_aspect_ratio_limit set) board_thickness/drill <= limit. Pure arithmetic."
+    },
+    "netclass_coverage": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rules 6/8 — every power-like board net (see power_net_globs) must match a netclass_pattern that assigns it to a non-Default class; a +5V net left on Default is a flag."
+    },
+    "class_consistency": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rule 5 — each net class's track_width/clearance/via_diameter/via_drill must be >= the board's own min_* rules, and (via_diameter - via_drill)/2 >= min_via_annular_width. Catches a class looser than the board floor (would fail DRC or make a bad via)."
+    }
+  },
+
+  "rule_floor_map": {
+    "_comment": ".kicad_pro rules key -> [fab_profiles.json key, is_geometric]. is_geometric=true means the rule-2 margin applies. Mirrors set_design_rules._apply_fab_profile field_map + _MARGIN_SCALED_KEYS — that tool is the source of truth; keep in sync.",
+    "min_track_width":           ["min_track_width_mm", true],
+    "min_clearance":             ["min_clearance_mm", true],
+    "min_via_diameter":          ["min_via_diameter_mm", true],
+    "min_through_hole_diameter": ["min_through_hole_diameter_mm", true],
+    "min_via_annular_width":     ["min_annular_ring_mm", true],
+    "min_hole_to_hole":          ["min_hole_to_hole_mm", true],
+    "min_hole_clearance":        ["min_hole_to_copper_mm", true],
+    "min_copper_edge_clearance": ["min_edge_to_copper_mm", true],
+    "min_text_height":           ["min_silk_text_height_mm", false],
+    "min_text_thickness":        ["min_silk_width_mm", false]
+  },
+
+  "power_net_globs": {
+    "_comment": "Rule 6. A board net whose name matches one of these (fnmatch, case-insensitive) is 'power-like' and must carry a net class. Signals left on Default are fine and never flagged.",
+    "patterns": [
+      "+*", "-*", "GND", "GND*", "AGND", "DGND", "PGND", "EGND",
+      "VCC*", "VDD*", "VSS*", "VEE*", "VBUS*", "VBAT*", "VIN*", "VOUT*",
+      "VSYS*", "VREF*", "3V3*", "5V*", "12V*", "*_3V3", "*_5V", "*_12V"
+    ]
+  },
+
+  "via_aspect_ratio_limit": {
+    "_comment": "board_thickness / finished_drill must be <= this (fab plating aspect limit). null = skip the check (JLCPCB doesn't publish a single number; 8-10 is typical for standard PTH). Set per project when the fab states one.",
+    "value": null
+  },
+
+  "epsilon_mm": 0.0001,
+
+  "verdict": {
+    "_comment": "Word verdicts. {n}=rules checked, {fab}=profile, {margin}=safety factor, {e}/{w}=counts.",
+    "clean": "BOARD SETUP VERIFIED — {n} rules >= {fab} floors (x{margin}), vias + classes consistent",
+    "issues": "BOARD SETUP NOT CLEAN — {e} error(s), {w} warning(s) vs {fab} (x{margin})",
+    "no_pro": "NO BOARD SETUP — .kicad_pro has no design rules; run set_design_rules first"
+  },
+
+  "max_examples_per_rule": 15
+}

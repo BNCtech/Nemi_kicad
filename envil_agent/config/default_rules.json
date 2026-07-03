@@ -21,5 +21,53 @@
     "condition_field": "external_uncoated",
     "min_voltage_v": 30,
     "netclass_prefix": "HV_"
+  },
+
+  "width_by_current_rules": {
+    "_comment": "Generate IPC-2152 minimum-track-WIDTH-by-current custom rules (KiCad's flat Constraints page has only ONE global min-track-width; it cannot say 'a 3 A rail must be >= 1.7 mm'). One rule per current band, keyed on a current NET CLASS the user assigns their power net to. Read live from ipc_constraints.json:width_by_current.bands (1 oz external copper, ~10-20 degC rise — heavier copper carries more at the same width). netclass name = `{netclass_prefix}{bandMaxA}A` (e.g. I_3A). Bands at/below `min_current_a` are skipped (already covered by the fab/default min width). Visible in the Design Rule Editor immediately; active the moment a net is put in that class.",
+    "enabled": true,
+    "min_current_a": 0.5,
+    "netclass_prefix": "I_"
+  },
+
+  "auto_assign_electrical": {
+    "_comment": "Auto-assign nets to the HV_*/I_* net classes above so the IPC-2221B clearance + IPC-2152 width rules ACTIVATE without the user hand-assigning each net. Runs in set_design_rules after the pin-role classifier: parses a voltage/current magnitude embedded in the NET NAME (e.g. '+48V', '400VDC', '3V3', 'MOTOR_5A') and maps it to the covering tier via default_rules.netclass_for_voltage/current. VOLTAGE is on by default — a name-embedded voltage is a strong, low-false-positive signal and a too-tight HV clearance only widens spacing. CURRENT is OFF by default: a wrong I_* assignment forces a wide trace that can break routing, and net names rarely encode current reliably; enable it only for boards whose power nets are named with their current.",
+    "voltage": {
+      "enabled": true,
+      "name_regex": "(?<![A-Za-z0-9])(\\d{1,4})[vV](\\d{1,2})(?![A-Za-z0-9])|(?<![A-Za-z0-9.])(\\d{1,4}(?:\\.\\d{1,2})?)\\s?[vV](?:DC|AC|dc|ac)?(?![A-Za-z0-9])"
+    },
+    "current": {
+      "enabled": false,
+      "name_regex": "(?<![A-Za-z0-9.])(\\d{1,3}(?:\\.\\d{1,2})?)\\s?[aA](?:DC|dc)?(?![A-Za-z0-9])"
+    }
+  },
+
+  "pcb_rule_severities": {
+    "_comment": "PCB DRC rule-severity overrides written into board.design_settings.rule_severities of the .kicad_pro so KiCad's STORED DRC profile reflects fab/manufacturability intent instead of stock defaults (mirrors what _erc_rule_severities does for the schematic). Our drc_check runs --severity-all so it always REPORTS every check regardless; this affects KiCad's GUI DRC and the ship_design export gate (which counts stored 'error's). Conservative: promote manufacturability checks KiCad ships as 'ignore' up to 'warning', keep prototype-stage noise as 'warning', leave the hard fab-critical checks as 'error'. Values must be one of error|warning|ignore. The user can flip any rule in Board Setup -> Design Rules -> Violation Severity.",
+    "enabled": true,
+    "severities": {
+      "clearance": "error",
+      "hole_clearance": "error",
+      "hole_near_hole": "error",
+      "copper_edge_clearance": "error",
+      "track_width": "error",
+      "annular_width": "error",
+      "via_diameter": "error",
+      "shorting_items": "error",
+      "solder_mask_bridge": "error",
+      "invalid_outline": "error",
+      "malformed_courtyard": "error",
+      "unconnected_items": "error",
+      "copper_sliver": "warning",
+      "silk_over_copper": "warning",
+      "silk_edge_clearance": "warning",
+      "silk_overlap": "warning",
+      "courtyards_overlap": "warning",
+      "missing_courtyard": "warning",
+      "isolated_copper": "warning",
+      "starved_thermal": "warning",
+      "track_dangling": "warning",
+      "via_dangling": "warning"
+    }
   }
 }

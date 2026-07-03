@@ -99,10 +99,28 @@ def _ensure(d: Dict[str, Any], *keys: str) -> Dict[str, Any]:
     return cur
 
 
-def _apply_fab_profile(pro: Dict[str, Any], profile: Dict[str, Any]
-                       ) -> List[str]:
+# Board Setup rule 2 — the geometric minimums that manufacturing tolerance
+# eats into, so `design >= fab_min * margin` applies to them. Silk legibility,
+# mask slivers and layer count are deliberately NOT scaled.
+_MARGIN_SCALED_KEYS = frozenset({
+    "min_track_width", "min_clearance", "min_via_diameter",
+    "min_through_hole_diameter", "min_via_annular_width",
+    "min_hole_to_hole", "min_hole_clearance", "min_copper_edge_clearance",
+    "min_microvia_diameter", "min_microvia_drill",
+})
+
+
+def _apply_fab_profile(pro: Dict[str, Any], profile: Dict[str, Any],
+                       margin: float = 1.0) -> List[str]:
     """Patch board.design_settings.rules with the fab minimums. Returns
-    the keys that changed, for the result report."""
+    the keys that changed, for the result report.
+
+    `margin` (Board Setup rule 2) multiplies the geometric floors in
+    `_MARGIN_SCALED_KEYS` so the design sits above the fab's absolute
+    minimum. margin=1.0 writes the raw floor — byte-identical to the
+    pre-margin behaviour, so existing boards don't move unless a margin
+    is explicitly configured."""
+    m = margin if (margin and margin > 0) else 1.0
     rules = _ensure(pro, "board", "design_settings", "rules")
     field_map = {
         "min_track_width":             "min_track_width_mm",
@@ -115,12 +133,18 @@ def _apply_fab_profile(pro: Dict[str, Any], profile: Dict[str, Any]
         "min_copper_edge_clearance":   "min_edge_to_copper_mm",
         "min_text_height":             "min_silk_text_height_mm",
         "min_text_thickness":          "min_silk_width_mm",
+        # IPC/fab DFM keys previously carried in the profile but not pushed:
+        "solder_mask_min_width":       "min_solder_mask_sliver_mm",
+        "min_microvia_diameter":       "min_microvia_diameter_mm",
+        "min_microvia_drill":          "min_microvia_drill_mm",
     }
     changed: List[str] = []
     for kicad_key, profile_key in field_map.items():
         if profile_key not in profile:
             continue
         new_val = float(profile[profile_key])
+        if kicad_key in _MARGIN_SCALED_KEYS and m != 1.0:
+            new_val = round(new_val * m, 4)
         if rules.get(kicad_key) != new_val:
             rules[kicad_key] = new_val
             changed.append(kicad_key)
@@ -147,11 +171,55 @@ def _apply_track_widths(pro: Dict[str, Any], values: List[float]) -> bool:
     return True
 
 
+def _fab_floors(profile: Dict[str, Any], margin: float
+                ) -> Dict[str, Optional[float]]:
+    """The geometric fab minimums (x margin) a class / via preset must not
+    dip below — the clamp targets for _enforce_fab_floor."""
+    m = margin if (margin and margin > 0) else 1.0
+
+    def g(key: str) -> Optional[float]:
+        v = profile.get(key)
+        return float(v) * m if v is not None else None
+
+    return {
+        "track":     g("min_track_width_mm"),
+        "clearance": g("min_clearance_mm"),
+        "via_dia":   g("min_via_diameter_mm"),
+        "via_drill": g("min_via_drill_mm"),
+        "annular":   g("min_annular_ring_mm"),
+        "thru":      g("min_through_hole_diameter_mm"),
+    }
+
+
+def _clamp_via(dia: float, drill: float,
+               floors: Dict[str, Optional[float]]) -> Tuple[float, float]:
+    """Raise a (via_diameter, via_drill) pair to the fab floor: drill >= fab
+    min via drill, diameter >= fab min via diameter AND >= drill + 2*annular.
+    Never lowers. Returns rounded mm."""
+    d = drill
+    if floors.get("via_drill"):
+        d = max(d, floors["via_drill"])
+    v = dia
+    if floors.get("via_dia"):
+        v = max(v, floors["via_dia"])
+    if floors.get("annular"):
+        v = max(v, d + 2.0 * floors["annular"])
+    return round(v, 4), round(d, 4)
+
+
 def _apply_via_dimensions(pro: Dict[str, Any],
-                           pairs: List[Dict[str, float]]) -> bool:
+                           pairs: List[Dict[str, float]],
+                           floors: Optional[Dict[str, Optional[float]]] = None
+                           ) -> bool:
     ds = _ensure(pro, "board", "design_settings")
-    new_list = [{"diameter": float(p.get("diameter", 0.0)),
-                 "drill":    float(p.get("drill", 0.0))} for p in pairs]
+    new_list: List[Dict[str, float]] = []
+    for p in pairs:
+        dia = float(p.get("diameter", 0.0))
+        drill = float(p.get("drill", 0.0))
+        # {0,0} is the "use netclass default" sentinel — never clamp it.
+        if floors and (dia > 0 or drill > 0):
+            dia, drill = _clamp_via(dia, drill, floors)
+        new_list.append({"diameter": dia, "drill": drill})
     if ds.get("via_dimensions") == new_list:
         return False
     ds["via_dimensions"] = new_list
@@ -171,11 +239,14 @@ def _apply_diff_pair_dimensions(pro: Dict[str, Any],
     return True
 
 
-def _class_dict_from_config(name: str, body: Dict[str, Any]
-                              ) -> Dict[str, Any]:
+def _class_dict_from_config(name: str, body: Dict[str, Any],
+                             floors: Optional[Dict[str, Optional[float]]] = None
+                             ) -> Dict[str, Any]:
     """Translate a net_classes.json class entry into KiCad's net-class
-    JSON shape (millimetres -> millimetres, key renames)."""
-    return {
+    JSON shape (millimetres -> millimetres, key renames). When ``floors`` is
+    given, the track/clearance/via values are raised to the fab floor so a
+    class authored below the selected fab's minimum can never ship."""
+    out = {
         "name": body.get("name") or name,
         "track_width":         float(body.get("track_width_mm", 0.2)),
         "clearance":           float(body.get("clearance_mm", 0.2)),
@@ -196,10 +267,20 @@ def _class_dict_from_config(name: str, body: Dict[str, Any]
         "wire_width":          int(body.get("wire_width", 6)),
         "tuning_profile":      str(body.get("tuning_profile", "")),
     }
+    if floors:
+        if floors.get("track"):
+            out["track_width"] = round(max(out["track_width"], floors["track"]), 4)
+        if floors.get("clearance"):
+            out["clearance"] = round(max(out["clearance"], floors["clearance"]), 4)
+        out["via_diameter"], out["via_drill"] = _clamp_via(
+            out["via_diameter"], out["via_drill"], floors)
+    return out
 
 
 def _apply_net_classes(pro: Dict[str, Any],
-                        classes_cfg: Dict[str, Any]) -> Tuple[bool, List[str]]:
+                        classes_cfg: Dict[str, Any],
+                        floors: Optional[Dict[str, Optional[float]]] = None
+                        ) -> Tuple[bool, List[str]]:
     """Replace net_settings.classes with the config catalogue. Default
     class is always kept first because KiCad treats it specially.
     Returns (changed, class_names)."""
@@ -214,7 +295,7 @@ def _apply_net_classes(pro: Dict[str, Any],
     for name in sorted(catalogue.keys()):
         if name != "Default":
             ordered.append(name)
-    new_classes = [_class_dict_from_config(n, catalogue[n]) for n in ordered]
+    new_classes = [_class_dict_from_config(n, catalogue[n], floors) for n in ordered]
     if ns.get("classes") == new_classes:
         return False, ordered
     ns["classes"] = new_classes
@@ -259,8 +340,10 @@ def _apply_netclass_patterns(pro: Dict[str, Any],
         '  {"pcb_path": "...", "fab_profile": "jlcpcb_standard"}  # override\n'
         '  {"pcb_path": "...", "skip_net_classes": true}   # rules only\n'
         '  {"pcb_path": "...", "skip_rules": true}         # net classes only\n'
+        '  {"pcb_path": "...", "margin": 1.5}              # rule-2 safety factor on geometric floors\n'
         "Profiles available: see fab_profiles.json -> profiles{}. "
-        "Default fab profile = fab_profiles.json:_default_profile."
+        "Default fab profile = fab_profiles.json:_default_profile. "
+        "Margin default = fab_profiles.json:_default_margin (1.0 = raw floor)."
     ),
     input_schema={"pcb_path": str},
 )
@@ -307,6 +390,23 @@ async def set_design_rules(args: dict[str, Any]) -> dict[str, Any]:
     skip_rules = bool(args.get("skip_rules", False))
     skip_classes = bool(args.get("skip_net_classes", False))
 
+    # Board Setup rule 2 safety margin (design >= fab_min * margin). Precedence:
+    # explicit arg > per-profile design_margin > file _default_margin > 1.0.
+    try:
+        margin = float(args.get("margin")
+                       or profile.get("design_margin")
+                       or fab_cfg.get("_default_margin", 1.0)
+                       or 1.0)
+    except (TypeError, ValueError):
+        margin = 1.0
+
+    # Fab-floor enforcement: clamp net-class + via-preset values UP to the
+    # active fab minimum (x margin) so a config authored below the selected
+    # fab's floor can't ship (max(config, fab*margin) — the gap board_setup_
+    # audit caught). None = write config values verbatim (pre-fix behaviour).
+    floors = (_fab_floors(profile, margin)
+              if bool(fab_cfg.get("_enforce_fab_floor", True)) else None)
+
     # Read existing project (or start blank if it doesn't exist —
     # KiCad creates a default one on save)
     try:
@@ -340,7 +440,7 @@ async def set_design_rules(args: dict[str, Any]) -> dict[str, Any]:
     patterns_changed = False
 
     if not skip_rules:
-        rules_changed = _apply_fab_profile(pro, profile)
+        rules_changed = _apply_fab_profile(pro, profile, margin)
         widths = (nc_cfg.get("preset_track_widths_mm", {}) or {}).get(
             "values", [])
         if widths:
@@ -349,7 +449,7 @@ async def set_design_rules(args: dict[str, Any]) -> dict[str, Any]:
         vias = (nc_cfg.get("preset_via_dimensions_mm", {}) or {}).get(
             "pairs", [])
         if vias:
-            if _apply_via_dimensions(pro, vias):
+            if _apply_via_dimensions(pro, vias, floors):
                 presets_changed = True
         # Diff-pair presets: derive from the per-class diff geometry.
         # Each class with non-default diff_pair_width contributes one
@@ -374,7 +474,7 @@ async def set_design_rules(args: dict[str, Any]) -> dict[str, Any]:
 
     pins_assigned: List[str] = []
     if not skip_classes:
-        classes_changed, classes_names = _apply_net_classes(pro, nc_cfg)
+        classes_changed, classes_names = _apply_net_classes(pro, nc_cfg, floors)
         patterns_changed = _apply_netclass_patterns(pro, nc_cfg)
 
         # Pin-aware net-role assignment (gated `net_classes.json:assign_by_pins`,
@@ -390,12 +490,19 @@ async def set_design_rules(args: dict[str, Any]) -> dict[str, Any]:
             sch = pro_path.with_suffix(".kicad_sch")
             if sch.exists():
                 role_map: Dict[str, str] = {}
+                elec_map: Dict[str, str] = {}
                 try:
-                    from ..layout.net_roles import classify_project_nets
-                    role_map = await classify_project_nets(str(sch))
+                    from ..layout.net_roles import classify_project_all
+                    both = await classify_project_all(str(sch))
+                    role_map = both.get("roles", {}) or {}
+                    elec_map = both.get("electrical", {}) or {}
                 except Exception:
-                    role_map = {}
-                if role_map:
+                    role_map, elec_map = {}, {}
+                # Electrical class (HV_*/I_*) encodes a hard IPC clearance/width
+                # floor, so it wins over the softer pin-ROLE class on the same net.
+                combined = dict(role_map)
+                combined.update(elec_map)
+                if combined:
                     import fnmatch
                     ns = _ensure(pro, "net_settings")
                     existing = ns.get("netclass_patterns", []) or []
@@ -409,11 +516,12 @@ async def set_design_rules(args: dict[str, Any]) -> dict[str, Any]:
                         return "Default"
 
                     extra = []
-                    for nm, cls in sorted(role_map.items()):
+                    for nm, cls in sorted(combined.items()):
                         if _class_via_wildcards(nm) == cls:
                             continue  # wildcard already assigns it correctly
                         extra.append({"netclass": cls, "pattern": nm})
-                        pins_assigned.append(f"{nm}->{cls}")
+                        tag = " [IPC]" if nm in elec_map else ""
+                        pins_assigned.append(f"{nm}->{cls}{tag}")
                     if extra:
                         ns["netclass_patterns"] = extra + existing
                         patterns_changed = True
@@ -444,8 +552,26 @@ async def set_design_rules(args: dict[str, Any]) -> dict[str, Any]:
                 if val > cur:
                     ds_rules[kkey] = float(val)
                     default_applied.append(f"{kkey}>={val}")
+            # PCB DRC rule-severity profile (fab/manufacturability intent) into
+            # board.design_settings.rule_severities — mirrors ERC severities on
+            # the schematic side. Config-driven; {} when disabled -> untouched.
+            sev_map = _dr.pcb_rule_severities()
+            if sev_map:
+                ds = _ensure(pro, "board", "design_settings")
+                cur_sev = ds.get("rule_severities")
+                if not isinstance(cur_sev, dict):
+                    cur_sev = {}
+                changed_sev = 0
+                for rk, rv in sev_map.items():
+                    if cur_sev.get(rk) != rv:
+                        cur_sev[rk] = rv
+                        changed_sev += 1
+                ds["rule_severities"] = cur_sev
+                if changed_sev:
+                    default_applied.append(f"{changed_sev} DRC severities")
             if _dr.emit_to_project():
                 dru_rules.extend(_dr.voltage_clearance_dru_rules())
+                dru_rules.extend(_dr.width_by_current_dru_rules())
 
         # (b) USER layer on top (precedence USER > DEFAULT). Numeric overrides
         # patch the Constraints (warn_but_allow lets them go looser); directives
@@ -465,7 +591,8 @@ async def set_design_rules(args: dict[str, Any]) -> dict[str, Any]:
         if dru_rules and bool(_ur.load_schema().get("emit_kicad_dru", False)):
             dres = _ur.emit_dru(dru_rules, str(pro_path))
             if dres.get("wrote"):
-                n_def = len(_dr.voltage_clearance_dru_rules()) if _dr.is_enabled() else 0
+                n_def = (len(_dr.voltage_clearance_dru_rules())
+                         + len(_dr.width_by_current_dru_rules())) if _dr.is_enabled() else 0
                 overlay_applied.append(
                     f"{dres['wrote']} .kicad_dru rule(s) "
                     f"({n_def} default + {dres['wrote'] - n_def} user)")
@@ -494,6 +621,9 @@ async def set_design_rules(args: dict[str, Any]) -> dict[str, Any]:
         f"  fab profile: {fab_name} ({profile.get('fab', '?')} / "
         f"{profile.get('tier', '?')})",
     ]
+    if margin != 1.0:
+        summary_lines.append(
+            f"  safety margin: ×{margin:g} on geometric floors (rule 2)")
     if not skip_rules:
         if rules_changed:
             summary_lines.append(
@@ -539,6 +669,7 @@ async def set_design_rules(args: dict[str, Any]) -> dict[str, Any]:
         "ok": True,
         "pro_path": str(pro_path),
         "fab_profile": fab_name,
+        "design_margin": margin,
         "rules_changed": rules_changed,
         "presets_changed": presets_changed,
         "classes_changed": classes_changed,

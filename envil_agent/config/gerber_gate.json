@@ -1,0 +1,41 @@
+{
+  "_comment": "Config for gerber_gate — the deterministic gate for step 11 (Gerber Export). Read-only: it does NOT export (export_pcb / ship_design do that); it verifies the exported artifacts in the gerbers/ folder next to the .kicad_pcb — the required copper/mask/silk/edge layers, a drill file, the job file, and the pick-and-place. Paste layers are required only when the board actually has SMD pads (dynamic). The 'block export unless every prior gate passed' rule is enforced by pipeline_gate ordering (this is step 11). No gerbers yet => NOT EXPORTED (pending, not a failure). Cached; RESTART backend after edits. Verdict in words.",
+  "_rule_source": "Master flow step 11 (Gerber Export) + export_pcb output convention (gerbers/ subfolder).",
+
+  "enabled": true,
+  "gerbers_subdir": "gerbers",
+
+  "rules": {
+    "gerber_layers": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rule 1 — the required fab layer set must be present as .gbr files: copper, solder mask, silkscreen, edge cuts (+ paste when the board has SMD)."
+    },
+    "drill_file": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rule 1 — at least one Excellon drill file (.drl) must be present."
+    },
+    "gerber_job": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rule 4 — the .gbrjob job file (tells the fab the layer stackup/format) should be present."
+    },
+    "place_file": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rule 2 — the pick-and-place file (-pos.csv) should be present when assembling."
+    }
+  },
+
+  "required_layers": ["F.Cu", "B.Cu", "F.Mask", "B.Mask", "F.SilkS", "B.SilkS", "Edge.Cuts"],
+  "paste_layers_if_smd": ["F.Paste", "B.Paste"],
+
+  "verdict": {
+    "verified": "GERBERS VERIFIED — {found}/{req} layers + drill present, ready to ship",
+    "issues": "GERBERS NOT CLEAN — {e} error(s), {w} warning(s)",
+    "not_exported": "NOT EXPORTED — no gerbers/ folder yet; run export_pcb or ship_design"
+  },
+
+  "max_examples_per_rule": 15
+}

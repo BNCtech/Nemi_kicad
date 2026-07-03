@@ -1,0 +1,49 @@
+{
+  "_comment": "Config for the update_audit tool — the deterministic 'validate the result' pass for the Schematic → PCB update (KiCad's Update-PCB-from-Schematic). It parses the .kicad_sch and the sibling .kicad_pcb and asserts they agree: every symbol has a board footprint, nets survived the sync name-for-name, pads that should be connected are, and the board is UUID-linked (not just reference-matched). Read-only — it never edits either file, keeping 'apply the update' separate from 'verify the result'. Cached; RESTART the backend after edits. Verdict in words per feedback_no_percentage_scores.",
+  "_rule_source": "User Schematic→PCB-Update rule set (rules 3,4,5,7,8) + project_update_pcb_native_sync.",
+
+  "enabled": true,
+
+  "rules": {
+    "component_presence": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rules 4/5 — every schematic symbol must have a footprint on the board and vice-versa. A symbol with no board footprint = not synced (often an unresolved footprint upstream); a board footprint with no symbol = an orphan the next sync would delete."
+    },
+    "unresolved_footprint": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rule 5 — a schematic symbol with an empty Footprint field can never sync to the board; the fix is upstream (assign the footprint, see footprint_audit), then re-run update, never a manual drop on the board."
+    },
+    "net_survival": {
+      "enabled": true,
+      "severity": "error",
+      "_rule": "Rule 8 — every named net in the schematic/IR must appear in the board net table. A missing name, or an auto-named Net-(Rx-Pady) where a name was expected, signals a lost label or power flag."
+    },
+    "unconnected_pads": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rule 7 — a pad the IR says belongs to a real net must not sit on board net 0 (unconnected). Proxy for the ratsnest check without pcbnew: compares the IR pin→net map against the board's per-pad net assignments."
+    },
+    "uuid_linkage": {
+      "enabled": true,
+      "severity": "warning",
+      "_rule": "Rule 3 — footprints should carry the schematic symbol's UUID (path), so renumbering never triggers delete-and-recreate. A board generated from scratch (no path links) is reference-matched only; a native Update-from-Schematic restores stable UUID links."
+    }
+  },
+
+  "skip_ref_prefixes": {
+    "_comment": "Virtual refs (power ports, PWR_FLAG) that never become board footprints.",
+    "prefixes": ["#PWR", "#FLG", "#"]
+  },
+
+  "verdict": {
+    "_comment": "Word verdicts. {n}=parts, {nets}=board nets, {e}=errors, {w}=warnings.",
+    "clean": "SYNC VERIFIED — schematic and board agree ({n} parts, {nets} nets)",
+    "issues": "SYNC NOT CLEAN — {e} error(s), {w} warning(s) between schematic and board",
+    "no_board": "NO BOARD — no .kicad_pcb next to this schematic; run generate/update PCB first",
+    "empty_sch": "NO PARTS — schematic has no components to sync"
+  },
+
+  "max_examples_per_rule": 15
+}

@@ -64,6 +64,22 @@
     "Connector:USB_C_Receptacle":   "Connector_USB:USB_C_Receptacle_HRO_TYPE-C-31-M-12",
     "Connector:Barrel_Jack":        "Connector_BarrelJack:BarrelJack_Wuerth_6941xx301002",
 
+    "_comment_generic": "Connector_Generic:Conn_* is the lib_id the architect emits for a plain header (NOT Connector:Conn_*_Pin). Without these the prefix rule missed every connector and it shipped with an EMPTY Footprint (the recurring J1 defect footprint_audit surfaces). Full keys, longest-match picks the exact pin count. THT vertical pin headers to match the file's THT bias.",
+    "Connector_Generic:Conn_01x01": "Connector_PinHeader_2.54mm:PinHeader_1x01_P2.54mm_Vertical",
+    "Connector_Generic:Conn_01x02": "Connector_PinHeader_2.54mm:PinHeader_1x02_P2.54mm_Vertical",
+    "Connector_Generic:Conn_01x03": "Connector_PinHeader_2.54mm:PinHeader_1x03_P2.54mm_Vertical",
+    "Connector_Generic:Conn_01x04": "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical",
+    "Connector_Generic:Conn_01x05": "Connector_PinHeader_2.54mm:PinHeader_1x05_P2.54mm_Vertical",
+    "Connector_Generic:Conn_01x06": "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
+    "Connector_Generic:Conn_01x07": "Connector_PinHeader_2.54mm:PinHeader_1x07_P2.54mm_Vertical",
+    "Connector_Generic:Conn_01x08": "Connector_PinHeader_2.54mm:PinHeader_1x08_P2.54mm_Vertical",
+    "Connector_Generic:Conn_01x09": "Connector_PinHeader_2.54mm:PinHeader_1x09_P2.54mm_Vertical",
+    "Connector_Generic:Conn_01x10": "Connector_PinHeader_2.54mm:PinHeader_1x10_P2.54mm_Vertical",
+    "Connector_Generic:Conn_01x12": "Connector_PinHeader_2.54mm:PinHeader_1x12_P2.54mm_Vertical",
+    "Connector_Generic:Conn_02x03": "Connector_PinHeader_2.54mm:PinHeader_2x03_P2.54mm_Vertical",
+    "Connector_Generic:Conn_02x05": "Connector_PinHeader_2.54mm:PinHeader_2x05_P2.54mm_Vertical",
+    "Connector_Generic:Conn_02x08": "Connector_PinHeader_2.54mm:PinHeader_2x08_P2.54mm_Vertical",
+
     "power:":                  ""
   }
 }
