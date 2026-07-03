@@ -31,7 +31,55 @@ import sexpdata
 
 # Default symbol roots — user's kicad-sym-lib + the KiCad install (if present).
 # Override with $KICAD_SYMBOL_DIR (colon-separated paths).
-from ..settings import sym_lib_dir as _sym_lib_dir, envil_home as _envil_home
+from ..settings import (
+    sym_lib_dir as _sym_lib_dir,
+    envil_home as _envil_home,
+    kicad_cli as _kicad_cli,
+)
+
+
+def _install_sym_root() -> Optional[str]:
+    """The real install's ``share/kicad/symbols``, derived from wherever
+    ``kicad_cli.exe`` actually is (settings.kicad_cli() — admin install under
+    Program Files, per-user install under %LocalAppData%\\Programs, or a dev
+    build; all three resolve through the one function). None if kicad-cli
+    can't be located at all."""
+    try:
+        cli = Path(_kicad_cli())
+        if cli.is_file():
+            return str(cli.parent.parent / "share" / "kicad" / "symbols")
+    except OSError:
+        pass
+    return None
+
+
+def _synth_sym_env(cfg_dir_name: str) -> dict:
+    """Synthesize KiCad's built-in symbol vars (``KICAD_SYMBOL_DIR`` and the
+    per-version ``KICAD<major>_SYMBOL_DIR``) from the REAL install location.
+
+    Every global ``sym-lib-table`` KiCad writes uses ``${KICAD<major>_SYMBOL_DIR}``
+    in its URIs — but KiCad resolves that token internally in its C++ code and
+    NEVER exports it anywhere: not in kicad_common.json, not as an OS env var
+    (confirmed: envil_user.nsi's own comment says this is deliberate — "NO OS
+    env var ... needed" because KiCad handles it itself). So without this,
+    _discover_config_roots() can parse the table but can never expand that
+    token, on ANY machine, and silently gives up — this is why the AI could
+    say "library not found" even while KiCad's own browser showed the library
+    fine: two different code paths, only one of them (KiCad's C++) actually
+    knew where the symbols were.
+
+    Mirrors layout/pcb_gen.py's _synth_fp_env — same problem, same fix, for
+    the footprint side."""
+    root = _install_sym_root()
+    if not root:
+        return {}
+    val = root.replace("\\", "/")
+    env = {"KICAD_SYMBOL_DIR": val}
+    major = cfg_dir_name.split(".", 1)[0]
+    if major.isdigit():
+        env[f"KICAD{major}_SYMBOL_DIR"] = val
+    return env
+
 
 def _kicad_user_sym_dirs() -> list:
     """KiCad per-user symbol dirs (Documents/KiCad/<ver>/symbols), any version —
@@ -153,23 +201,25 @@ def _discover_config_roots() -> Tuple[str, ...]:
             found.append(p)
 
     for cfg_dir in _kicad_config_dirs():
-        env: dict = {}
+        # Seed with the synthesized KICAD<major>_SYMBOL_DIR BEFORE reading
+        # kicad_common.json, so an explicit user-set var (rare) still wins —
+        # dict.update below only fills in keys kicad_common.json didn't set.
+        env: dict = dict(_synth_sym_env(cfg_dir.name))
         common = cfg_dir / "kicad_common.json"
         try:
             if common.is_file():
                 data = json.loads(common.read_text(encoding="utf-8"))
                 raw_env = (data.get("environment") or {})
-                env = raw_env.get("vars", raw_env) if isinstance(raw_env, dict) else {}
-                if not isinstance(env, dict):
-                    env = {}
-                if isinstance(env, dict):
-                    for k, v in env.items():
-                        if isinstance(v, str) and (
-                            "SYMBOL" in k.upper() or "LIB_ROOT" in k.upper()
-                            or "SYM" in k.upper()):
-                            _add(v, env)
+                json_env = raw_env.get("vars", raw_env) if isinstance(raw_env, dict) else {}
+                if isinstance(json_env, dict):
+                    env.update(json_env)
         except (OSError, ValueError):
-            env = {}
+            pass
+        for k, v in env.items():
+            if isinstance(v, str) and (
+                    "SYMBOL" in k.upper() or "LIB_ROOT" in k.upper()
+                    or "SYM" in k.upper()):
+                _add(v, env)
         # Expand the sym-lib-table URIs and take each library's parent dir —
         # this is precisely the set of roots the app loads symbols from.
         table = cfg_dir / "sym-lib-table"
