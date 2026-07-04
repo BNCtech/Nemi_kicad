@@ -20,10 +20,12 @@ hardcoded paths — this change is non-breaking here and portable everywhere els
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from functools import lru_cache
 from pathlib import Path
+from typing import Optional
 
 
 @lru_cache(maxsize=1)
@@ -64,24 +66,73 @@ def out_dir() -> Path:
 
 
 def sym_lib_dir() -> Path:
-    """The bundled symbol library. Override with ``$KICAD_SYMBOL_DIR``."""
+    """Where newly-created symbols are written. Priority: ``$KICAD_SYMBOL_DIR``,
+    then a folder this user previously told the AI about, then the bundled lib."""
     override = os.environ.get("KICAD_SYMBOL_DIR", "").strip()
     if override:
         # $KICAD_SYMBOL_DIR may be os.pathsep-separated; take the first entry.
         first = next((p for p in override.split(os.pathsep) if p.strip()), "")
         if first:
             return Path(first).expanduser().resolve()
+    told = user_library_override("symbol_dir")
+    if told:
+        return told
     return envil_home() / "kicad-sym-lib"
 
 
 def fp_lib_dir() -> Path:
-    """The bundled footprint library root."""
+    """Where newly-created footprints are written. Priority:
+    ``$KICAD_FOOTPRINT_DIR``, then a folder this user previously told the AI
+    about, then the bundled lib — mirrors ``sym_lib_dir()``."""
+    override = os.environ.get("KICAD_FOOTPRINT_DIR", "").strip()
+    if override:
+        first = next((p for p in override.split(os.pathsep) if p.strip()), "")
+        if first:
+            return Path(first).expanduser().resolve()
+    told = user_library_override("footprint_dir")
+    if told:
+        return told
     return envil_home() / "kicad-fp-lib"
 
 
 def fp_lib_table() -> Path:
     """The fp-lib-table that maps footprint nicknames to .pretty dirs."""
     return envil_home() / "fp-lib-table"
+
+
+def user_library_config_path() -> Path:
+    """Where a user's own answer to 'where is your KiCad library' is
+    remembered, once the AI has asked and they've told it. Per-user (keyed by
+    user_id, mirrors intent/user_rules.py's overlay convention) and separate
+    from .env: .env ships with the app and is the same for everyone, this
+    file is written at runtime and is specific to one person's machine."""
+    return Path(__file__).resolve().parent / "config" / "user_library_paths.json"
+
+
+def _load_user_library_config() -> dict:
+    try:
+        return json.loads(user_library_config_path().read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def user_library_override(kind: str, user_id: str = "default") -> Optional[Path]:
+    """``kind`` is 'symbol_dir' or 'footprint_dir'. Returns the path the user
+    told the AI about, if any, else None (falls through to auto-discovery)."""
+    entry = _load_user_library_config().get(user_id) or {}
+    p = entry.get(kind, "")
+    return Path(p).expanduser().resolve() if p else None
+
+
+def set_user_library_override(kind: str, path: str, user_id: str = "default") -> Path:
+    """Persist the user's answer so it takes effect immediately and survives
+    a restart, without touching the shared .env."""
+    cfg_path = user_library_config_path()
+    data = _load_user_library_config()
+    data.setdefault(user_id, {})[kind] = str(Path(path).expanduser().resolve())
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return cfg_path
 
 
 @lru_cache(maxsize=1)
@@ -98,10 +149,22 @@ def kicad_cli() -> str:
     found = shutil.which("kicad-cli")
     if found:
         return found
-    for ver in ("9.0", "8.0", "7.0"):
+    for ver in ("10.0", "9.0", "8.0", "7.0"):
         cand = Path(f"C:/Program Files/KiCad/{ver}/bin/kicad-cli.exe")
         if cand.exists():
             return str(cand)
+    # Per-user, no-admin installs (envil_user.nsi — the VS Code/Chrome
+    # convention) land under %LocalAppData%\Programs\<any name>\bin, never
+    # under Program Files. Glob by shape, not by a fixed app name, so any
+    # such install (Envil CAD or stock KiCad) is found without an edit here.
+    local = os.environ.get("LocalAppData", "").strip()
+    if local:
+        try:
+            for cand in Path(local).glob("Programs/*/bin/kicad-cli.exe"):
+                if cand.is_file():
+                    return str(cand)
+        except OSError:
+            pass
     return "kicad-cli"
 
 

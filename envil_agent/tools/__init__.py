@@ -87,6 +87,7 @@ from .create_component import create_component
 from .delete_symbol import delete_symbol
 from .delete_footprint import delete_footprint
 from .add_symbol_library import add_symbol_library
+from .library_setup import check_kicad_library, set_kicad_library_path
 
 # Schematic-side tools — every verb here reads or edits a .kicad_sch.
 # Running these from pcbnew makes no sense (the user is not looking at
@@ -165,6 +166,8 @@ COMMON_TOOLS = [
     add_design_rule,
     list_design_rules,
     remove_design_rule,
+    check_kicad_library,
+    set_kicad_library_path,
 ]
 
 ALL_TOOLS = SCHEMATIC_TOOLS + PCB_TOOLS + COMMON_TOOLS
@@ -221,4 +224,6 @@ __all__ = [
     "delete_symbol",
     "delete_footprint",
     "add_symbol_library",
+    "check_kicad_library",
+    "set_kicad_library_path",
 ]

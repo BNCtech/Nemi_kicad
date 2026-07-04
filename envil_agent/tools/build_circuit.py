@@ -847,15 +847,20 @@ async def build_circuit(args: Dict[str, Any]) -> Dict[str, Any]:
     if not _st.get("ok"):
         _searched = "\n  ".join(_st.get("searched") or []) or "(none)"
         msg = (
-            "BUILD BLOCKED: no symbol library found on this system, so no part "
-            "(not even a resistor) can be resolved. This is NOT a KiCad app "
-            "setting and the user should NOT be told to enable libraries.\n\n"
-            "Cause: the backend's symbol search path resolved to nothing usable.\n"
-            "Paths checked (in order):\n  " + _searched + "\n\n"
-            "Fix: point KICAD_SYMBOL_DIR in ai_backend/.env at a folder that "
-            "contains the KiCad symbol libraries (*.kicad_symdir / *.kicad_sym), "
-            "or set ENVIL_LIB_ROOT in kicad_common.json, then restart the "
-            "backend. Tell the user this in one short plain sentence."
+            "BUILD BLOCKED: no symbol library found anywhere on this system, "
+            "so no part (not even a resistor) can be resolved.\n\n"
+            "Internal diagnostic only — DO NOT repeat this to the user. "
+            "Folders already checked and found empty/missing:\n  " + _searched +
+            "\n\n"
+            "What to do instead: in ONE short plain sentence, ask the user "
+            "where their KiCad symbol library is on their computer (e.g. the "
+            "folder they installed KiCad to, or wherever their parts live). "
+            "Never mention .env, KICAD_SYMBOL_DIR, kicad_common.json, or any "
+            "other internal file/variable name — those are meaningless to the "
+            "user. Once they answer, call set_kicad_library_path(kind="
+            "'symbol', path=<their answer>) and then retry the build. You can "
+            "call check_kicad_library first if you want to double-check "
+            "before asking."
         )
         return {"content": [{"type": "text", "text": msg}], "is_error": True}
 

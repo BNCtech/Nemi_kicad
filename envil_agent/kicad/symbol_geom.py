@@ -31,21 +31,98 @@ import sexpdata
 
 # Default symbol roots — user's kicad-sym-lib + the KiCad install (if present).
 # Override with $KICAD_SYMBOL_DIR (colon-separated paths).
-from ..settings import sym_lib_dir as _sym_lib_dir, envil_home as _envil_home
+from ..settings import (
+    sym_lib_dir as _sym_lib_dir,
+    envil_home as _envil_home,
+    kicad_cli as _kicad_cli,
+)
+
+
+def _install_sym_root() -> Optional[str]:
+    """The real install's ``share/kicad/symbols``, derived from wherever
+    ``kicad_cli.exe`` actually is (settings.kicad_cli() — admin install under
+    Program Files, per-user install under %LocalAppData%\\Programs, or a dev
+    build; all three resolve through the one function). None if kicad-cli
+    can't be located at all."""
+    try:
+        cli = Path(_kicad_cli())
+        if cli.is_file():
+            return str(cli.parent.parent / "share" / "kicad" / "symbols")
+    except OSError:
+        pass
+    return None
+
+
+def _synth_sym_env(cfg_dir_name: str) -> dict:
+    """Synthesize KiCad's built-in symbol vars (``KICAD_SYMBOL_DIR`` and the
+    per-version ``KICAD<major>_SYMBOL_DIR``) from the REAL install location.
+
+    Every global ``sym-lib-table`` KiCad writes uses ``${KICAD<major>_SYMBOL_DIR}``
+    in its URIs — but KiCad resolves that token internally in its C++ code and
+    NEVER exports it anywhere: not in kicad_common.json, not as an OS env var
+    (confirmed: envil_user.nsi's own comment says this is deliberate — "NO OS
+    env var ... needed" because KiCad handles it itself). So without this,
+    _discover_config_roots() can parse the table but can never expand that
+    token, on ANY machine, and silently gives up — this is why the AI could
+    say "library not found" even while KiCad's own browser showed the library
+    fine: two different code paths, only one of them (KiCad's C++) actually
+    knew where the symbols were.
+
+    Mirrors layout/pcb_gen.py's _synth_fp_env — same problem, same fix, for
+    the footprint side."""
+    root = _install_sym_root()
+    if not root:
+        return {}
+    val = root.replace("\\", "/")
+    env = {"KICAD_SYMBOL_DIR": val}
+    major = cfg_dir_name.split(".", 1)[0]
+    if major.isdigit():
+        env[f"KICAD{major}_SYMBOL_DIR"] = val
+    return env
+
 
 def _kicad_user_sym_dirs() -> list:
-    """KiCad per-user symbol dirs (Documents/KiCad/<ver>/symbols) for versions 7-10."""
-    from pathlib import Path as _P
-    base = _P.home() / "Documents" / "KiCad"
-    return [str(base / v / "symbols") for v in ("10.0", "9.0", "8.0", "7.0")]
+    """KiCad per-user symbol dirs (Documents/KiCad/<ver>/symbols), any version —
+    globbed rather than a fixed version list so a future KiCad release (or the
+    fork's own 10.99-style version string) is picked up without a code edit."""
+    base = Path.home() / "Documents" / "KiCad"
+    try:
+        return [str(p / "symbols") for p in base.glob("*") if p.is_dir()]
+    except OSError:
+        return []
+
+
+def _program_files_sym_dirs() -> list:
+    """Any installed app's bundled symbols, e.g. ``KiCad/9.0/share/kicad/symbols``
+    or the Envil fork's own ``Envil CAD/share/kicad/symbols`` — globbed by
+    shape, not by product name or version, so this works for any install on
+    any machine without edits.
+
+    Checks BOTH install styles Envil ships (see _installer_build/*.nsi):
+      - machine-wide, admin install -> %ProgramFiles% (envil.nsi/envil_pro.nsi)
+      - per-user, no-admin install  -> %LocalAppData%\\Programs
+        (envil_user.nsi — the VS Code/Chrome/Cursor convention; this is what
+        an installer run without admin rights actually produces, and it has
+        no reason to ever appear under Program Files)."""
+    roots = []
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "LocalAppData"):
+        base = os.environ.get(var, "").strip()
+        if not base:
+            continue
+        for pattern in ("*/share/kicad/symbols", "Programs/*/share/kicad/symbols"):
+            try:
+                roots.extend(
+                    str(p) for p in Path(base).glob(pattern) if p.is_dir()
+                )
+            except OSError:
+                continue
+    return roots
+
 
 DEFAULT_SYM_ROOTS = (
     [str(_sym_lib_dir())]
     + _kicad_user_sym_dirs()
-    + [
-        "C:/Program Files/KiCad/9.0/share/kicad/symbols",
-        "C:/Program Files/KiCad/8.0/share/kicad/symbols",
-    ]
+    + _program_files_sym_dirs()
 )
 
 # KiCad ships with version-specific path tokens in sym-lib-table URIs.
@@ -212,9 +289,15 @@ def _discover_config_roots() -> Tuple[str, ...]:
             found.append(val.replace("\\", "/").strip())
 
     for cfg_dir in _kicad_config_dirs():
-        # Extract env vars from kicad_common.json (used for token expansion
-        # in the sibling sym-lib-table).
-        extra_env: dict = {}
+        # Seed with the synthesized KICAD<major>_SYMBOL_DIR (derived from the
+        # REAL install location via kicad_cli()) BEFORE reading
+        # kicad_common.json, so an explicit user-set var there still wins.
+        # This is what makes ${KICAD10_SYMBOL_DIR} resolve at all — KiCad
+        # never exports that token itself (see _synth_sym_env docstring) —
+        # and it beats the _KICAD_BUILTIN_TOKENS static guesses below for any
+        # install that isn't the plain default Program Files location (e.g.
+        # a per-user %LocalAppData% install).
+        extra_env: dict = dict(_synth_sym_env(cfg_dir.name))
         common = cfg_dir / "kicad_common.json"
         try:
             if common.is_file():
@@ -223,7 +306,7 @@ def _discover_config_roots() -> Tuple[str, ...]:
                 env_vars = (raw_env.get("vars", raw_env)
                             if isinstance(raw_env, dict) else {})
                 if isinstance(env_vars, dict):
-                    extra_env = env_vars
+                    extra_env.update(env_vars)
                     for k, v in env_vars.items():
                         if isinstance(v, str) and (
                                 "SYMBOL" in k.upper()
@@ -249,16 +332,21 @@ def _candidate_roots() -> List[str]:
     Priority:
       1. Explicit $KICAD_SYMBOL_DIR
       2. Project-local roots (inject_project_sym_roots)
-      3. Auto-detected config roots (global sym-lib-table + kicad_common.json)
-      4. Bundled Envil lib
-      5. DEFAULT_SYM_ROOTS (hardcoded KiCad install + user dirs)
+      3. A path this user previously told the AI about (asked once,
+         remembered from then on via set_kicad_library_path)
+      4. Auto-detected config roots (global sym-lib-table + kicad_common.json)
+      5. Bundled Envil lib
+      6. DEFAULT_SYM_ROOTS (auto-discovered KiCad install + user dirs)
     """
     raw = os.environ.get("KICAD_SYMBOL_DIR", "")
     extras = [p for p in raw.split(os.pathsep) if p.strip()] if raw else []
+    from ..settings import user_library_override as _user_override
+    told = _user_override("symbol_dir")
+    user_told = [str(told)] if told else []
     bundled = str(_envil_home() / "kicad-sym-lib")
     out: List[str] = []
     seen: set = set()
-    for p in (extras + _project_sym_roots
+    for p in (extras + _project_sym_roots + user_told
               + list(_discover_config_roots())
               + [bundled] + DEFAULT_SYM_ROOTS):
         if not p:
