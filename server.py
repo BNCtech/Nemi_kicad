@@ -533,6 +533,11 @@ async def ws_chat(ws: WebSocket):
                 # next hello (typically the chat panel re-hellos after
                 # /reset to re-anchor).
                 CHAT_HISTORY.pop(session_id, None)
+                try:
+                    from envil_agent.manual_edit_watch import forget as _mew_forget
+                    _mew_forget(session_id)
+                except Exception:
+                    pass
                 last_summary_key = ()
                 await ws.send_json({"kind": "status",
                                       "text": "Conversation reset.",
@@ -1079,6 +1084,21 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
         # can act on confirmations like "yes" / "allow" / "cancel".
         history = CHAT_HISTORY.get(session_id, [])
 
+        # Cursor-parity: detect the user's MANUAL KiCad edits made since the
+        # AI last acted (autosaved to the real file by EnvilAutoSaveRealFile)
+        # and fold them into this turn so the AI re-reads before acting. Pure
+        # read; gated by unified_chat.manual_edit_watch. Never blocks a turn.
+        try:
+            from envil_agent.manual_edit_watch import detect as _mew_detect
+            _manual_note = _mew_detect(session_id, [schematic_path, pcb_path])
+            if _manual_note:
+                user_text = _manual_note + "\n" + user_text
+                print(f"[chat] manual edit detected -> folded into turn",
+                      flush=True)
+        except Exception as _mew_exc:
+            print(f"[chat] manual_edit_watch detect skipped: "
+                  f"{type(_mew_exc).__name__}: {_mew_exc}", flush=True)
+
         # Heartbeat config — see layout_config.json -> chat_ui.heartbeat.
         # Keeps the socket warm during the long idle gap between
         # build_circuit's tool_use and tool_result. enabled=false falls
@@ -1094,7 +1114,13 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
             "text", "Still working — generating the schematic ({elapsed}s elapsed)…")
 
         async def _handle_event(event) -> None:
-            nonlocal generated_path
+            # generated_pcb_path MUST be nonlocal: it is assigned below (from the
+            # tool result / tool input) and read at turn end to drive the pcbnew
+            # revert. Without it here, those assignments bound a throwaway LOCAL and
+            # the outer generated_pcb_path stayed None, so the PCB editor never
+            # reloaded after a board-only tool (route/zones/drc_autofix) — the
+            # "routing complete but PCB page not showing" bug.
+            nonlocal generated_path, generated_pcb_path
             if event.kind == "thinking":
                 # Streamed model reasoning -> collapsible "Thinking" panel in
                 # the chat. Only emitted when chat_ui.thinking is enabled; the
@@ -1113,6 +1139,23 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
                                       "tool_name": event.tool_name,
                                       "tool_input": event.tool_input,
                                       "session_id": session_id})
+                # Robust PCB auto-refresh from the tool INPUT. Some board tools
+                # (route_pcb_simple, …) return a human-readable text result, not
+                # JSON, so their .kicad_pcb path never survives json.loads in the
+                # agent and the tool_result capture below can't see it -> the board
+                # was rewritten on disk but the open pcbnew never reloaded. Every
+                # PCB tool takes the board as `pcb_path` (or `path`), so capture it
+                # here from the authoritative input; the turn-end revert then fires
+                # regardless of how the tool formats its return. A revert on a
+                # read-only tool (drc_check, render) just reloads identical bytes and
+                # is guarded on pcbnew's side to act only on the board it has open.
+                try:
+                    _ti = event.tool_input or {}
+                    _cand = str(_ti.get("pcb_path") or _ti.get("path") or "")
+                    if _cand.lower().endswith(".kicad_pcb"):
+                        generated_pcb_path = _cand
+                except Exception:
+                    pass
                 if event.tool_name == "build_circuit":
                     try:
                         from envil_agent.intent.engine import _load_layout_config as _lc2
@@ -1168,6 +1211,18 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
                     pp = event.tool_result.get("pcb_path") or ""
                     if pp and pp.lower().endswith(".kicad_pcb"):
                         generated_pcb_path = pp
+                    # set_design_rules returns "pro_path" (.kicad_pro), not
+                    # "path"/"pcb_path" — the two captures above never saw it,
+                    # so an open pcbnew never reloaded after a design-rule /
+                    # net-class push (Board Setup + DRC kept showing stale
+                    # values until the user manually reopened the project).
+                    # Derive the sibling .kicad_pcb and feed it into the same
+                    # turn-end revert broadcast every other PCB tool uses.
+                    prp = event.tool_result.get("pro_path") or ""
+                    if prp and prp.lower().endswith(".kicad_pro"):
+                        _sib_pcb = prp[:-len(".kicad_pro")] + ".kicad_pcb"
+                        if Path(_sib_pcb).exists():
+                            generated_pcb_path = _sib_pcb
                     # Fab bundle: when export_pcb / ship_design produce a
                     # Gerber zip, surface the same "Open Folder" card the
                     # one-click button uses — so the natural-language path
@@ -1383,6 +1438,17 @@ async def _stream_agent_turn(ws: WebSocket, user_text: str,
         # (Without this the persist + reply + confirm-button code below
         # references an undefined `text` and the whole turn NameErrors.)
         text = "".join(full_reply)
+
+        # Cursor-parity: record the AI-known baseline of every project design
+        # file NOW (after the AI's own writes this turn). Next turn, anything
+        # that differs from this was changed by the user by hand. See
+        # manual_edit_watch for the user-vs-AI-write reasoning.
+        try:
+            from envil_agent.manual_edit_watch import snapshot as _mew_snapshot
+            _mew_snapshot(session_id, [schematic_path, pcb_path])
+        except Exception as _mew_exc:
+            print(f"[chat] manual_edit_watch snapshot skipped: "
+                  f"{type(_mew_exc).__name__}: {_mew_exc}", flush=True)
 
         # Persist this turn to session history so the NEXT turn sees
         # what the user asked + what the agent said. Required for

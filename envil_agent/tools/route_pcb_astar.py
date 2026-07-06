@@ -417,7 +417,22 @@ async def route_pcb_astar(args: dict[str, Any]) -> dict[str, Any]:
             lines.append(f"  skipped {len(skipped)}:")
             for s in shown:
                 lines.append(f"    {s['net']}: {s['reason']}")
-    if not routed_nets and not new_nodes:
+
+    # ---- Honest verification: read the truth back from the written board ----
+    # Never trust the router's own counters for a completeness claim; re-parse
+    # the file so the reported "routed" matches what was actually saved. On
+    # preview or any parse failure, fall back to the old (optimistic) message.
+    verify: Dict[str, Any] = {}
+    if not preview and bool(cfg.get("verify_on_board", True)):
+        from ..layout.route_verify import verify_routing, verify_line
+        verify = verify_routing(pcb_path)
+        vline = verify_line(verify, skip_nets)
+        if vline:
+            lines.append(vline)
+        elif not routed_nets and not new_nodes:
+            lines.append("  nothing to route (nets already routed, poured, or "
+                         "beyond A* limits — see verification above).")
+    elif not routed_nets and not new_nodes:
         lines.append("  nothing to route (all nets already routed, poured, or "
                      "beyond A* limits).")
 
@@ -426,4 +441,8 @@ async def route_pcb_astar(args: dict[str, Any]) -> dict[str, Any]:
             "routed": len(routed_nets), "segments": total_seg, "vias": total_via,
             "length_mm": round(total_len, 1),
             "routed_nets": routed_nets, "skipped": skipped,
-            "preview_only": preview}
+            "preview_only": preview,
+            "complete": verify.get("complete") if verify else None,
+            "unrouted": verify.get("unrouted", []) if verify else [],
+            "verified_routed": verify.get("routed_nets") if verify else None,
+            "verified_total": verify.get("total_nets") if verify else None}

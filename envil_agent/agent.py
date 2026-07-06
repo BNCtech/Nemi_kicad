@@ -854,8 +854,16 @@ Force a preview when the user explicitly asks: "preview first" /
     If the tool returns a `warning` (the rule is LOOSER than the IPC/fab
     floor) you MUST surface that warning to the user — it is applied anyway
     (warn-but-allow), but they must know the board may fail DRC/fab.
-    The saved rules take effect the next time set_design_rules runs (it
-    layers user+project rules over the fab defaults, project winning).
+    APPLY IMMEDIATELY, EVERY TIME — a saved rule only changes the overlay
+    file; it does nothing to the board until set_design_rules pushes it into
+    the .kicad_pro. So after EVERY successful add_design_rule (and after
+    remove_design_rule), if a project/PCB path is known in this turn's
+    context, immediately call set_design_rules {pcb_path: <that path>} in
+    the SAME turn — do not wait for the user to ask separately. This is what
+    makes rule after rule after rule show up live as the user states them,
+    instead of only the last one before they remember to ask you to apply
+    it. If no project is open yet, say the rule is saved and will apply to
+    the next board you build/open instead.
     Use list_design_rules to show active rules, remove_design_rule to delete.
 
 2f. PCB DRC — call drc_check tool when the user asks to verify the
@@ -968,6 +976,16 @@ Force a preview when the user explicitly asks: "preview first" /
     Pass {"pcb_path": <pcb_path>}. The tool groups by refdes prefix
     (U/Q/D/J/R/C/L) and lays out a grid. Run AFTER F8 (Update PCB)
     not before — empty PCBs have nothing to place.
+    AFTER PLACEMENT — ASK BEFORE FIXING (unlike routing, do NOT auto-fix
+    placement silently): run placement_audit right after auto_place_pcb /
+    place_refine. If it reports errors/warnings, tell the user the real
+    finding in plain words (what's overlapping / off-board / stacked) and
+    ask "Fix these placement issues now?" — STOP, no further tool call. On
+    the user's OK, call place_refine (or auto_place_pcb again) to fix, then
+    re-run placement_audit to confirm it's clean. Only once placement_audit
+    is clean should you move on to the next step (routing, etc.) or tell the
+    user placement is done. If the user declines the fix, do not advance —
+    say the board still has the issue and wait.
 
 2f. PUSH SCHEMATIC -> PCB. There are TWO tools, and picking the right one
     is critical — they produce DIFFERENT boards:
@@ -1249,19 +1267,32 @@ ASK_ASSUMPTIONS_RULE = """
 
 Ask before assuming — interact like Cursor for a NEW circuit
 - Before you show ANY build preview for a NEW circuit, FIRST ask ONE round of
-  2-4 short clarifying questions about the design choices you would otherwise
-  ASSUME — e.g. supply voltage, package / footprint type, indicator / connector
-  options, and any key value (frequency, current, threshold). The goal is to let
-  the user steer the design instead of silently assuming (no more "Assuming 5V").
+  short clarifying questions about the design choices you would otherwise
+  ASSUME — e.g. supply voltage, indicator / connector options, and any key
+  value (frequency, current, threshold). The goal is to let the user steer the
+  design instead of silently assuming (no more "Assuming 5V").
+- MANDATORY, every time: a SEPARATE "Package" row for EVERY distinct component
+  TYPE the design will use — never drop it, never blend parts into one row,
+  never assume it silently, even if everything else about the request is
+  clear. List EVERY distinct part type (from assess_request's named_parts /
+  blocks, or your own part list once you've picked one) — resistor, capacitor,
+  LED, diode, transistor, connector, each named IC, etc. — one row per type,
+  each labelled with that part (e.g. "LED package", "Resistor package",
+  "NE555 package"). Repeated instances of the SAME type (ten resistors) still
+  get only ONE row for that type. Derive the list dynamically from the
+  design's actual parts — do NOT hardcode a fixed set of categories, and don't
+  ask about a package a part cannot come in (e.g. skip it for a part that only
+  exists in one form).
 - This applies EVEN when assess_request returns PROCEED. If assess_request
   returned ASK_QUESTIONS, MERGE its missing-info questions into this SAME round —
   ask ONE round total, never two.
-- Pick only the questions that actually matter for THIS circuit; never ask about
+- Pick the other questions that actually matter for THIS circuit; never ask about
   something the user already stated in the prompt. Use the SAME clickable chip
   layout as the intake questions:
       **A few details first**
+      - <Part> package: Through-Hole / Surface-Mount
+      - <Part> package: Through-Hole / Surface-Mount
       - <Label>: <choice> / <choice> / <choice>
-      - <Label>: <choice> / <choice>
       - Or: use sensible defaults
   Keep each choice to 1-3 plain words, no parentheses, no trailing "?". Always
   include the final "- Or: use sensible defaults" bullet so the user can one-tap
@@ -1322,10 +1353,19 @@ STEP 2 — Create the empty project. When the user gives or confirms the name, C
   "Created project <name>." REMEMBER the .kicad_sch path it returns (the "path" field) —
   STEP 4 needs it.
 
-STEP 3 — Ask the design choices. NOW ask ONE round of 2-4 clickable chip questions about
-  the choices you would otherwise ASSUME (supply voltage, package, indicator / connector,
-  key values like frequency / current). Use EXACTLY this layout:
+STEP 3 — Ask the design choices. NOW ask ONE round of clickable chip questions about
+  the choices you would otherwise ASSUME (supply voltage, indicator / connector, key
+  values like frequency / current). MANDATORY, every time: a SEPARATE "Package" row for
+  EVERY distinct component TYPE the design will use — never drop it, never blend parts
+  into one row. List EVERY distinct part type (resistor, capacitor, LED, diode,
+  transistor, connector, each named IC, etc.), one row per type, labelled with that part
+  (e.g. "LED package", "Resistor package", "NE555 package"). Repeated instances of the
+  SAME type still get only ONE row. Derive the list dynamically from the design's actual
+  parts — never a hardcoded fixed category list, and never ask about a package a part
+  cannot come in. Use EXACTLY this layout:
       **A few details first**
+      - <Part> package: Through-Hole / Surface-Mount
+      - <Part> package: Through-Hole / Surface-Mount
       - <Label>: <choice> / <choice> / <choice>
       - Or: use sensible defaults
   1-3 plain words per choice; always include "- Or: use sensible defaults". Skip a
@@ -1374,12 +1414,21 @@ STEP 1 — Project name + where to save. Ask ONLY this, then stop and wait:
   user pastes a different full path, use that instead.
 
 STEP 2 — Ask the design choices + raise your doubts/suggestions. BEFORE creating ANYTHING
-  on disk, ask ONE round of 2-4 clickable chip questions about the choices you would
-  otherwise ASSUME (supply voltage, package, indicator / connector, key values like
-  frequency / current). If you have a genuine design doubt or suggestion about the request,
+  on disk, ask ONE round of clickable chip questions about the choices you would otherwise
+  ASSUME (supply voltage, indicator / connector, key values like frequency / current).
+  MANDATORY, every time: a SEPARATE "Package" row for EVERY distinct component TYPE the
+  design will use — never drop it, never blend parts into one row, never assume it
+  silently. List EVERY distinct part type (resistor, capacitor, LED, diode, transistor,
+  connector, each named IC, etc.), one row per type, labelled with that part (e.g. "LED
+  package", "Resistor package", "Driver IC package"). Repeated instances of the SAME type
+  (ten resistors) still get only ONE row. Derive the list dynamically from the design's
+  actual parts — never a hardcoded fixed category list, and never ask about a package a
+  part cannot come in. If you have a genuine design doubt or suggestion about the request,
   add it as ONE short plain line ABOVE the choices. Use EXACTLY this layout:
       **A few details first**
       - <suggestion or doubt, one short line — only if you have one>
+      - <Part> package: Through-Hole / Surface-Mount
+      - <Part> package: Through-Hole / Surface-Mount
       - <Label>: <choice> / <choice> / <choice>
       - Or: use sensible defaults
   1-3 plain words per choice; always include "- Or: use sensible defaults". Skip a question
@@ -1527,6 +1576,103 @@ each confirm line short and in plain English. The build_circuit preview gate
 """
 
 
+PLACEMENT_ROUTE_GATE_RULE = """
+PLACEMENT & ROUTING CHECKPOINTS (inserted between STEP-BY-STEP CONFIRMATION
+steps 1 and 2). Placement runs only on the user's OK; routing runs only AFTER
+placement is approved; and after routing you ASK whether the user wants routing
+changes before moving on. Three gates, in order — never skip one:
+
+A) PLACEMENT CHECKPOINT (right after generate_pcb / update_pcb returns):
+   - generate_pcb / update_pcb PLACES components but does NOT route (the
+     automatic finish deliberately skips route_pcb_simple). Run placement_audit
+     and report the REAL finding in plain words (what's overlapping / off-board /
+     far from its IC — or "placement looks clean" if none).
+   - Ask: "Want to discuss or change the placement, or should I route it now?"
+     -> STOP, no tool call.
+       - User wants changes -> discuss what to move, apply with move_component /
+         rotate_component / auto_place_pcb, re-run placement_audit, ask again.
+         Loop until the user says to proceed. Do NOT route while the user still
+         wants placement changes.
+       - User says proceed / route it -> go to gate B.
+
+B) BEFORE ROUTING — raise your doubts first, THEN route:
+   - If you have ANY genuine doubt about how to route (which router — simple vs
+     A* for a tight / multi-layer board; layer count; which nets are priority /
+     high-current and need wider tracks; any keep-out), ask the user ONE short
+     question and WAIT for the answer. No real doubt -> do not invent one; just
+     route.
+   - Then route: call route_pcb_simple (or route_pcb_astar for a tight /
+     multi-layer board), and run routing_audit on the result.
+
+C) ROUTING CHECKPOINT (right after routing finishes — this is the one the user
+   asked for: after you finish routing, ASK if they want any routing changes):
+   - Report the routing_audit finding in plain words (unrouted nets, tracks too
+     thin / too close, sharp corners — or "routing looks clean" if none).
+   - Ask: "Routing done — any changes you want, or shall I continue?" -> STOP,
+     no tool call.
+       - User wants changes -> discuss, apply (ripup_reroute_pcb to redo a net,
+         route_pcb_simple / route_pcb_astar again, set_track_widths_pcb for
+         widths), re-run routing_audit, ask again. Loop until the user is happy.
+       - User says continue -> go to STEP-BY-STEP CONFIRMATION step 2 ("Run the
+         quality check?").
+
+Skip A only if the board already has placed+routed copper (an edit to an
+already-routed board) — then handle just the specific change requested. Never
+route before A is approved; never advance past C without the user's OK.
+"""
+
+
+ADD_COMPONENT_CLARIFY_RULE = """
+
+Adding a component to an EXISTING design — ask package first
+Before calling apply_ops with verb add_component / add_pullup / add_pulldown /
+add_led / add_decoupling (or any verb that inserts a NEW part into an
+already-existing schematic), if that part's package (Through-Hole vs
+Surface-Mount) is not already stated by the user or fixed by an explicit MPN,
+ask ONE short round first — ONE row per distinct NEW part type, derived from
+what you are about to add (resistor, capacitor, LED, diode, connector, ...) —
+never a hardcoded fixed list:
+    **A few details first**
+    - <Part> package: Through-Hole / Surface-Mount
+    - Or: use sensible defaults
+Then STOP and wait. After the user answers (or picks defaults), call the verb
+with `footprint` set explicitly to match their pick (e.g. Surface-Mount
+resistor -> a 0603/0805 SMD footprint, Through-Hole -> a THT footprint) —
+do not leave `footprint` blank once the user has made a choice.
+Skip this ask when: the request already names the package/footprint/MPN, the
+part only exists in one package, or this add is a sub-step of something the
+user already approved this turn (e.g. they just said yes to "add a pull-up").
+"""
+
+
+def _confirm_before_route_enabled() -> bool:
+    """Gate for the PLACEMENT CHECKPOINT suffix (PLACEMENT_ROUTE_GATE_RULE):
+    pause after placement, before routing, so the user can discuss/change
+    placement first. Reads layout_config.json:build_flow.confirm_before_route
+    (default True). Only meaningful when _confirm_each_step_enabled() is also
+    on. On any error -> ON."""
+    try:
+        from .intent.engine import _load_layout_config
+        cfg = _load_layout_config().get("build_flow", {}) or {}
+        return bool(cfg.get("confirm_before_route", True))
+    except Exception:
+        return True
+
+
+def _confirm_before_add_component_enabled() -> bool:
+    """Gate for the package-ask on adding a NEW component to an EXISTING
+    design (ADD_COMPONENT_CLARIFY_RULE) — closes the gap where edits to an
+    already-open schematic skipped the whole-circuit package-ask flow. Reads
+    layout_config.json:part_creation.confirm_before_add_component (default
+    True). On any error -> ON."""
+    try:
+        from .intent.engine import _load_layout_config
+        cfg = _load_layout_config().get("part_creation", {}) or {}
+        return bool(cfg.get("confirm_before_add_component", True))
+    except Exception:
+        return True
+
+
 GATE_ENFORCEMENT_RULE = """
 STAGE GATES (validate before advancing — never claim a stage done unless its gate passes):
 Each build stage has a READ-ONLY validation gate. After a stage's tool returns, run the
@@ -1663,19 +1809,29 @@ def _system_prompt_for_app(app: Optional[str]) -> str:
     # is unchanged when the flag is off). part-clarify is appended AFTER step
     # (same reason: empty string when off leaves the whole prefix unchanged).
     step = STEP_CONFIRMATION_RULE if _confirm_each_step_enabled() else ""
+    # Placement checkpoint (discuss/change before routing) — only meaningful
+    # alongside step-confirmation, appended right after it so it slots between
+    # STEP_CONFIRMATION_RULE's steps 1 and 2 as documented in its own text.
+    route_gate = (PLACEMENT_ROUTE_GATE_RULE
+                  if (_confirm_each_step_enabled() and _confirm_before_route_enabled())
+                  else "")
     # Applies wherever create_symbol/create_footprint/create_component can be
     # reached (unified + schematic + PCB for footprints).
     part = CREATE_PART_CLARIFY_RULE if _clarify_before_create_part_enabled() else ""
+    # Package-ask on adding a part to an EXISTING design (apply_ops
+    # add_component/add_pullup/...) — the new-circuit ask rules explicitly
+    # skip edits, so this closes that gap independently.
+    add_part = ADD_COMPONENT_CLARIFY_RULE if _confirm_before_add_component_enabled() else ""
     # Stage-gates enforcement — appended LAST (after step + part) so the whole
     # prefix is byte-identical to before when the flag is off (cache-stable).
     gate = GATE_ENFORCEMENT_RULE if _gate_enforcement_enabled() else ""
 
     if _unified_chat_enabled():
-        return SYSTEM_PROMPT + PAGE_SCOPE_UNIFIED + _build_suffix() + step + part + gate
+        return SYSTEM_PROMPT + PAGE_SCOPE_UNIFIED + _build_suffix() + step + route_gate + part + add_part + gate
     if a in ("schematic", "sch", "eeschema"):
-        return SYSTEM_PROMPT + PAGE_SCOPE_SCHEMATIC + _build_suffix() + step + part + gate
+        return SYSTEM_PROMPT + PAGE_SCOPE_SCHEMATIC + _build_suffix() + step + route_gate + part + add_part + gate
     if a in ("pcb", "pcbnew", "board"):
-        return SYSTEM_PROMPT + PAGE_SCOPE_PCB + step + part + gate
+        return SYSTEM_PROMPT + PAGE_SCOPE_PCB + step + route_gate + part + add_part + gate
     # No explicit page: the shell's common AI panel ("Anvil AI") sends app="" when no
     # editor tab is focused (the fresh / no-project-open case in the screenshotted shell).
     # That context already exposes ALL tools (build_circuit included — see tools_for_app),
@@ -1683,7 +1839,7 @@ def _system_prompt_for_app(app: Optional[str]) -> str:
     # suffixes (intake + project-naming). Without this the shell panel had the build TOOL
     # but not the build PROMPT, so it skipped the "Project name?" ask + structured preview.
     # Editor panels send an explicit "schematic"/"pcb" and stay page-scoped (revert intact).
-    return SYSTEM_PROMPT + PAGE_SCOPE_UNIFIED + _build_suffix() + step + part + gate
+    return SYSTEM_PROMPT + PAGE_SCOPE_UNIFIED + _build_suffix() + step + route_gate + part + add_part + gate
 
 
 def _build_mcp_server(tools=None):

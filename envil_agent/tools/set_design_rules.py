@@ -277,13 +277,40 @@ def _class_dict_from_config(name: str, body: Dict[str, Any],
     return out
 
 
+def _clamp_raw_class_dict(raw: Dict[str, Any],
+                          floors: Dict[str, Optional[float]]) -> Dict[str, Any]:
+    """Raise a KiCad-shaped net-class dict (whatever units/keys it already
+    has, e.g. hand-authored via the Board Setup UI) to the fab floor, same
+    as `_class_dict_from_config` does for config-owned classes. Never lowers
+    a value the user set above the floor -- only rescues one that would ship
+    an unbuildable board."""
+    out = dict(raw)
+    if floors.get("track"):
+        out["track_width"] = round(max(float(out.get("track_width", 0.2)),
+                                        floors["track"]), 4)
+    if floors.get("clearance"):
+        out["clearance"] = round(max(float(out.get("clearance", 0.2)),
+                                      floors["clearance"]), 4)
+    out["via_diameter"], out["via_drill"] = _clamp_via(
+        float(out.get("via_diameter", 0.6)), float(out.get("via_drill", 0.3)),
+        floors)
+    return out
+
+
 def _apply_net_classes(pro: Dict[str, Any],
                         classes_cfg: Dict[str, Any],
                         floors: Optional[Dict[str, Optional[float]]] = None
                         ) -> Tuple[bool, List[str]]:
-    """Replace net_settings.classes with the config catalogue. Default
-    class is always kept first because KiCad treats it specially.
-    Returns (changed, class_names)."""
+    """Write net_settings.classes from the config catalogue, one class per
+    catalogue entry (Default first). Any class ALREADY on the project whose
+    name is NOT in the catalogue survives untouched (fab-floor clamped) --
+    it was added by hand in KiCad's own Net Classes panel, or by a prior AI
+    session with different config, and must not be silently deleted just
+    because this run's config doesn't know its name. Config still governs
+    every class it DOES define (that's what makes fab/IPC floor enforcement
+    deterministic); only unknown, externally-added classes are preserved
+    as-is. Works for any class name -- no hardcoded list.
+    Returns (changed, all_class_names)."""
     ns = _ensure(pro, "net_settings")
     catalogue = classes_cfg.get("classes", {}) or {}
     if not catalogue:
@@ -296,28 +323,51 @@ def _apply_net_classes(pro: Dict[str, Any],
         if name != "Default":
             ordered.append(name)
     new_classes = [_class_dict_from_config(n, catalogue[n], floors) for n in ordered]
+
+    existing_raw = ns.get("classes") or []
+    manual_names: List[str] = []
+    for c in existing_raw:
+        if not (isinstance(c, dict) and c.get("name")):
+            continue
+        name = str(c["name"])
+        if name in catalogue:
+            continue                      # config-owned -- already rebuilt above
+        manual_names.append(name)
+        new_classes.append(_clamp_raw_class_dict(c, floors) if floors else dict(c))
+
+    all_names = ordered + manual_names
     if ns.get("classes") == new_classes:
-        return False, ordered
+        return False, all_names
     ns["classes"] = new_classes
     # Bump meta version if KiCad expects it (best-effort)
     meta = _ensure(ns, "meta")
     if "version" not in meta:
         meta["version"] = 5
-    return True, ordered
+    return True, all_names
 
 
 def _apply_netclass_patterns(pro: Dict[str, Any],
                               classes_cfg: Dict[str, Any]) -> bool:
     """Push pattern-based net assignment rules. Pattern syntax matches
-    KiCad's wildcard netclass_patterns."""
+    KiCad's wildcard netclass_patterns. Any pattern already on the project
+    that our config doesn't generate (assigned by hand via KiCad's own net-
+    class-per-net UI, or by a prior AI session) is kept, appended after the
+    config-driven rules -- config wins priority on overlap, nothing manual
+    is silently dropped."""
     ns = _ensure(pro, "net_settings")
     rules = (classes_cfg.get("assignment_patterns", {}) or {}).get("rules", [])
     new_list = [{"netclass": str(r.get("class") or "Default"),
                  "pattern":  str(r.get("pattern", ""))}
                 for r in rules if r.get("pattern")]
-    if ns.get("netclass_patterns") == new_list:
+    new_patterns = {r["pattern"] for r in new_list}
+    existing = ns.get("netclass_patterns") or []
+    manual = [r for r in existing
+              if isinstance(r, dict) and r.get("pattern")
+              and r["pattern"] not in new_patterns]
+    merged = new_list + manual
+    if ns.get("netclass_patterns") == merged:
         return False
-    ns["netclass_patterns"] = new_list
+    ns["netclass_patterns"] = merged
     return True
 
 

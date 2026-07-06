@@ -379,7 +379,11 @@ def emit_dru(directives: List[Dict[str, Any]], project_path: str
     for d in directives:
         lines.append(f'(rule "{d["name"]}"')
         if d.get("text"):
-            lines.append(f'  ;; {d["text"]}')
+            # KiCad's DRC-rules lexer (dsnlexer.cpp) only recognizes '#' as a
+            # start-of-line comment marker — ';;' is not special and gets fed
+            # to the parser as a bare symbol, which fails InitEngine() with
+            # "could not compile custom design rules" for every generated rule.
+            lines.append(f'  # {d["text"]}')
         if d.get("condition"):
             lines.append(f'  (condition "{d["condition"]}")')
         if d["dru"] == "disallow":
