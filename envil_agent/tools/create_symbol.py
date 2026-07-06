@@ -606,7 +606,8 @@ def _refresh_caches() -> None:
     so the just-created part still looks missing on the next build."""
     try:
         from ..kicad import symbol_geom as sg
-        for fn in ("load_symbol", "_all_symbols", "resolve_lib_id_by_value"):
+        for fn in ("load_symbol", "_all_symbols", "resolve_lib_id_by_value",
+                   "_lib_nick_map"):
             obj = getattr(sg, fn, None)
             if obj is not None and hasattr(obj, "cache_clear"):
                 obj.cache_clear()
@@ -883,11 +884,17 @@ def _uri_for(table_text: str, library: str, symdir: Path) -> str:
     return str(symdir).replace("\\", "/")
 
 
-def _register_in_lib_tables(library: str, symdir: Path) -> List[str]:
+def _register_in_lib_tables(library: str, symdir: Path,
+                            abs_uri: bool = False) -> List[str]:
     """Ensure `library` is listed in KiCad's global sym-lib-table(s) so the
     new symbol appears in the eeschema chooser / Symbol Editor. Idempotent
     (skips a table that already has the entry) and safe (backs the table up
-    to <name>.envil-bak before the first edit). Returns status notes."""
+    to <name>.envil-bak before the first edit). Returns status notes.
+
+    `abs_uri`: write the absolute symdir path as the URI instead of reusing a
+    ${KICADn_SYMBOL_DIR}-style token. Required for a custom `lib_path` that
+    lives OUTSIDE the standard symbols root — otherwise _uri_for would point
+    KiCad at ${KICADn_SYMBOL_DIR}/<library>.kicad_symdir (the wrong place)."""
     notes: List[str] = []
     tables = _find_sym_lib_tables()
     if not tables:
@@ -902,7 +909,8 @@ def _register_in_lib_tables(library: str, symdir: Path) -> List[str]:
         if re.search(r'\(lib\s+\(name\s+"' + re.escape(library) + r'"', text):
             notes.append(f"already registered in {tbl.parent.name}")
             continue
-        uri = _uri_for(text, library, symdir)
+        uri = (str(symdir).replace("\\", "/") if abs_uri
+               else _uri_for(text, library, symdir))
         entry = (f'\t(lib (name "{library}") (type "KiCad") '
                  f'(uri "{uri}") (options "") '
                  f'(descr "Envil custom symbols"))\n')
@@ -1065,7 +1073,17 @@ def _verify_pinout(reference: str, pins: List[dict], confidence: float
         "project-level sym-lib-table — the symbol is only available to that "
         "project. Requires project_path when scope='project'.\n"
         "  project_path: path to the .kicad_pro file (or project folder). "
-        "Required when scope='project'; ignored otherwise.\n\n"
+        "Required when scope='project'; ignored otherwise.\n"
+        "  lib_path: optional explicit output path for the symbol library. "
+        "When provided this overrides scope/project_path entirely. Two forms "
+        "are accepted: (a) a plain directory, e.g. 'C:/MyProject/libs/' — the "
+        "tool creates '<library>.kicad_symdir' inside it; (b) a directory "
+        "whose name already ends in '.kicad_symdir', e.g. "
+        "'C:/MyProject/libs/Custom.kicad_symdir' — used as-is. The symbol "
+        "is registered in the global sym-lib-table with an absolute URI so "
+        "KiCad can find it, and the in-session resolver is updated immediately "
+        "so subsequent build_circuit / apply_ops calls work without a "
+        "restart.\n\n"
         "Returns JSON: {status:'created'|'exists', lib_id, path, pin_count, "
         "reference, footprint, confidence, warnings, library_registered, scope}. "
         "status='exists' means use the returned lib_id (no symbol written). "
@@ -1075,7 +1093,7 @@ def _verify_pinout(reference: str, pins: List[dict], confidence: float
         "part_number": str, "library": str, "datasheet_url": str,
         "description": str, "footprint": str, "pins_json": str,
         "overwrite": bool, "force": bool, "pin_layout": str,
-        "scope": str, "project_path": str,
+        "scope": str, "project_path": str, "lib_path": str,
     },
 )
 async def create_symbol(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -1100,7 +1118,8 @@ async def create_symbol(args: Dict[str, Any]) -> Dict[str, Any]:
     if scope not in ("global", "project"):
         scope = "global"
     project_path = (args.get("project_path") or "").strip()
-    if scope == "project" and not project_path:
+    lib_path_raw = (args.get("lib_path") or "").strip()
+    if scope == "project" and not project_path and not lib_path_raw:
         return _err("scope='project' requires project_path (path to the "
                     ".kicad_pro file or project folder)")
     researched = not pins_json
@@ -1218,15 +1237,23 @@ async def create_symbol(args: Dict[str, Any]) -> Dict[str, Any]:
     text = _build_kicad_sym(name, reference, description, datasheet,
                             footprint, half_w, half_h, placed)
 
-    # ---- 6. Write into the target library (global or project-scoped) ----
-    if scope == "project":
+    # ---- 6. Write into the target library (global, project-scoped, or custom) ----
+    if lib_path_raw:
+        lib_path_obj = Path(lib_path_raw).expanduser().resolve()
+        if lib_path_obj.name.endswith(".kicad_symdir"):
+            symdir = lib_path_obj
+        else:
+            symdir = lib_path_obj / f"{library}.kicad_symdir"
+        effective_scope = "custom"
+    elif scope == "project":
         proj_dir = Path(project_path).expanduser()
         if proj_dir.is_file():
             proj_dir = proj_dir.parent
-        root = proj_dir
+        symdir = proj_dir / f"{library}.kicad_symdir"
+        effective_scope = "project"
     else:
-        root = _target_root()
-    symdir = root / f"{library}.kicad_symdir"
+        symdir = _target_root() / f"{library}.kicad_symdir"
+        effective_scope = "global"
     out_path = symdir / f"{_safe_part(name)}.kicad_sym"
     if out_path.exists() and not overwrite:
         return _err(f"symbol file already exists at {out_path} — pass "
@@ -1238,7 +1265,16 @@ async def create_symbol(args: Dict[str, Any]) -> Dict[str, Any]:
         return _err(f"could not write symbol file: {exc}")
 
     # ---- 7. Register the library in KiCad's GUI table + refresh caches ----
-    if scope == "project":
+    if effective_scope == "custom":
+        # Register with an absolute URI in the global sym-lib-table so KiCad
+        # finds it, then inject the parent root into the in-session resolver.
+        register_notes = _register_in_lib_tables(library, symdir, abs_uri=True)
+        try:
+            from ..kicad.symbol_geom import inject_sym_root
+            inject_sym_root(str(symdir.parent))
+        except Exception:
+            pass
+    elif effective_scope == "project":
         register_notes = _register_in_project_lib_table(library, symdir,
                                                         project_path)
         # Inject the project root so subsequent load_symbol / edit_symbol
@@ -1274,7 +1310,20 @@ async def create_symbol(args: Dict[str, Any]) -> Dict[str, Any]:
         warnings.append(f"footprint: {fp_note}")
     if fp_proposed and not footprint:
         warnings.append("no footprint attached — physical package unresolved")
-    if scope == "project":
+    if effective_scope == "custom":
+        scope_note = (
+            f"Created symbol {lib_id} with {len(pins)} pins at custom path "
+            f"{str(out_path).replace(chr(92), '/')}. "
+            + ("Registered in KiCad's global library table with an absolute "
+               f"URI — RESTART KiCad (or Preferences > Manage Symbol "
+               f"Libraries) to see it under the '{library}' library. "
+               if gui_registered else
+               "NOTE: could not auto-register in KiCad's library table; "
+               "add it manually via Preferences > Manage Symbol Libraries. ")
+            + "The in-session resolver is already updated — you can use "
+            + f"lib_id={lib_id} in build_circuit / apply_ops right away."
+        )
+    elif effective_scope == "project":
         scope_note = (
             f"Created project-local symbol {lib_id} with {len(pins)} pins, "
             f"saved to {str(out_path).replace(chr(92), '/')}. "
@@ -1300,7 +1349,7 @@ async def create_symbol(args: Dict[str, Any]) -> Dict[str, Any]:
         )
     result = {
         "status": "created",
-        "scope": scope,
+        "scope": effective_scope,
         "lib_id": lib_id,
         "path": str(out_path).replace("\\", "/"),
         "symbol_name": name,

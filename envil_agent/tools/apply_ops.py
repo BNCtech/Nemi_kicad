@@ -231,18 +231,49 @@ def _op_delete(root: list, ref: str) -> Tuple[bool, str]:
     removed_junctions = 0
     removed_ncs = 0
     if pin_coords:
-        # Walk root in reverse so removals don't shift indices.
+        # Build the set of pin coords still alive after this removal so the
+        # cascade below knows what NOT to sweep (wires still connected to a
+        # live component must survive).
+        alive_pins: set = set()
+        for child in root[1:]:
+            if isinstance(child, list) and _head(child) == "symbol":
+                for pc in _pin_abs_coords(child):
+                    alive_pins.add(pc)
+
+        dead_coords = set(pin_coords)
+
+        # Cascade-sweep orphan wires.  A wire is swept when:
+        #   (a) at least one endpoint is in dead_coords, AND
+        #   (b) no endpoint is in alive_pins.
+        # Condition (b) ensures we never remove a segment that still
+        # connects to a surviving component.  After sweeping a wire its
+        # freed endpoints (not yet in dead_coords, not alive pins) are
+        # added to dead_coords so the next pass can sweep further segments
+        # of multi-hop paths (bend1→bend2→bend3 chains between two deleted
+        # components).
+        changed = True
+        while changed:
+            changed = False
+            for child in list(root[1:]):
+                if not isinstance(child, list) or _head(child) != "wire":
+                    continue
+                eps = _wire_endpoints(child)
+                touches_dead  = any(_coord_match(ep, dc) for ep in eps for dc in dead_coords)
+                touches_alive = any(_coord_match(ep, ap) for ep in eps for ap in alive_pins)
+                if touches_dead and not touches_alive:
+                    for ep in eps:
+                        if not any(_coord_match(ep, dc) for dc in dead_coords):
+                            dead_coords.add(ep)
+                    root.remove(child)
+                    removed_wires += 1
+                    changed = True
+
+        # Single pass for junctions and no_connects at any dead coord.
         for child in list(root[1:]):
             if not isinstance(child, list):
                 continue
             head = _head(child)
-            if head == "wire":
-                eps = _wire_endpoints(child)
-                if any(_coord_match(ep, pc) for ep in eps for pc in pin_coords):
-                    root.remove(child)
-                    removed_wires += 1
-            elif head == "junction":
-                # (junction (at x y) ...) — match the at clause coord
+            if head == "junction":
                 jat = None
                 for sub in child[1:]:
                     if isinstance(sub, list) and _head(sub) == "at" and len(sub) >= 3:
@@ -254,7 +285,7 @@ def _op_delete(root: list, ref: str) -> Tuple[bool, str]:
                                 round(float(jat[2]), 4))
                     except (TypeError, ValueError):
                         continue
-                    if any(_coord_match(jp, pc) for pc in pin_coords):
+                    if any(_coord_match(jp, dc) for dc in dead_coords):
                         root.remove(child)
                         removed_junctions += 1
             elif head == "no_connect":
@@ -269,7 +300,7 @@ def _op_delete(root: list, ref: str) -> Tuple[bool, str]:
                                 round(float(nat[2]), 4))
                     except (TypeError, ValueError):
                         continue
-                    if any(_coord_match(np_, pc) for pc in pin_coords):
+                    if any(_coord_match(np_, dc) for dc in dead_coords):
                         root.remove(child)
                         removed_ncs += 1
     extras = []
@@ -281,6 +312,36 @@ def _op_delete(root: list, ref: str) -> Tuple[bool, str]:
         extras.append(f"{removed_ncs} no_connect(s)")
     suffix = f" (+swept {', '.join(extras)})" if extras else ""
     return True, f"removed symbol {ref}{suffix}"
+
+
+# ---------------------------------------------------------------------------
+# clear_schematic — wipe all placed content, keep file header
+# ---------------------------------------------------------------------------
+
+# Node types that represent placed schematic content (not file structure).
+_SCHEMATIC_CONTENT_NODES = frozenset({
+    "symbol", "wire", "bus", "bus_entry", "junction", "no_connect",
+    "label", "global_label", "hierarchical_label", "sheet",
+    "symbol_instances",
+})
+
+
+def _op_clear_schematic(root: list) -> Tuple[bool, str]:
+    """Remove every placed object from the schematic while keeping the
+    file header (version, uuid, paper, title_block, lib_symbols).
+    Used for 'delete the whole schematic' / 'start fresh' requests."""
+    removed: dict = {}
+    for child in list(root[1:]):
+        if not isinstance(child, list):
+            continue
+        head = _head(child)
+        if head in _SCHEMATIC_CONTENT_NODES:
+            root.remove(child)
+            removed[head] = removed.get(head, 0) + 1
+    if not removed:
+        return True, "schematic was already empty"
+    summary = ", ".join(f"{v} {k}(s)" for k, v in sorted(removed.items()))
+    return True, f"cleared schematic: {summary}"
 
 
 def _op_move(root: list, ref: str, dx: float, dy: float) -> Tuple[bool, str]:
@@ -396,63 +457,36 @@ def _new_uuid() -> str:
 def _symbol_bboxes_from_root(root: list,
                                exclude_endpoints: Optional[List[Tuple[float, float]]] = None
                                ) -> List[Tuple[float, float, float, float, str]]:
-    """Compute (x1, y1, x2, y2, ref) bbox for every PLACED symbol in
-    the schematic. Used by the geometry validator so apply_ops:add_wire
-    can reject paths that would pierce a component body.
+    """Compute (x1, y1, x2, y2, ref) schematic-space bbox for every
+    PLACED symbol. Used by wire collision detection so add_wire rejects
+    paths that pierce a component body.
 
-    Bbox is derived from pin extents in the matching lib_symbol entry,
-    transformed by the symbol instance's (at x y rot). Power-port
-    symbols (refdes starting with '#') get a generous fixed bbox
-    because their tiny pin extent doesn't reflect the visible arrow.
+    Uses load_symbol().outer_bbox (body graphics + full pin extents in
+    local Y-UP space) and transforms it to schematic Y-DOWN coordinates
+    with the correct rotation-aware 4-corner formula:
 
-    `exclude_endpoints` is a list of (x, y) — bboxes whose centre is
-    within 1 mm of any endpoint are SKIPPED. This is critical: a wire
-    LEGITIMATELY touches its own endpoint pins; flagging that as a
-    pierce would block every legal wire. The caller passes the wire's
-    endpoints so the validator knows which symbols are 'allowed to
-    touch'."""
+        local (Y-UP)  →  Y-flip (y = -y)  →  2D rotate by srot  →  translate
+
+    The prior approach only collected pin anchor positions from the raw
+    lib_symbols s-expression and applied a Y-flip without rotation.
+    This gave wrong (too narrow) bboxes for:
+      - Rotated symbols (e.g. a 90° resistor), where the pin cluster
+        is now on top/bottom but the bbox was still left/right.
+      - Symbols with no body rectangle (connectors, pure-pin symbols)
+        where only the pin TIP coords were captured, not the full body
+        extent between pin body-ends.
+    Both errors let wires pass through the visible body undetected.
+
+    `exclude_endpoints`: bboxes whose extent overlaps any wire endpoint
+    are SKIPPED — the wire legitimately connects to that component."""
     excluded = exclude_endpoints or []
-
-    # Load lib_symbol pin extents once
-    lib_pin_extents: Dict[str, Tuple[float, float, float, float]] = {}
-    for child in root[1:]:
-        if not (isinstance(child, list) and _head(child) == "lib_symbols"):
-            continue
-        for sym_def in child[1:]:
-            if not (isinstance(sym_def, list) and _head(sym_def) == "symbol"):
-                continue
-            if len(sym_def) < 2:
-                continue
-            lib_id = str(sym_def[1])
-            xs: List[float] = []
-            ys: List[float] = []
-            def _walk_for_pins(node):
-                if not isinstance(node, list):
-                    return
-                if _head(node) == "pin":
-                    for sub in node[1:]:
-                        if (isinstance(sub, list) and _head(sub) == "at"
-                                and len(sub) >= 3):
-                            try:
-                                xs.append(float(sub[1]))
-                                ys.append(float(sub[2]))
-                            except (TypeError, ValueError):
-                                pass
-                for child2 in node[1:]:
-                    _walk_for_pins(child2)
-            _walk_for_pins(sym_def)
-            if xs and ys:
-                lib_pin_extents[lib_id] = (min(xs), min(ys),
-                                            max(xs), max(ys))
-
     out: List[Tuple[float, float, float, float, str]] = []
+
     for child in root[1:]:
         if not (isinstance(child, list) and _head(child) == "symbol"):
             continue
         ref = _ref_of_symbol(child) or ""
-        # Power-port symbols (#PWR, #FLG) have minimal bbox — wires
-        # SHOULD pass through them legitimately to bond to the rail.
-        # Skip them entirely from collision check.
+        # Power-port symbols (#PWR, #FLG) — wires bond through them.
         if ref.startswith("#"):
             continue
         lib_id = None
@@ -467,22 +501,44 @@ def _symbol_bboxes_from_root(root: list,
         try:
             sx = float(at[1])
             sy = float(at[2])
+            srot = float(at[3]) if len(at) >= 4 else 0.0
         except (TypeError, ValueError):
             continue
-        extent = lib_pin_extents.get(lib_id)
-        if extent is None:
-            # Conservative fallback: 8x8 mm centred bbox
+
+        # Transform the symbol's outer_bbox (local Y-UP) to schematic
+        # coordinates (Y-DOWN) using the full rotation-aware formula.
+        # All 4 corners are transformed and the axis-aligned envelope
+        # is taken, so a rotated symbol gets a correct wider/taller bbox.
+        bbox = None
+        try:
+            from ..kicad.symbol_geom import load_symbol
+            geom = load_symbol(lib_id)
+            lx1, ly1, lx2, ly2 = geom.outer_bbox
+            if lx1 <= lx2 and ly1 <= ly2:
+                rad = math.radians(srot)
+                cos_r, sin_r = math.cos(rad), math.sin(rad)
+                sch_xs: List[float] = []
+                sch_ys: List[float] = []
+                for lx, ly in ((lx1, ly1), (lx2, ly1),
+                               (lx1, ly2), (lx2, ly2)):
+                    # Y-flip: symbol Y-UP → schematic Y-DOWN
+                    px, py = lx, -ly
+                    # 2D rotation by srot degrees
+                    rx = px * cos_r - py * sin_r
+                    ry = px * sin_r + py * cos_r
+                    sch_xs.append(sx + rx)
+                    sch_ys.append(sy + ry)
+                bbox = (min(sch_xs), min(sch_ys), max(sch_xs), max(sch_ys))
+        except Exception:
+            pass
+
+        if bbox is None:
+            # Fallback: 8x8 mm centred bbox
             bbox = (sx - 4.0, sy - 4.0, sx + 4.0, sy + 4.0)
-        else:
-            lx1, ly1, lx2, ly2 = extent
-            # KiCad symbol coords are Y-up; schematic is Y-down. Mirror Y.
-            bbox = (sx + lx1, sy - ly2, sx + lx2, sy - ly1)
-        # Skip if any wire endpoint is at this symbol's pin tip
+
+        # Skip if any wire endpoint touches this symbol's extended bbox.
         skip = False
-        cx = (bbox[0] + bbox[2]) / 2
-        cy = (bbox[1] + bbox[3]) / 2
         for (ex, ey) in excluded:
-            # Endpoint inside expanded bbox = legitimate touch
             if (bbox[0] - 2.54 <= ex <= bbox[2] + 2.54
                     and bbox[1] - 2.54 <= ey <= bbox[3] + 2.54):
                 skip = True
@@ -1254,7 +1310,7 @@ def _analyze_wire_route(ax: float, ay: float, bx: float, by: float,
         hit = (_seg_pierces(path[0], path[1])
                + _seg_pierces(path[1], path[2])
                + _seg_pierces(path[2], path[3]))
-        if not hit:
+        if not hit and not _path_overlaps_wire(path):
             candidates.append((abs(dy - ay) + abs(dy - by), "Z (top/bottom)",
                                  path))
     # Vertical detour: go LEFT or RIGHT of the blocker
@@ -1263,7 +1319,7 @@ def _analyze_wire_route(ax: float, ay: float, bx: float, by: float,
         hit = (_seg_pierces(path[0], path[1])
                + _seg_pierces(path[1], path[2])
                + _seg_pierces(path[2], path[3]))
-        if not hit:
+        if not hit and not _path_overlaps_wire(path):
             candidates.append((abs(dx - ax) + abs(dx - bx), "Z (left/right)",
                                  path))
     if candidates:
@@ -2240,6 +2296,10 @@ def _restore_latest_txn(primary: Path) -> Optional[Tuple[bool, str]]:
         '  reroute crosses: {"verb": "reroute_crossing_wires", "target_ref": "U1"}\n'
         '                   (target_ref optional; empty = sweep whole sheet)\n'
         '  decoupling:      {"verb": "add_decoupling", "ic_ref": "U1", "hf_value": "100n", "bulk_value": "10u", "include_bulk": true}\n'
+        '  clear schematic: {"verb": "clear_schematic"}\n'
+        '                   (removes ALL placed content: symbols, wires, labels, buses,\n'
+        '                    junctions, no_connects. Keeps file header. Use for\n'
+        '                    "delete the whole schematic" / "wipe everything" / "start fresh".)\n'
         '  undo:            {"verb": "undo_last_edit"}\n'
         '                   {"verb": "undo_last_edit", "snapshot": "<name>"}\n'
         '  history:         {"verb": "list_snapshots"}\n'
@@ -2334,6 +2394,9 @@ async def apply_ops(args: dict[str, Any]) -> dict[str, Any]:
         # wires
         "wire": "add_wire", "connect": "add_wire",
         "remove_wire": "delete_wire", "disconnect": "delete_wire",
+        # clear schematic
+        "wipe_schematic": "clear_schematic", "erase_schematic": "clear_schematic",
+        "nuke_schematic": "clear_schematic", "reset_schematic": "clear_schematic",
         # ERC safe-auto verbs
         "no_connect": "add_no_connect", "nc": "add_no_connect",
         "mark_no_connect": "add_no_connect",
@@ -2718,6 +2781,8 @@ async def apply_ops(args: dict[str, Any]) -> dict[str, Any]:
                       "ops_summary": s["ops_summary"]}
                     for s in snaps
                 ])
+            elif verb == "clear_schematic":
+                ok, note = _op_clear_schematic(root)
             elif verb == "combine_sheets":
                 # Multi-file op — delegates to the standalone
                 # combine_sheets tool. The `path` arg of apply_ops is

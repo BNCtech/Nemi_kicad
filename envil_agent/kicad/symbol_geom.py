@@ -138,16 +138,20 @@ _KICAD_BUILTIN_TOKENS: dict = {
 }
 
 
-def _resolve_sym_lib_table(table: Path,
-                            extra_env: Optional[dict] = None) -> List[str]:
-    """Parse a KiCad sym-lib-table file and return the unique parent-directory
-    root for every ``(lib ...)`` entry whose URI can be fully expanded.
+def _parse_sym_lib_entries(table: Path,
+                           extra_env: Optional[dict] = None
+                           ) -> List[Tuple[str, str]]:
+    """Parse a KiCad sym-lib-table and return ``(nickname, expanded_uri)`` for
+    every ``(lib ...)`` entry whose URI fully expands.
 
     Token resolution order:
       1. ``extra_env``  — caller-supplied (from kicad_common.json vars)
       2. ``os.environ`` — process environment
       3. ``_KICAD_BUILTIN_TOKENS`` — known KiCad version-path defaults
 
+    In a sym-lib-table ``(name "...")`` only ever names a library and its
+    ``(uri "...")`` always follows it within the same ``(lib ...)`` block, so
+    pairing each name with the next uri is robust to whitespace / line breaks.
     Entries whose URI still contains ``${…}`` after expansion are skipped
     (unresolvable token — not an error)."""
     import re
@@ -164,14 +168,29 @@ def _resolve_sym_lib_table(table: Path,
         return (env.get(k) or os.environ.get(k)
                 or _KICAD_BUILTIN_TOKENS.get(k) or m.group(0))
 
+    out: List[Tuple[str, str]] = []
+    pending: Optional[str] = None
+    for m in re.finditer(r'\((name|uri)\s+"([^"]*)"', txt):
+        kind, val = m.group(1), m.group(2)
+        if kind == "name":
+            pending = val
+        elif pending is not None:  # kind == "uri"
+            expanded = re.sub(r"\$\{([^}]+)\}", _sub, val).replace(
+                "\\", "/").strip()
+            if expanded and "${" not in expanded:
+                out.append((pending, expanded))
+            pending = None
+    return out
+
+
+def _resolve_sym_lib_table(table: Path,
+                            extra_env: Optional[dict] = None) -> List[str]:
+    """The unique parent-directory root for every resolvable ``(lib ...)`` URI
+    in a sym-lib-table (a URI points at a ``.kicad_symdir`` folder or a flat
+    ``.kicad_sym`` file; the root is its parent directory)."""
     roots: List[str] = []
     seen: set = set()
-    for uri in re.findall(r'\(uri\s+"([^"]+)"', txt):
-        expanded = re.sub(r"\$\{([^}]+)\}", _sub, uri).replace("\\", "/").strip()
-        if "${" in expanded or not expanded:
-            continue
-        # The URI points to a .kicad_symdir or a flat .kicad_sym file;
-        # the root is its parent directory.
+    for _nick, expanded in _parse_sym_lib_entries(table, extra_env):
         parent = expanded.rsplit("/", 1)[0] if "/" in expanded else expanded
         key = os.path.normcase(os.path.normpath(parent))
         if key not in seen:
@@ -185,6 +204,11 @@ def _resolve_sym_lib_table(table: Path,
 # so _sym_roots() / load_symbol() / _all_symbols() all see project-local libs.
 _project_sym_roots: List[str] = []
 
+# Project sym-lib-table FILE paths seen this session — parsed by _lib_nick_map()
+# so a project-local library added via KiCad's Preferences (nickname ≠ filename)
+# is reachable, not just envil's own convention-named ones.
+_project_tables: List[str] = []
+
 
 def inject_project_sym_roots(project_path: str) -> List[str]:
     """Read the sym-lib-table in `project_path`'s directory and register its
@@ -196,7 +220,7 @@ def inject_project_sym_roots(project_path: str) -> List[str]:
     Returns the list of newly discovered roots (empty if already known or
     none found). Clears the symbol-resolution caches so the change takes
     effect immediately."""
-    global _project_sym_roots
+    global _project_sym_roots, _project_tables
     p = Path(project_path).expanduser()
     if p.is_file():
         p = p.parent
@@ -210,15 +234,50 @@ def inject_project_sym_roots(project_path: str) -> List[str]:
         if not already:
             _project_sym_roots.append(r)
             changed = True
+    # Record the table itself so _lib_nick_map() can reach a project lib whose
+    # nickname ≠ filename (or whose URI uses ${KIPRJMOD}, which the root scan
+    # above skips) — do this even when new_roots is empty for that reason.
+    tkey = os.path.normcase(os.path.normpath(table))
+    if table.is_file() and not any(
+            os.path.normcase(os.path.normpath(t)) == tkey
+            for t in _project_tables):
+        _project_tables.append(str(table))
+        changed = True
     if changed:
         # Clear caches so next call to _sym_roots / load_symbol picks up
         # the new roots.
         _discover_config_roots.cache_clear()
-        for fn_name in ("load_symbol", "_all_symbols", "resolve_lib_id_by_value"):
+        for fn_name in ("load_symbol", "_all_symbols",
+                        "resolve_lib_id_by_value", "_lib_nick_map"):
             fn = globals().get(fn_name)
             if fn is not None and hasattr(fn, "cache_clear"):
                 fn.cache_clear()
     return new_roots
+
+
+def inject_sym_root(root: str) -> bool:
+    """Inject an arbitrary root directory into the in-session symbol resolver.
+
+    Used when a symbol is created at a user-supplied ``lib_path`` that is
+    neither a KiCad project folder nor the global symbol root.  The root is
+    appended to ``_project_sym_roots`` (which ``_candidate_roots`` already
+    includes at priority-2), and the lru_caches are cleared so the very next
+    ``load_symbol`` / ``_all_symbols`` call sees the new library.
+
+    Returns True if the root was newly added, False if it was already known."""
+    global _project_sym_roots
+    key = os.path.normcase(os.path.normpath(root))
+    if any(os.path.normcase(os.path.normpath(e)) == key
+           for e in _project_sym_roots):
+        return False
+    _project_sym_roots.append(root)
+    _discover_config_roots.cache_clear()
+    for fn_name in ("load_symbol", "_all_symbols",
+                    "resolve_lib_id_by_value", "_lib_nick_map"):
+        fn = globals().get(fn_name)
+        if fn is not None and hasattr(fn, "cache_clear"):
+            fn.cache_clear()
+    return True
 
 
 def _has_symbols(root: Path) -> bool:
@@ -323,6 +382,67 @@ def _discover_config_roots() -> Tuple[str, ...]:
             _add(root)
 
     return tuple(found)
+
+
+def _config_env_for(cfg_dir: Path) -> dict:
+    """Token-expansion env for one KiCad config dir: the synthesized
+    ``KICAD<major>_SYMBOL_DIR`` seed plus any string vars declared in that
+    dir's ``kicad_common.json``. Mirrors the env ``_discover_config_roots``
+    builds, so ``_lib_nick_map`` expands the SAME URIs identically."""
+    import json
+    env: dict = dict(_synth_sym_env(cfg_dir.name))
+    common = cfg_dir / "kicad_common.json"
+    try:
+        if common.is_file():
+            data = json.loads(common.read_text(encoding="utf-8"))
+            raw_env = data.get("environment") or {}
+            env_vars = (raw_env.get("vars", raw_env)
+                        if isinstance(raw_env, dict) else {})
+            if isinstance(env_vars, dict):
+                env.update({k: v for k, v in env_vars.items()
+                            if isinstance(v, str)})
+    except (OSError, ValueError):
+        pass
+    return env
+
+
+@lru_cache(maxsize=1)
+def _lib_nick_map() -> dict:
+    """Map each library NICKNAME registered in a sym-lib-table to the real
+    filesystem ``Path`` its URI points at — a flat ``.kicad_sym`` file or a
+    ``.kicad_symdir`` folder, fully token-expanded.
+
+    THIS is what lets the resolver reach a library the user added through
+    KiCad's *Preferences → Manage Symbol Libraries* even when the nickname
+    does NOT equal the file/folder name — the default assumption baked into
+    ``_find_symbol_in_lib`` / ``_fuzzy_resolve``. First registration wins on a
+    nickname clash; project tables are read before the global per-version
+    tables (newest-first) so a project lib shadows a global one, as in KiCad.
+    Cached for the process; invalidated by inject_*_sym_root(s)."""
+    out: dict = {}
+
+    def _put(nick: str, uri: str) -> None:
+        if nick and nick not in out:
+            out[nick] = Path(uri)
+
+    # 1. Project / injected tables — highest precedence. Seed ${KIPRJMOD} with
+    #    the table's own directory so project URIs that use it resolve.
+    for tbl in list(_project_tables):
+        tpath = Path(tbl)
+        penv = {"KIPRJMOD": str(tpath.parent).replace("\\", "/")}
+        for nick, uri in _parse_sym_lib_entries(tpath, penv):
+            _put(nick, uri)
+    # 2. Global per-version tables, newest first.
+    for cfg_dir in _kicad_config_dirs():
+        env = _config_env_for(cfg_dir)
+        for nick, uri in _parse_sym_lib_entries(cfg_dir / "sym-lib-table", env):
+            _put(nick, uri)
+    # 3. KICAD_CONFIG_HOME override table, if present.
+    cfg_home = os.environ.get("KICAD_CONFIG_HOME")
+    if cfg_home:
+        for nick, uri in _parse_sym_lib_entries(Path(cfg_home) / "sym-lib-table"):
+            _put(nick, uri)
+    return out
 
 
 def _candidate_roots() -> List[str]:
@@ -722,28 +842,71 @@ def _bbox_with_pins(symbol_node: list) -> Tuple[Tuple, Tuple]:
     return body, outer
 
 
+def _extract_symbol_from_file(path: Path, part: str) -> Optional[list]:
+    """Read a ``.kicad_sym`` file and return the ``(symbol "<part>" ...)`` block
+    it holds — whether the file is a single-symbol file or a
+    ``kicad_symbol_lib`` holding many. None if the file is missing, unparseable,
+    or lacks that part."""
+    try:
+        if not path.is_file():
+            return None
+        tree = sexpdata.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — a bad/locked file must not break lookup
+        return None
+    if not isinstance(tree, list):
+        return None
+    if _head(tree) == "kicad_symbol_lib":
+        for sym in _find_children(tree, "symbol"):
+            if len(sym) > 1 and str(sym[1]) == part:
+                return sym
+    elif _head(tree) == "symbol":
+        if len(tree) > 1 and str(tree[1]) == part:
+            return tree
+    return None
+
+
+def _top_level_symbol_names(path: Path) -> List[str]:
+    """Every TOP-LEVEL symbol name in a ``.kicad_sym`` file (skips the nested
+    ``<part>_1_1`` subunit blocks). Used to enumerate a flat multi-symbol
+    library for fuzzy matching."""
+    try:
+        tree = sexpdata.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return []
+    if not isinstance(tree, list):
+        return []
+    if _head(tree) == "kicad_symbol_lib":
+        return [str(s[1]) for s in _find_children(tree, "symbol")
+                if len(s) > 1 and isinstance(s[1], str)]
+    if _head(tree) == "symbol" and len(tree) > 1 and isinstance(tree[1], str):
+        return [str(tree[1])]
+    return []
+
+
 def _find_symbol_in_lib(libnick: str, part: str) -> Optional[list]:
-    """Locate a (symbol "<part>" ...) block by walking the candidate
-    library files. Returns the raw s-expr list or None."""
+    """Locate a (symbol "<part>" ...) block for ``libnick:part``. Returns the
+    raw s-expr list or None.
+
+    Resolution order:
+      1. sym-lib-table nickname map — the real path a library added via KiCad
+         Preferences points at (works when nickname ≠ file/folder name, and
+         for flat multi-symbol .kicad_sym libraries).
+      2. Filename-convention scan — ``<root>/<libnick>.kicad_symdir/`` or
+         ``<root>/<libnick>.kicad_sym`` (envil's own libs + the bundled lib +
+         any library whose nickname DOES match its file/folder name).
+    On a map miss the convention scan still runs, so nothing regresses."""
+    mapped = _lib_nick_map().get(libnick)
+    if mapped is not None:
+        cand = mapped if mapped.is_file() else mapped / f"{part}.kicad_sym"
+        sym = _extract_symbol_from_file(cand, part)
+        if sym is not None:
+            return sym
     for root in _sym_roots():
-        candidates = [
-            root / f"{libnick}.kicad_symdir" / f"{part}.kicad_sym",
-            root / f"{libnick}.kicad_sym",
-        ]
-        for path in candidates:
-            if not path.exists():
-                continue
-            text = path.read_text(encoding="utf-8")
-            tree = sexpdata.loads(text)
-            if not isinstance(tree, list):
-                continue
-            if _head(tree) == "kicad_symbol_lib":
-                for sym in _find_children(tree, "symbol"):
-                    if str(sym[1]) == part:
-                        return sym
-            elif _head(tree) == "symbol":
-                if str(tree[1]) == part:
-                    return tree
+        for path in (root / f"{libnick}.kicad_symdir" / f"{part}.kicad_sym",
+                     root / f"{libnick}.kicad_sym"):
+            sym = _extract_symbol_from_file(path, part)
+            if sym is not None:
+                return sym
     return None
 
 
@@ -861,26 +1024,60 @@ def _score_candidate(req_tokens: list, cand_part: str) -> float:
     return matched / total
 
 
+def _part_names_in_lib(libnick: str) -> List[str]:
+    """Every symbol (part) name available under ``libnick``, from BOTH the
+    sym-lib-table nickname map (a ``.kicad_symdir`` folder of files, or a flat
+    multi-symbol ``.kicad_sym``) and the filename-convention layout. Deduped,
+    map entries first."""
+    names: List[str] = []
+    seen: set = set()
+
+    def _add(n: str) -> None:
+        if n and n not in seen:
+            seen.add(n)
+            names.append(n)
+
+    mapped = _lib_nick_map().get(libnick)
+    if mapped is not None:
+        try:
+            if mapped.is_dir():
+                for p in mapped.glob("*.kicad_sym"):
+                    _add(p.stem)
+            elif mapped.is_file():
+                for n in _top_level_symbol_names(mapped):
+                    _add(n)
+        except OSError:
+            pass
+    for root in _sym_roots():
+        symdir = root / f"{libnick}.kicad_symdir"
+        try:
+            if symdir.is_dir():
+                for p in symdir.glob("*.kicad_sym"):
+                    _add(p.stem)
+        except OSError:
+            pass
+        flat = root / f"{libnick}.kicad_sym"
+        if flat.is_file():
+            for n in _top_level_symbol_names(flat):
+                _add(n)
+    return names
+
+
 def _fuzzy_resolve(libnick: str, part: str) -> Optional[str]:
     """Best-effort dynamic lookup when the exact part name doesn't exist
-    in `libnick`. Walks the lib's symdir, tokenises each filename,
-    scores by token-overlap with the requested name, returns the best
-    match if its score is above 0.5. Universal — works for any KiCad
-    part family without hardcoded aliases."""
+    in `libnick`. Enumerates the lib's parts (symdir files, flat-lib symbols,
+    or a Preferences-registered library via the nickname map), tokenises each
+    name, scores by token-overlap with the requested name, returns the best
+    match above 0.5. Universal — works for any KiCad part family without
+    hardcoded aliases."""
     req_tokens = _tokenize_part(part)
     if not req_tokens:
         return None
     candidates: list = []
-    for root in _sym_roots():
-        symdir = root / f"{libnick}.kicad_symdir"
-        if symdir.exists():
-            for p in symdir.glob("*.kicad_sym"):
-                cand_part = p.stem
-                score = _score_candidate(req_tokens, cand_part)
-                if score >= 0.5:
-                    candidates.append((score, cand_part))
-        # Also a flat libname.kicad_sym would be searched but skipping
-        # — for v1 the symdir layout covers our case.
+    for cand_part in _part_names_in_lib(libnick):
+        score = _score_candidate(req_tokens, cand_part)
+        if score >= 0.5:
+            candidates.append((score, cand_part))
     if not candidates:
         return None
     # Sort by score DESCENDING, then by name ASCENDING. The ascending
