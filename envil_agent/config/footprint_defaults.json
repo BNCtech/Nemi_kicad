@@ -81,5 +81,55 @@
     "Connector_Generic:Conn_02x08": "Connector_PinHeader_2.54mm:PinHeader_2x08_P2.54mm_Vertical",
 
     "power:":                  ""
+  },
+
+  "_comment_smd": "SMD alternatives for the generic passive/discrete families above. Consulted ONLY when a build's detected package preference is SMD (see engine.set_package_preference / build_circuit's prompt scan for 'surface-mount'/'smd' vs 'through-hole'/'tht'). Checked before by_lib_id/by_prefix in that case; when no SMD entry exists for a part (ICs, connectors, crystals — parts whose footprint is fixed by the part itself, not a generic package choice) the normal THT-biased tables above are used unchanged.",
+  "by_lib_id_smd": {
+  },
+  "by_prefix_smd": {
+    "Device:R_Pack":      "Resistor_SMD:R_Array_Convex_4x0402",
+    "Device:R_Network":   "Resistor_SMD:R_Array_Convex_4x0402",
+    "Device:R":           "Resistor_SMD:R_0603_1608Metric",
+    "Device:C_Polarized": "Capacitor_SMD:CP_Elec_6.3x5.4",
+    "Device:C":           "Capacitor_SMD:C_0603_1608Metric",
+    "Device:L":           "Inductor_SMD:L_0805_2012Metric",
+    "Device:LED":         "LED_SMD:LED_0603_1608Metric",
+    "Device:D_Schottky":  "Diode_SMD:D_SOD-123",
+    "Device:D_Zener":     "Diode_SMD:D_SOD-123",
+    "Device:D":           "Diode_SMD:D_SOD-123",
+    "Device:Q_NPN":       "Package_TO_SOT_SMD:SOT-23",
+    "Device:Q_PNP":       "Package_TO_SOT_SMD:SOT-23",
+    "Device:Q_NMOS":      "Package_TO_SOT_SMD:SOT-23",
+    "Device:Q_PMOS":      "Package_TO_SOT_SMD:SOT-23",
+
+    "Switch:SW_Push":     "Button_Switch_SMD:SW_SPST_TL3342"
+  },
+
+  "_comment_friendly": "Generic electronics vocabulary -> lib_id prefix, so a chat answer like 'Resistor package: Surface-Mount' can be matched to Device:R without the LLM needing to know KiCad's exact lib_id spelling. Universal (not per-circuit); extend for any prefix added above.",
+  "friendly_prefix_aliases": {
+    "resistor":        "Device:R",
+    "resistor array":  "Device:R_Pack",
+    "resistor network": "Device:R_Network",
+    "capacitor":       "Device:C",
+    "polarized capacitor": "Device:C_Polarized",
+    "electrolytic capacitor": "Device:C_Polarized",
+    "inductor":        "Device:L",
+    "led":             "Device:LED",
+    "diode":           "Device:D",
+    "schottky diode":  "Device:D_Schottky",
+    "zener diode":     "Device:D_Zener",
+    "transistor":      "Device:Q_NPN",
+    "npn transistor":  "Device:Q_NPN",
+    "pnp transistor":  "Device:Q_PNP",
+    "mosfet":          "Device:Q_NMOS",
+    "nmos":            "Device:Q_NMOS",
+    "pmos":            "Device:Q_PMOS",
+    "crystal":         "Device:Crystal",
+    "switch":          "Switch:SW_Push",
+    "push button":     "Switch:SW_Push",
+    "button":          "Switch:SW_Push",
+    "dip switch":      "Switch:SW_DIP",
+    "connector":       "Connector_Generic:Conn_01x02",
+    "header":          "Connector_Generic:Conn_01x02"
   }
 }

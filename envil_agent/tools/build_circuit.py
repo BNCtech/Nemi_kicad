@@ -655,6 +655,42 @@ def _extract_ir_json(raw: str) -> str:
     return raw
 
 
+_PKG_CHOICE = r"(?:surface[\s-]?mount|smd|through[\s-]?hole|tht)"
+# "<part> package: <choice>" -- the mandatory per-component-type row the chat
+# clarify rules now always ask (see agent.py's ASK_ASSUMPTIONS_RULE /
+# FOLDER_FIRST*_RULE). Captures the free-text part label so it can be matched
+# to a lib_id via footprint_defaults.json's friendly_prefix_aliases.
+_PART_PKG_ROW = re.compile(
+    r"([A-Za-z0-9][A-Za-z0-9_+\-]*(?:\s[A-Za-z0-9_+\-]+){0,2})\s+package:\s*(" + _PKG_CHOICE + r")",
+    re.IGNORECASE)
+# Bare "Package: <choice>" with no part label -- the global fallback (older
+# single-question phrasing, or a design with only one part type).
+_GLOBAL_PKG_ROW = re.compile(r"(?<![\w-])package:\s*(" + _PKG_CHOICE + r")", re.IGNORECASE)
+_SMD_HINTS = re.compile(r"surface[\s-]?mount|\bsmd\b", re.IGNORECASE)
+
+
+def _pkg_choice_to_pref(choice: str) -> str:
+    return "SMD" if _SMD_HINTS.search(choice) else "THT"
+
+
+def _detect_package_preference(prompt: str) -> Dict[str, str]:
+    """Scan the build request text for the mandatory per-part "<part>
+    package: Through-Hole/Surface-Mount" clarify answer(s) folded into the
+    request. Returns a dict {part_label_lower: "SMD"/"THT"}; a bare
+    "Package: <choice>" with no part label becomes the "" (global fallback)
+    key. An empty dict leaves footprint resolution byte-identical to today
+    (THT-biased config tables) -- this only changes anything when the
+    request actually contains a package answer."""
+    prefs: Dict[str, str] = {}
+    for label, choice in _PART_PKG_ROW.findall(prompt):
+        prefs[label.strip().lower()] = _pkg_choice_to_pref(choice)
+    if not prefs:
+        m = _GLOBAL_PKG_ROW.search(prompt)
+        if m:
+            prefs[""] = _pkg_choice_to_pref(m.group(1))
+    return prefs
+
+
 def _partial_persist_on() -> bool:
     """Gate: layout_config.json -> build_graph.partial_persist_on_failure
     (default false). When on, a build that fails validation but drew some blocks
@@ -912,6 +948,13 @@ async def build_circuit(args: Dict[str, Any]) -> Dict[str, Any]:
             (_lc_t().get("build_graph") or {}).get("single_build_trace", True))
     except Exception:
         _single_trace_on = True
+    # Package preference (THT/SMD), detected from this build's own request
+    # text -- stays set for the rest of this call (schematic render below AND
+    # the inline generate_pcb_from_ir further down, which reads the same
+    # resolver). Re-detected fresh at the top of every build_circuit call, so
+    # it can never carry stale state from a PREVIOUS build into this one.
+    from ..intent.engine import set_package_preference as _set_pkg_pref
+    _set_pkg_pref(_detect_package_preference(prompt))
     try:
         with _single_build_trace(_single_trace_on):
             if _offload:

@@ -1492,6 +1492,18 @@ async def route_pcb_simple(args: dict[str, Any]) -> dict[str, Any]:
         if len(skipped_nets) > 8:
             lines.append(f"    ... (+{len(skipped_nets) - 8} more)")
 
+    # ---- Honest verification: read the truth back from the written board ----
+    # Don't claim completeness from the router's own counters — re-parse the
+    # saved file so "routed" reflects the copper actually on the board. On
+    # preview or any parse failure, degrade to the old message (non-breaking).
+    verify: Dict[str, Any] = {}
+    if not preview_only and bool(cfg.get("verify_on_board", True)):
+        from ..layout.route_verify import verify_routing, verify_line
+        verify = verify_routing(pcb_path)
+        vline = verify_line(verify, skip_nets)
+        if vline:
+            lines.append(vline)
+
     return {
         "content": [{"type": "text", "text": "\n".join(lines)}],
         "ok": True,
@@ -1503,4 +1515,8 @@ async def route_pcb_simple(args: dict[str, Any]) -> dict[str, Any]:
         "routed_nets": routed_nets,
         "skipped_nets": skipped_nets,
         "preview_only": preview_only,
+        "complete": verify.get("complete") if verify else None,
+        "unrouted": verify.get("unrouted", []) if verify else [],
+        "verified_routed": verify.get("routed_nets") if verify else None,
+        "verified_total": verify.get("total_nets") if verify else None,
     }

@@ -224,6 +224,59 @@ def _export_preview_svg(sch_path: Path,
 
 _FOOTPRINT_DEFAULTS_CACHE: Optional[Dict[str, Any]] = None
 
+# Per-build package preference(s), set by build_circuit before invoking the
+# graph (from the mandatory "<Part> package: Through-Hole/Surface-Mount" chat
+# row(s) folded into the request text) and read by
+# _resolve_default_footprint_traced below. Keyed by free-text part label
+# (lowercased, e.g. "led", "resistor") -> "SMD"/"THT"; the "" key (if present)
+# is the GLOBAL fallback used when no per-part label matches a given lib_id.
+# An empty dict is byte-identical to the pre-existing THT-biased behaviour --
+# this only changes anything when a build explicitly asked for a package.
+# Module-global, matching the existing per-build context pattern
+# (build_circuit._TURN_PARENT_RUN) -- fine for a single-user local backend
+# where builds run one at a time.
+_PACKAGE_PREFERENCE: Dict[str, str] = {}
+
+
+def set_package_preference(pref) -> None:
+    """Set the package preference(s) for the NEXT footprint resolutions.
+    Accepts either a plain string ("SMD"/"THT", applied globally) for
+    backward compatibility, or a dict of {part_label: "SMD"/"THT"} for
+    per-component-type preferences (an "" key is the global fallback).
+    Anything else (including None or "") clears it back to the default
+    THT-biased tables."""
+    global _PACKAGE_PREFERENCE
+    if isinstance(pref, dict):
+        _PACKAGE_PREFERENCE = {str(k).strip().lower(): v for k, v in pref.items()
+                                if v in ("THT", "SMD")}
+    elif pref in ("THT", "SMD"):
+        _PACKAGE_PREFERENCE = {"": pref}
+    else:
+        _PACKAGE_PREFERENCE = {}
+
+
+def _package_preference_for(lib_id: str) -> str:
+    """Resolve the effective package preference for one lib_id: a per-part
+    label match wins over the global ("") fallback. A label matches when it
+    equals a friendly_prefix_aliases key whose mapped prefix matches lib_id,
+    or when the label text appears literally in the lib_id (covers named ICs
+    like 'ne555' matching 'Timer:NE555P'). Returns "" (no preference -> use
+    the normal THT-biased tables) when nothing matches."""
+    if not _PACKAGE_PREFERENCE:
+        return ""
+    aliases = _load_footprint_defaults().get("friendly_prefix_aliases", {}) or {}
+    lib_lower = lib_id.lower()
+    for label, pref in _PACKAGE_PREFERENCE.items():
+        if not label:
+            continue
+        aliased_prefix = aliases.get(label)
+        if aliased_prefix and lib_id.startswith(aliased_prefix):
+            return pref
+        if label.replace(" ", "") and label.replace(" ", "") in lib_lower.replace(":", "").replace("_", ""):
+            return pref
+    return _PACKAGE_PREFERENCE.get("", "")
+
+
 
 def _load_footprint_defaults() -> Dict[str, Any]:
     """Load envil_agent/config/footprint_defaults.json. Same caching +
@@ -280,6 +333,26 @@ def _resolve_default_footprint_traced(lib_id: str,
     The returned footprint string is exactly what `_resolve_default_footprint`
     returns (that function delegates here), so this is non-breaking."""
     cfg = _load_footprint_defaults()
+
+    # Package preference (per-part label match, else the global fallback):
+    # try the SMD alternative tables FIRST when this lib_id resolved to SMD.
+    # Parts without an SMD entry (ICs, connectors, crystals -- fixed by the
+    # part itself, not a generic package choice) fall through to the normal
+    # tables below unchanged, so this only ever adds coverage, never removes it.
+    if _package_preference_for(lib_id) == "SMD":
+        fp = (cfg.get("by_lib_id_smd", {}) or {}).get(lib_id)
+        if fp is not None:
+            return str(fp), "by_lib_id_smd"
+        by_prefix_smd = cfg.get("by_prefix_smd", {}) or {}
+        best_match, best_len = "", -1
+        for prefix, value in by_prefix_smd.items():
+            if prefix.startswith("_"):
+                continue
+            if lib_id.startswith(prefix) and len(prefix) > best_len:
+                best_match, best_len = str(value), len(prefix)
+        if best_len > 0:
+            return best_match, "by_prefix_smd"
+
     by_lib = cfg.get("by_lib_id", {}) or {}
     fp = by_lib.get(lib_id)
     if fp is not None:
@@ -4943,6 +5016,7 @@ def _emit_label_with_stub(name: str, pin_pos, abs_rot: float,
                            obstacles: Optional[List[Tuple[float, float, float, float]]] = None,
                            own_bbox: Optional[Tuple[float, float, float, float]] = None,
                            existing_wires: Optional[List[Tuple[Tuple[float, float], Tuple[float, float]]]] = None,
+                           foreign_pts: Optional[List[Tuple[float, float]]] = None,
                            ) -> str:
     """Emit a short outward wire stub from the pin tip + a label at the
     stub's far end. Matches the reference-image pattern where every net
@@ -4951,6 +5025,22 @@ def _emit_label_with_stub(name: str, pin_pos, abs_rot: float,
 
     Stub length defaults to `label_stub.length_mm` from JSON config
     (3.81 mm by default).
+
+    FOREIGN-PIN guard (added 2026-07-04): `pin_side_from_rot` derives
+    the outward axis from the pin's OWN rotation, assuming the body
+    sits entirely on the opposite side. That assumption breaks for an
+    axial 2-pin part (R/C/L/D) whose two collinear pins sit on the SAME
+    line through the body — "outward" for one pin can point straight
+    at the other pin, which belongs to a DIFFERENT net. KiCad mid-span-
+    bonds a pin lying on a wire's interior with no junction needed, so
+    that stub silently shorts the part (the R1 "both pins same net"
+    class). Extending the stub longer never clears a foreign pin that
+    sits BETWEEN the start and any farther point on the same ray, so
+    when `foreign_pts` shows the chosen axis is permanently blocked,
+    flip to the opposite direction (then the perpendicular pair) before
+    running the existing length-search guards below. None (the
+    default) skips this check entirely -- byte-identical to callers
+    that don't pass it.
 
     R11 (label-label collision avoidance): if another label was just
     emitted at a parallel outward axis within `min_separation_mm` of
@@ -4983,6 +5073,32 @@ def _emit_label_with_stub(name: str, pin_pos, abs_rot: float,
     side = pin_side_from_rot(abs_rot)
     outward = {"right": (1, 0), "left": (-1, 0),
                 "top": (0, -1), "bottom": (0, 1)}.get(side, (1, 0))
+
+    def _axis_blocked(ox: float, oy: float) -> bool:
+        """True iff some foreign pin lies on the infinite ray from
+        pin_pos in direction (ox,oy) -- any stub length along this axis
+        would eventually run through it (or land on it)."""
+        if not foreign_pts:
+            return False
+        for fx, fy in foreign_pts:
+            if oy == 0 and abs(fy - pin_pos[1]) < 0.05 \
+                    and (fx - pin_pos[0]) * ox > 0.05:
+                return True
+            if ox == 0 and abs(fx - pin_pos[0]) < 0.05 \
+                    and (fy - pin_pos[1]) * oy > 0.05:
+                return True
+        return False
+
+    if foreign_pts and _axis_blocked(*outward):
+        candidates = [(-outward[0], -outward[1])]
+        candidates += [(0, 1), (0, -1)] if outward[0] else [(1, 0), (-1, 0)]
+        for cand in candidates:
+            if not _axis_blocked(*cand):
+                outward = cand
+                break
+        # If every cardinal direction is blocked (dense cluster), fall
+        # through with the original outward -- no worse than before.
+
     min_sep = float(cfg.get("min_separation_mm", 2.0))
     step    = float(cfg.get("stagger_step_mm", 2.54))
     max_try = int(cfg.get("max_stagger_count", 4))
@@ -5101,10 +5217,12 @@ def _emit_local_label(name: str, p, abs_rot: float,
                        obstacles: Optional[List[Tuple[float, float, float, float]]] = None,
                        own_bbox: Optional[Tuple[float, float, float, float]] = None,
                        existing_wires: Optional[List[Tuple[Tuple[float, float], Tuple[float, float]]]] = None,
+                       foreign_pts: Optional[List[Tuple[float, float]]] = None,
                        ) -> str:
     return _emit_label_with_stub(name, p, abs_rot, kind="label",
                                    obstacles=obstacles, own_bbox=own_bbox,
-                                   existing_wires=existing_wires)
+                                   existing_wires=existing_wires,
+                                   foreign_pts=foreign_pts)
 
 
 def _emit_hierarchical_label(name: str, p, abs_rot: float,
@@ -5112,17 +5230,20 @@ def _emit_hierarchical_label(name: str, p, abs_rot: float,
                               obstacles: Optional[List[Tuple[float, float, float, float]]] = None,
                               own_bbox: Optional[Tuple[float, float, float, float]] = None,
                               existing_wires: Optional[List[Tuple[Tuple[float, float], Tuple[float, float]]]] = None,
+                              foreign_pts: Optional[List[Tuple[float, float]]] = None,
                               ) -> str:
     return _emit_label_with_stub(name, p, abs_rot, kind="hierarchical_label",
                                    shape=shape, obstacles=obstacles,
                                    own_bbox=own_bbox,
-                                   existing_wires=existing_wires)
+                                   existing_wires=existing_wires,
+                                   foreign_pts=foreign_pts)
 
 
 def _emit_cross_sheet_global_label(name: str, p, abs_rot: float,
                                      obstacles: Optional[List[Tuple[float, float, float, float]]] = None,
                                      own_bbox: Optional[Tuple[float, float, float, float]] = None,
                                      existing_wires: Optional[List[Tuple[Tuple[float, float], Tuple[float, float]]]] = None,
+                                     foreign_pts: Optional[List[Tuple[float, float]]] = None,
                                      ) -> str:
     """Cross-sheet GLOBAL label (Model B) — stubbed like the hierarchical
     helper so it gets R13 stub + R11 collision/overlap + body-pierce
@@ -5131,7 +5252,8 @@ def _emit_cross_sheet_global_label(name: str, p, abs_rot: float,
     (used for power-port fallbacks) which has no stub/guards."""
     return _emit_label_with_stub(name, p, abs_rot, kind="global_label",
                                    obstacles=obstacles, own_bbox=own_bbox,
-                                   existing_wires=existing_wires)
+                                   existing_wires=existing_wires,
+                                   foreign_pts=foreign_pts)
 
 
 def _emit_sheet_box(block_name: str, child_filename: str, sheet_uuid: str,
@@ -6454,7 +6576,8 @@ def render_flat(ir: TopologyIR, out_path: Path) -> Dict[str, Any]:
             body += _emit_local_label(net.name, (x, y), rot,
                                         obstacles=obstacles,
                                         own_bbox=own_bbox,
-                                        existing_wires=emitted_wires)
+                                        existing_wires=emitted_wires,
+                                        foreign_pts=foreign_pts)
             labels_emitted += 1
 
     # Phase 4 post-pass: inter-block wires. For power nets whose pins
@@ -6689,6 +6812,21 @@ def _render_block_child(ir: TopologyIR, hierarchical_net_names: set,
         body += _emit_symbol_instance(c, file_uuid)
 
     obstacles = [_abs_outer_bbox(c) for c in comps]
+    # Foreign-pin short guard — same rationale as render_flat (a wire or
+    # label stub must never run through a pin belonging to a DIFFERENT
+    # net). Child sheets previously built no such registry at all, so a
+    # 2-pin axial part landing between its own pin and a naive "outward"
+    # label stub could short exactly like the flat path could before
+    # `avoid_pin_shorts` was added there.
+    _avoid_pin_shorts_c = bool(
+        _load_layout_config().get("routing", {}).get("avoid_pin_shorts", True))
+    all_pin_abs_c: List[Tuple[float, float]] = []
+    if _avoid_pin_shorts_c:
+        for _c in comps:
+            for _pin in (_c.geom.pins or []):
+                _ap = _c.pin_abs(_pin.number)
+                if _ap is not None:
+                    all_pin_abs_c.append((_ap[0], _ap[1]))
     # R11 unified de-collision: seed body+field ink for this child sheet.
     _seed_ink_from_comps(comps)
     # Same title-block reserve guard as render_flat — every child sheet
@@ -6739,6 +6877,16 @@ def _render_block_child(ir: TopologyIR, hierarchical_net_names: set,
             pin = comp.geom.resolve_pin(pin_key)
             if pin is not None:
                 pins_in_any_net.add((ref, pin.number))
+
+        # Foreign pins for THIS net = every pin in the child sheet NOT on
+        # this net (mirrors render_flat) — passed to the router and the
+        # label stub so neither draws a line through a sibling pin.
+        foreign_pts_c: Optional[List[Tuple[float, float]]] = None
+        if _avoid_pin_shorts_c:
+            own_xy_c = {(round(pp[0], 2), round(pp[1], 2))
+                        for pp in pin_positions}
+            foreign_pts_c = [(x, y) for (x, y) in all_pin_abs_c
+                             if (round(x, 2), round(y, 2)) not in own_xy_c]
 
         if net.is_power:
             # Child-sheet radius is widened from 12.7 -> 15.24 mm: after
@@ -6814,7 +6962,8 @@ def _render_block_child(ir: TopologyIR, hierarchical_net_names: set,
                     if (px, py) == (ax, ay):
                         continue
                     path = _route_l_aware((px, py), (ax, ay), obstacles,
-                                            existing_wires=emitted_wires)
+                                            existing_wires=emitted_wires,
+                                            foreign_pts=foreign_pts_c)
                     if not path:
                         continue  # no safe route — labels bond by name
                     for k in range(len(path) - 1):
@@ -6834,7 +6983,8 @@ def _render_block_child(ir: TopologyIR, hierarchical_net_names: set,
             p1 = pin_positions[i][:2]
             p2 = pin_positions[i + 1][:2]
             path = _route_l_aware(p1, p2, obstacles,
-                                    existing_wires=emitted_wires)
+                                    existing_wires=emitted_wires,
+                                    foreign_pts=foreign_pts_c)
             # Same long-wire gate as the flat path: drop wires
             # exceeding `routing.max_wire_length_mm` so child-sheet
             # labels carry the bond. Child sheets are small (one
@@ -6876,12 +7026,14 @@ def _render_block_child(ir: TopologyIR, hierarchical_net_names: set,
                     body += _emit_cross_sheet_global_label(
                         net.name, (x, y), rot,
                         obstacles=obstacles, own_bbox=own_bbox,
-                        existing_wires=emitted_wires)
+                        existing_wires=emitted_wires,
+                        foreign_pts=foreign_pts_c)
                 else:
                     body += _emit_hierarchical_label(
                         net.name, (x, y), rot,
                         obstacles=obstacles, own_bbox=own_bbox,
-                        existing_wires=emitted_wires)
+                        existing_wires=emitted_wires,
+                        foreign_pts=foreign_pts_c)
         elif pin_positions:
             x, y, rot = pin_positions[0]
             c0 = pin_owners[0] if pin_owners else None
@@ -6889,7 +7041,8 @@ def _render_block_child(ir: TopologyIR, hierarchical_net_names: set,
             body += _emit_local_label(net.name, (x, y), rot,
                                         obstacles=obstacles,
                                         own_bbox=own_bbox,
-                                        existing_wires=emitted_wires)
+                                        existing_wires=emitted_wires,
+                                        foreign_pts=foreign_pts_c)
 
     # Per-block rectangles inside each child sheet (in case child has
     # sub-groupings — currently no, but reserves the hook for v3).

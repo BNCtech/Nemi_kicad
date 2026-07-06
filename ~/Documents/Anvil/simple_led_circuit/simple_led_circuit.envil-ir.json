@@ -1,0 +1,71 @@
+{
+  "_about": "Full TopologyIR emitted by envil build_circuit. Read by the generate_pcb tool to (re)populate the .kicad_pcb from the current schematic. Safe to delete.",
+  "version": 1,
+  "ir": {
+    "name": "5V Barrel Jack LED Circuit",
+    "circuit_type": "ANALOG",
+    "components": [
+      {
+        "ref": "J1",
+        "lib_id": "Connector:Barrel_Jack",
+        "value": "BarrelJack_5V",
+        "footprint": "Connector_BarrelJack:BarrelJack_CUI_PJ-002A"
+      },
+      {
+        "ref": "S1",
+        "lib_id": "Switch:SW_Push",
+        "value": "SW_SPST",
+        "footprint": ""
+      },
+      {
+        "ref": "R1",
+        "lib_id": "Device:R",
+        "value": "150R",
+        "footprint": ""
+      },
+      {
+        "ref": "D1",
+        "lib_id": "Device:LED",
+        "value": "LED_RED",
+        "footprint": ""
+      }
+    ],
+    "nets": [
+      {
+        "name": "+5V",
+        "pins": [
+          "J1.1",
+          "S1.1"
+        ],
+        "is_power": true
+      },
+      {
+        "name": "GND",
+        "pins": [
+          "J1.2",
+          "D1.K"
+        ],
+        "is_power": true
+      },
+      {
+        "name": "SW_OUT",
+        "pins": [
+          "S1.2",
+          "R1.1"
+        ],
+        "is_power": false
+      },
+      {
+        "name": "LED_A",
+        "pins": [
+          "R1.2",
+          "D1.A"
+        ],
+        "is_power": false
+      }
+    ],
+    "blocks": [],
+    "buses": [],
+    "notes": "5V barrel jack -> SW1 -> R1(150R) -> D1 red LED -> GND. R=(5V-2V)/20mA=150R for ~20mA through a standard red LED (Vf~2V)."
+  }
+}

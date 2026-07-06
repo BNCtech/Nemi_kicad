@@ -1,10 +1,10 @@
 {
   "geometry": {
     "R16_cross_block_wires": 0,
-    "R2_body_crossings": 1
+    "R2_body_crossings": 0
   },
   "netlist_tier1": "db54c3d6659d1bff",
-  "netlist_tier2": "e752994fdc46419b",
+  "netlist_tier2": "8f978f147f1b007e",
   "render": {
     "components_emitted": 9,
     "junctions_emitted": 2,

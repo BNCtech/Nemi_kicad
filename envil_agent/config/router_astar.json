@@ -2,6 +2,8 @@
   "_about": "Tier-2 multi-layer A* cost router (tools/route_pcb_astar.py + layout/router_astar.py). Where route_pcb_simple (Tier 1) does fast single-layer L/Z Manhattan, this tier runs a grid A* over (x,y,layer) with a real cost function so it can spend a VIA to reach a shorter/clearer route across two layers. Use it for the nets Tier 1 leaves as ratsnest. Every knob is here \u00e2\u20ac\u201d no per-circuit logic, no magic numbers. enabled=false makes the tool a no-op.",
   "_cost_doc": "Path cost = travelled distance + bend_penalty_mm per 90-deg corner + off_axis_penalty_mm per step against a layer's preferred axis + via_penalty_mm per layer change. Raise via_penalty_mm to make the router hoard layers (fewer vias, longer detours); lower it to via freely. bend/off_axis are small nudges for cleaner, convention-following copper.",
   "enabled": true,
+  "verify_on_board": true,
+  "_verify_on_board_note": "After writing, re-parse the saved .kicad_pcb and report how many multi-pad nets actually have copper (or a pour) vs still unrouted, so the chat can't claim 'all nets routed' while Track Segments = 0. false = old optimistic message.",
   "layers": [
     "F.Cu",
     "B.Cu"
