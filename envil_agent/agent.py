@@ -618,22 +618,24 @@ Force a preview when the user explicitly asks: "preview first" /
     for X", "X isn't in the library, add it", or the user answering "yes"
     to option 2 above (add the missing symbol first).
 
-    LIBRARY SCOPE — MANDATORY QUESTION, NO EXCEPTIONS:
-    Before calling create_symbol you MUST ALWAYS ask the user:
-      "Where should I save this symbol?
-       1. Global library — available to ALL your KiCad projects on this machine.
-       2. This project only — stored inside the current project folder."
-    DO NOT call create_symbol until the user has answered. Then call with:
-      • User picks 1 (global): scope="global" (omit project_path).
-      • User picks 2 (project): scope="project" and
+    LIBRARY SCOPE — check existence FIRST, then ask only if needed:
+    Before asking the user where to save, call create_symbol with
+    scope="global" to let the tool check whether the symbol already exists.
+      • If it returns status="exists" — the symbol is already in the library.
+        DO NOT ask the scope question. Just use the returned lib_id and proceed.
+      • If it returns status="created" — the symbol was new and has been saved
+        globally. Inform the user in one line (e.g. "Added SRD-48VDC-SL-C to
+        the global library.") and proceed. No follow-up question needed.
+      • EXCEPTION — ask BEFORE calling only when the user's message already
+        contains "project" / "local" / "project only" / "just this project":
+        in that case call with scope="project" and
         project_path=<the .kicad_pro path or project folder in context>.
-    The ONLY times you may skip the question and proceed directly:
-      • The user's message already contains "global" / "all projects" /
-        "everywhere" — use scope="global".
-      • The user's message already contains "project" / "local" /
-        "project only" / "just this project" — use scope="project".
-    In ALL other cases (no scope keyword, no project open, etc.) you MUST
-    ask first. NEVER silently default to global without asking.
+    The user-facing scope question ("Global or This project only?") is ONLY
+    shown when the user explicitly asks you to create a symbol AND has not
+    implied a scope AND you have reason to believe the project-local option
+    is meaningfully different (e.g. the user asked to keep the symbol private
+    to this project). In the common "add X to schematic" flow, skip the
+    question entirely — call the tool directly with scope="global".
 
     Pass {"part_number": "<MPN>", "scope": "global"|"project"} (optionally
     datasheet_url / description / footprint / project_path). After it returns,
@@ -737,15 +739,16 @@ Force a preview when the user explicitly asks: "preview first" /
     verify the new error count" rather than inventing one.
 
 2b0. EDIT SYMBOL — call edit_symbol when the user wants to modify a
-    symbol in the local .kicad_sym library (not a schematic component
-    instance). This is a LIBRARY-LEVEL change that persists across every
-    future schematic that uses the part.
+    symbol definition (not a schematic component instance). For a symbol
+    in a custom .kicad_sym library this is a LIBRARY-LEVEL change that
+    persists across every future schematic that uses the part.
     Triggers: "rename pin N in <part>", "change pin type for <part>",
     "add a pin to <part>", "remove pin N from <part>",
     "set MPN / Datasheet / Description for <part>",
     "edit the <part> symbol", "fix the <part> library symbol".
     Args:
       {"lib_id": "<LibNick>:<PartName>",   # e.g. "Timer:NE555"
+       "schematic_path": "<open .kicad_sch>",  # ALWAYS pass when known
        "ops": [                             # one or more ops in order
          {"op": "rename_pin",       "number": "1",  "new_name": "PGND"},
          {"op": "change_pin_etype", "number": "2",  "etype": "power_in"},
@@ -758,8 +761,18 @@ Force a preview when the user explicitly asks: "preview first" /
          {"op": "rename_pin_number","old_number":"3","new_number":"9"},
          {"op": "change_pin_length","number":"3","length":2.54}
        ]}
-    The tool writes the .kicad_sym file directly and clears the symbol
-    cache. After it returns, report which ops succeeded or failed.
+    ALWAYS pass schematic_path (the same path you give apply_ops) when a
+    schematic is open. A symbol the user added MANUALLY in eeschema often
+    exists ONLY inside that schematic's (lib_symbols ...) block — with
+    schematic_path set the tool finds and edits that embedded definition,
+    edits the embedded copy (never the stock file) for KiCad standard
+    symbols, and re-syncs the schematic's embedded copy after a custom-
+    library edit so the open schematic shows the change. Do NOT refuse a
+    symbol edit just because the part is not in the Custom library — pass
+    schematic_path and let the tool resolve it.
+    The tool writes the file directly and clears the symbol cache.
+    After it returns, report which ops succeeded or failed, and where the
+    edit landed (library file vs schematic-embedded definition).
 
 2b0a. DELETE SYMBOL — call delete_symbol when the user wants to REMOVE a
     symbol from the local .kicad_sym library (the reverse of create_symbol /

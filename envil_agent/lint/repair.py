@@ -48,7 +48,6 @@ def _load_wiring_rules() -> dict:
         return {}
 
 
-<<<<<<< HEAD
 def _load_electrical_integrity() -> dict:
     """`electrical_integrity.*` gates (C1 net-aware junctions, C2 pin
     completeness). All default OFF so behaviour is byte-identical until a
@@ -56,12 +55,14 @@ def _load_electrical_integrity() -> dict:
     try:
         return (json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
                 .get("electrical_integrity") or {})
-=======
+    except (OSError, ValueError):
+        return {}
+
+
 def _load_layout_section(name: str) -> dict:
     try:
         return (json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
                 .get(name) or {})
->>>>>>> f565173073efc945da7a7d04e7f87b075019d086
     except (OSError, ValueError):
         return {}
 

@@ -4,6 +4,14 @@ Supports both the symdir layout (one symbol per .kicad_sym file inside a
 <nick>.kicad_symdir/ folder) and the flat layout (one kicad_symbol_lib
 file containing many symbols).
 
+Also supports symbols that exist ONLY inside a schematic's
+``(lib_symbols ...)`` block — the case for a symbol the user added
+manually in eeschema (placed from a library the agent can't see, pasted,
+or drawn ad-hoc and saved to the schematic).  When ``apply_symbol_ops``
+is given a ``schematic_path`` it falls back to editing that embedded
+definition, and after a library-file edit it re-syncs any embedded copy
+so the open schematic shows the change.
+
 Call :func:`apply_symbol_ops` with a ``lib_id`` like ``"Timer:NE555"``
 and a list of operation dicts.  Each op is applied in order; any that
 succeed cause the file to be written back and the ``load_symbol`` LRU
@@ -138,6 +146,38 @@ def _fmt_sym(node: Any, depth: int = 0) -> str:
 
 
 # ---------------------------------------------------------------------------
+# KiCad-style schematic formatter — mirrors tools/apply_ops._emit_multiline
+# (duplicated locally so the kicad core layer never imports the tools layer).
+# Only the structural heads get newline-per-child; everything else must stay
+# on one line or kicad-cli rejects the file with 'Failed to load schematic'.
+# ---------------------------------------------------------------------------
+
+_SCH_BLOCK_HEADS = frozenset({"kicad_sch", "lib_symbols", "title_block",
+                              "sheet_instances"})
+
+
+def _fmt_sch(node: Any, indent: int = 0) -> str:
+    """Render a full .kicad_sch tree to KiCad-accepted multi-line text."""
+    if not isinstance(node, list):
+        return "\t" * indent + _compact(node)
+    head = _head(node) or ""
+    if head not in _SCH_BLOCK_HEADS:
+        return "\t" * indent + _compact(node)
+    leading = [_compact(node[0])]
+    rest_start = 1
+    for child in node[1:]:
+        if isinstance(child, list):
+            break
+        leading.append(_compact(child))
+        rest_start += 1
+    lines = ["\t" * indent + "(" + " ".join(leading)]
+    for child in node[rest_start:]:
+        lines.append(_fmt_sch(child, indent + 1))
+    lines.append("\t" * indent + ")")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Symbol locator
 # ---------------------------------------------------------------------------
 
@@ -186,6 +226,80 @@ def _locate_symbol(lib_id: str) -> Tuple[Path, list, list]:
     raise ValueError(
         f"Symbol {lib_id!r} not found. Searched roots:\n  {roots_listed}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Schematic-embedded symbol locator
+#
+# A symbol the user added MANUALLY in eeschema often exists nowhere on disk
+# except the schematic's own (lib_symbols ...) block — eeschema inlines the
+# definition at placement time and, for ad-hoc / pasted symbols, that inline
+# copy is the ONLY copy.  These helpers make such symbols reachable for edit.
+# ---------------------------------------------------------------------------
+
+def _schematic_files(schematic_path: str) -> List[Path]:
+    """Resolve ``schematic_path`` — a .kicad_sch file, a .kicad_pro file, or
+    a project folder — to the list of .kicad_sch files to search."""
+    if not schematic_path:
+        return []
+    p = Path(schematic_path).expanduser()
+    if p.is_file():
+        if p.suffix == ".kicad_sch":
+            return [p]
+        p = p.parent          # .kicad_pro (or any project file) -> its folder
+    if p.is_dir():
+        return sorted(p.glob("*.kicad_sch"))
+    return []
+
+
+def _locate_embedded_symbol(
+    lib_id: str, sch_files: List[Path]
+) -> Optional[Tuple[Path, list, list]]:
+    """Find ``lib_id``'s definition embedded in a schematic's
+    ``(lib_symbols ...)`` block.
+
+    Embedded definitions are keyed by the FULL lib_id string (e.g.
+    ``"Custom:MyPart"``), so the match order is: exact lib_id, alias-resolved
+    lib_id, then a unique case-insensitive match on the bare part name (the
+    user may not know which nickname eeschema recorded).
+
+    Returns ``(path, full_tree, sym_node)`` like ``_locate_symbol`` — the
+    node is a live reference into the tree, so mutations propagate to the
+    write-back.  Returns None when not found; raises ``ValueError`` when the
+    part-name fallback is ambiguous.
+    """
+    aliases = _load_aliases()
+    resolved = aliases.get(lib_id, lib_id)
+    part = lib_id.split(":", 1)[1] if ":" in lib_id else lib_id
+
+    for sch in sch_files:
+        try:
+            tree = sexpdata.loads(sch.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(tree, list) or _head(tree) != "kicad_sch":
+            continue
+        libsym = _first_child(tree, "lib_symbols")
+        if libsym is None:
+            continue
+        sym_nodes = [c for c in libsym[1:]
+                     if isinstance(c, list) and _head(c) == "symbol"
+                     and len(c) > 1]
+        for node in sym_nodes:
+            name = str(node[1])
+            if name == lib_id or name == resolved:
+                return sch, tree, node
+        matches = [n for n in sym_nodes
+                   if str(n[1]).rsplit(":", 1)[-1].lower() == part.lower()]
+        if len(matches) == 1:
+            return sch, tree, matches[0]
+        if len(matches) > 1:
+            names = ", ".join(repr(str(m[1])) for m in matches)
+            raise ValueError(
+                f"Several symbols embedded in {sch.name} match part "
+                f"{part!r}: {names}. Use the exact embedded lib_id."
+            )
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1039,15 +1153,62 @@ def delete_symbol(
     }
 
 
+def _sync_embedded_copies(
+    lib_id: str, lib_sym: list, sch_files: List[Path]
+) -> List[str]:
+    """After a library-FILE edit, refresh any copy of the symbol embedded in
+    the given schematics' ``(lib_symbols ...)`` blocks.  Without this the
+    open schematic keeps rendering the stale inlined definition and the edit
+    looks like it never happened.  Returns one note per schematic updated."""
+    import copy as _copy
+
+    notes: List[str] = []
+    for sch in sch_files:
+        try:
+            found = _locate_embedded_symbol(lib_id, [sch])
+        except ValueError:
+            continue     # ambiguous part-name match — don't guess on a sync
+        if found is None:
+            continue
+        spath, stree, snode = found
+        libsym = _first_child(stree, "lib_symbols")
+        if libsym is None:
+            continue
+        idx = next((i for i, c in enumerate(libsym) if c is snode), None)
+        if idx is None:
+            continue
+        fresh = _copy.deepcopy(lib_sym)
+        fresh[1] = snode[1]   # keep the embedded name (full "Nick:Part" form)
+        libsym[idx] = fresh
+        spath.write_text(_fmt_sch(stree), encoding="utf-8")
+        notes.append(
+            f"embedded copy in {spath.name} refreshed to match the edited "
+            f"library symbol (reload the schematic in eeschema to see it)"
+        )
+    return notes
+
+
 def apply_symbol_ops(
     lib_id: str,
     ops: List[Dict[str, Any]],
+    schematic_path: str = "",
+    target: str = "auto",
 ) -> List[Dict[str, Any]]:
     """Apply a list of edit operations to a symbol and write the file back.
 
     Args:
         lib_id: KiCad lib_id string, e.g. ``"Timer:NE555"``.
         ops:    List of operation dicts — see module docstring for shapes.
+        schematic_path: Optional .kicad_sch file (or .kicad_pro / project
+            folder).  Its ``(lib_symbols ...)`` block is searched when the
+            symbol has no on-disk library file — the case for a symbol the
+            user added manually in eeschema — and is re-synced after a
+            library-file edit so the open schematic shows the change.
+        target: ``"auto"`` (default) edits the library file when the symbol
+            resolves there, falling back to the schematic-embedded
+            definition.  ``"schematic"`` edits ONLY the embedded copy — used
+            for stock-library symbols, whose .kicad_sym files must never be
+            modified.
 
     Returns:
         List of per-op result dicts::
@@ -1055,10 +1216,46 @@ def apply_symbol_ops(
             {"op": "rename_pin", "ok": True,  "msg": "Pin 3: name 'GND' -> 'PGND'"}
             {"op": "bad_op",     "ok": False, "msg": "Unknown op 'bad_op'. ..."}
 
+        On success, informational entries (op ``"target"`` /
+        ``"sync_schematic"``) are appended describing where the edit landed.
+
     The file is written only when at least one op succeeds.  On success the
     ``load_symbol`` LRU cache is cleared so subsequent reads see the change.
     """
-    path, tree, sym = _locate_symbol(lib_id)
+    sch_files = _schematic_files(schematic_path)
+    embedded = False
+    lib_err: Optional[str] = None
+    path: Optional[Path] = None
+    tree: Optional[list] = None
+    sym: Optional[list] = None
+
+    if target != "schematic":
+        try:
+            path, tree, sym = _locate_symbol(lib_id)
+        except ValueError as exc:
+            lib_err = str(exc)
+
+    if path is None:
+        found = _locate_embedded_symbol(lib_id, sch_files)
+        if found is None:
+            if sch_files:
+                extra = (
+                    "\nAlso searched embedded (lib_symbols ...) definitions "
+                    "in:\n  " + "\n  ".join(str(s) for s in sch_files)
+                )
+            else:
+                extra = (
+                    "\nNo schematic was provided to search for an embedded "
+                    "(lib_symbols ...) definition — pass schematic_path (the "
+                    "open .kicad_sch) if this symbol was added manually in "
+                    "eeschema."
+                )
+            raise ValueError(
+                (lib_err or f"Symbol {lib_id!r} not found in any library.")
+                + extra
+            )
+        path, tree, sym = found
+        embedded = True
 
     results: List[Dict[str, Any]] = []
     for op_dict in ops:
@@ -1077,8 +1274,24 @@ def apply_symbol_ops(
 
     if any(r["ok"] for r in results):
         # Render and write back.
-        out_text = _fmt_sym(tree)
-        path.write_text(out_text, encoding="utf-8")
+        if embedded:
+            path.write_text(_fmt_sch(tree), encoding="utf-8")
+            results.append({
+                "op": "target", "ok": True,
+                "msg": (
+                    f"edit applied to the embedded copy in {path.name} only; "
+                    f"the stock library file was not modified"
+                    if target == "schematic" else
+                    f"edit applied to the symbol definition embedded in "
+                    f"{path.name} (lib_symbols block) — this symbol has no "
+                    f".kicad_sym library file"
+                ),
+            })
+        else:
+            path.write_text(_fmt_sym(tree), encoding="utf-8")
+            for note in _sync_embedded_copies(lib_id, sym, sch_files):
+                results.append({"op": "sync_schematic", "ok": True,
+                                "msg": note})
         # Clear the load_symbol LRU cache so callers see the updated symbol.
         try:
             load_symbol.cache_clear()
