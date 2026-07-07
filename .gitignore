@@ -34,6 +34,9 @@ Thumbs.db
 /*.kicad_pro
 /*.kicad_sch
 
+# Tests (untracked, kept locally)
+tests/
+
 # Snapshots & temp output dumps
 .envil-snapshots/
 /_*out*.txt
