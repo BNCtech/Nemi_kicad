@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import re
 import urllib.request
@@ -51,7 +52,9 @@ Return ONLY valid JSON — no markdown, no explanation:
     {
       "number": "<pin number as string>",
       "name": "<pin name exactly as in datasheet>",
-      "etype": "<power_in|power_out|input|output|bidirectional|passive|no_connect|open_collector|open_emitter|unspecified>"
+      "etype": "<power_in|power_out|input|output|bidirectional|passive|no_connect|open_collector|open_emitter|unspecified>",
+      "side": "<left|right|top|bottom — the edge of the package where THIS pin is physically drawn in the datasheet pinout figure; null only if the datasheet has no package drawing>",
+      "order": "<1-based position of this pin along its side as a string; count left/right sides TOP->BOTTOM and top/bottom sides LEFT->RIGHT; null only if no package drawing>"
     }
   ],
   "package": {
@@ -78,6 +81,18 @@ Rules:
 - Use "bidirectional" for I/O, "passive" for analog with no clear direction.
 - Use "no_connect" for NC or reserved pins.
 - If a pin is both GND and a thermal pad, use "power_in" with name "GND".
+- REPRODUCE THE DATASHEET PINOUT EXACTLY. Find the package pinout figure (the
+  physical top-view drawing, e.g. "Figure N. <PART> <PKG> pinout") and, for
+  each pin, record which edge it sits on ("side") and its position along that
+  edge ("order"). This must match the drawing for THIS exact part number.
+    * left / right edges: order 1 is the TOP-most pin, counting downward.
+    * top / bottom edges: order 1 is the LEFT-most pin, counting rightward.
+- Follow the pin NUMBERS around the package exactly as printed and pair each
+  number with the name on the SAME lead — never shift a name to another lead.
+- Do NOT regroup pins by function or move them to a "nicer" edge; keep every
+  pin on the side and in the order the datasheet drawing shows it.
+- Only if the datasheet has no package drawing at all, set "side"/"order" to
+  null and list pins in numeric order.
 """
 
 
@@ -211,6 +226,48 @@ def _layout_pins_4side(pins: list) -> tuple[list, list, list, list]:
     return left, top, right, bottom
 
 
+def _layout_pins_by_side(pins: list) -> Optional[tuple[list, list, list, list]]:
+    """Place pins exactly where the datasheet package figure draws them.
+
+    Uses each pin's extracted ``side`` (left/right/top/bottom) and ``order``
+    (1-based position along that side) so the generated symbol matches the
+    physical pinout of the specific part number instead of guessing how the
+    numbering wraps around the package.  Returns ``(left, top, right, bottom)``
+    already in KiCad display order, or ``None`` when the datasheet gave no
+    usable side info (caller then falls back to the etype heuristic).
+    """
+    valid = {"left", "right", "top", "bottom"}
+    sided = [p for p in pins if str(p.get("side", "")).lower() in valid]
+    # Need almost every pin to carry a side, else the drawing wasn't really read.
+    if len(sided) < max(4, int(len(pins) * 0.75)):
+        return None
+
+    def _key(p):
+        o = p.get("order")
+        try:
+            return (0, int(str(o)))
+        except (ValueError, TypeError):
+            pass
+        try:                       # fall back to pin number when order missing
+            return (1, int(str(p.get("number"))))
+        except (ValueError, TypeError):
+            return (2, 0)
+
+    buckets: dict = {"left": [], "right": [], "top": [], "bottom": []}
+    for p in pins:
+        s = str(p.get("side", "")).lower()
+        if s not in valid:         # stray sideless pin (e.g. thermal pad)
+            s = "left" if p.get("etype") in _LEFT_ETYPES else "right"
+        buckets[s].append(p)
+    for lst in buckets.values():
+        lst.sort(key=_key)
+
+    # datasheet order already equals KiCad display order:
+    #   left/right: order 1 = top-most   -> index 0 at top  ✓
+    #   top/bottom: order 1 = left-most   -> index 0 at left ✓
+    return buckets["left"], buckets["top"], buckets["right"], buckets["bottom"]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # .kicad_sym generator
 # ─────────────────────────────────────────────────────────────────────────────
@@ -229,7 +286,13 @@ def _gen_sym_content(part_name: str, info: dict) -> str:
 
     four_sided = _is_four_sided(pkg_type)
 
-    if four_sided:
+    # Prefer the datasheet's own physical placement (side + order) so the symbol
+    # matches the exact part number's pinout drawing.  Fall back to the etype
+    # heuristic only when no package figure was available to read sides from.
+    by_side = _layout_pins_by_side(pins)
+    if by_side is not None:
+        left_pins, top_pins, right_pins, bottom_pins = by_side
+    elif four_sided:
         left_pins, top_pins, right_pins, bottom_pins = _layout_pins_4side(pins)
     else:
         left_pins, right_pins = _layout_pins(pins)
@@ -238,8 +301,23 @@ def _gen_sym_content(part_name: str, info: dict) -> str:
     n_lr = max(len(left_pins), len(right_pins), 1)
     n_tb = max(len(top_pins), len(bottom_pins), 0)
 
-    body_h = n_lr * _SPACING + _SPACING
-    body_w = max(_BODY_W, n_tb * _SPACING + _SPACING) if n_tb else _BODY_W
+    # Body must be big enough that opposing pin names don't collide in the
+    # middle.  ~1.1 mm per character is a safe advance width at 1.27 mm font.
+    _CH = 1.1
+
+    def _maxname(lst):
+        return max((len(str(p.get("name", ""))) for p in lst), default=0)
+
+    def _rows(v):  # smallest whole number of 100-mil rows covering v
+        return int(math.ceil(max(v, 0.0) / _SPACING - 1e-9))
+
+    need_w = (_maxname(left_pins) + _maxname(right_pins)) * _CH + 2 * _SPACING
+    need_h = (_maxname(top_pins) + _maxname(bottom_pins)) * _CH + 2 * _SPACING
+
+    n_w = max(_rows(_BODY_W), n_tb + 1, _rows(need_w))
+    n_h = max(n_lr + 1, _rows(need_h))
+    body_w = n_w * _SPACING
+    body_h = n_h * _SPACING
     cx     = body_w / 2.0
 
     # KiCad symbol coords: y=0 at top, y decreases downward
@@ -251,12 +329,14 @@ def _gen_sym_content(part_name: str, info: dict) -> str:
     # Left/right pin tip x
     lx = -_PIN_LEN
     rx = body_w + _PIN_LEN
-    first_y = -_SPACING
+    # centre the left/right rows vertically, staying on the 100-mil grid
+    first_y = -(1 + (n_h - (n_lr + 1)) // 2) * _SPACING
 
     # Top/bottom pin tip y (stubs point inward toward body)
-    ty   = +_PIN_LEN           # top tips above body (rotation=270 → stub goes down)
+    ty   = +_PIN_LEN            # top tips above body (rotation=270 → stub goes down)
     boty = -(body_h + _PIN_LEN) # bottom tips below body (rotation=90 → stub goes up)
-    first_x = _SPACING         # x of first top/bottom pin
+    # centre the top/bottom rows horizontally, staying on the 100-mil grid
+    first_x = (1 + (n_w - (n_tb + 1)) // 2) * _SPACING  # x of first top/bottom pin
 
     L = []
 
